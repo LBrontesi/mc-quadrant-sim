@@ -7,232 +7,268 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
   <header class="app-header">
-    <div>
-      <h1>Four-Quadrant Monte Carlo Simulator</h1>
-      <p class="subtitle">Goldilocks, Overheating, Stagflation, Recession - regime-based portfolio simulation.</p>
+    <div class="brand">
+      <div class="brand-mark">MC</div>
+      <div>
+        <h1>Four-Quadrant Monte Carlo Simulator</h1>
+        <p class="subtitle">Goldilocks · Overheating · Stagflation · Recession — regime-based portfolio simulation</p>
+      </div>
     </div>
     <div id="connection" class="badge badge-muted">connecting...</div>
   </header>
 
   <div class="layout">
-    <aside class="panel" id="controls">
+    <aside class="panel panel-side" id="controls">
       <section class="control-group">
-        <h2>Data source</h2>
-        <div class="radio-row" id="source-radios">
-          <label><input type="radio" name="source" value="demo" checked> Demo</label>
-          <label><input type="radio" name="source" value="yahoo"> Yahoo Finance</label>
-          <label><input type="radio" name="source" value="csv"> CSV upload</label>
-        </div>
+        <details open>
+          <summary>Data source</summary>
+          <div class="radio-row" id="source-radios">
+            <label class="pill"><input type="radio" name="source" value="demo" checked> Demo</label>
+            <label class="pill"><input type="radio" name="source" value="yahoo"> Yahoo</label>
+            <label class="pill"><input type="radio" name="source" value="csv"> CSV</label>
+          </div>
 
-        <div class="group demo-group" id="demo-group">
-          <label>Demo seed <input type="number" id="demo-seed" value="42" min="1" step="1"></label>
-        </div>
+          <div class="group demo-group" id="demo-group">
+            <label>Demo seed <input type="number" id="demo-seed" value="42" min="1" step="1"></label>
+          </div>
 
-        <div class="group yahoo-group hidden" id="yahoo-group">
-          <label>Market tickers
-            <textarea id="yahoo-tickers" rows="2">SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY</textarea>
-          </label>
+          <div class="group yahoo-group hidden" id="yahoo-group">
+            <label>Market tickers
+              <textarea id="yahoo-tickers" rows="2">SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY</textarea>
+            </label>
+            <div class="two-col">
+              <label>Start <input type="date" id="yahoo-start" value="1990-01-01"></label>
+              <label>End <input type="date" id="yahoo-end"></label>
+            </div>
+            <label>Historical proxies (optional)
+              <input type="text" id="yahoo-proxies" placeholder="SPY:^GSPC, GLD:GC=F">
+              <span class="hint">ASSET:PROXY pairs, levels are scaled during the overlap.</span>
+            </label>
+            <fieldset>
+              <legend>Synthetic backfill assets</legend>
+              <div id="synthetic-options" class="check-list"></div>
+              <label>Synthetic history seed <input type="number" id="synthetic-seed" value="42" min="1" step="1"></label>
+              <span class="hint">Selecting an asset adds its live ticker and creates *_SIM and *SIM series.</span>
+            </fieldset>
+          </div>
+
+          <div class="group csv-group hidden" id="csv-group">
+            <label>Asset CSV <input type="file" id="csv-prices" accept=".csv"></label>
+            <label>Macro CSV <input type="file" id="csv-macro" accept=".csv"></label>
+            <div class="radio-row">
+              <label class="pill"><input type="radio" name="asset-input" value="Price levels" checked> Price levels</label>
+              <label class="pill"><input type="radio" name="asset-input" value="Returns"> Returns</label>
+            </div>
+            <label class="check-inline"><input type="checkbox" id="csv-monthly" checked> Monthly asset returns</label>
+            <div class="two-col">
+              <label>Growth column <input type="text" id="csv-growth" value="growth"></label>
+              <label>Inflation column <input type="text" id="csv-inflation" value="inflation"></label>
+            </div>
+          </div>
+
+          <button id="load-btn" class="btn btn-primary btn-block">Load Data</button>
+          <p id="load-message" class="status"></p>
+        </details>
+      </section>
+
+      <section class="control-group">
+        <details open>
+          <summary>Currency &amp; correlations</summary>
           <div class="two-col">
-            <label>Start <input type="date" id="yahoo-start" value="1990-01-01"></label>
-            <label>End <input type="date" id="yahoo-end"></label>
+            <label>Portfolio currency
+              <input type="text" id="base-currency" value="USD" maxlength="3">
+            </label>
+            <label>Blend
+              <input type="number" id="corr-blend" value="0.4" min="0" max="1" step="0.05">
+            </label>
           </div>
-          <label>Historical proxies (optional)
-            <input type="text" id="yahoo-proxies" placeholder="SPY:^GSPC, GLD:GC=F">
-            <span class="hint">ASSET:PROXY pairs, levels are scaled during the overlap.</span>
+          <label>Asset currencies (optional)
+            <input type="text" id="currency-map" placeholder="EFA:EUR">
+            <span class="hint">ASSET:CURRENCY pairs; unspecified assets are treated as USD.</span>
           </label>
-          <fieldset>
-            <legend>Synthetic backfill assets</legend>
-            <div id="synthetic-options" class="check-list"></div>
-            <label>Synthetic history seed <input type="number" id="synthetic-seed" value="42" min="1" step="1"></label>
-            <span class="hint">Selecting an asset adds its live ticker and creates *_SIM and *SIM series.</span>
-          </fieldset>
-        </div>
+          <label class="check-inline"><input type="checkbox" id="use-corr-override" checked> Blend custom correlation view</label>
+          <div id="corr-sliders"></div>
+          <span class="hint">Applies to the first two selected tickers.</span>
+        </details>
+      </section>
 
-        <div class="group csv-group hidden" id="csv-group">
-          <label>Asset CSV <input type="file" id="csv-prices" accept=".csv"></label>
-          <label>Macro CSV <input type="file" id="csv-macro" accept=".csv"></label>
-          <div class="radio-row">
-            <label><input type="radio" name="asset-input" value="Price levels" checked> Price levels</label>
-            <label><input type="radio" name="asset-input" value="Returns"> Returns</label>
-          </div>
-          <label><input type="checkbox" id="csv-monthly" checked> Monthly asset returns</label>
+      <section class="control-group">
+        <details>
+          <summary>Calibration</summary>
           <div class="two-col">
-            <label>Growth column <input type="text" id="csv-growth" value="growth"></label>
-            <label>Inflation column <input type="text" id="csv-inflation" value="inflation"></label>
+            <label>Growth threshold
+              <select id="growth-threshold">
+                <option value="median" selected>median</option>
+                <option value="mean">mean</option>
+                <option value="fixed">fixed</option>
+              </select>
+            </label>
+            <label>Growth value <input type="number" id="growth-fixed" value="0" step="0.25"></label>
           </div>
-        </div>
-
-        <button id="load-btn" class="primary">Load Data</button>
-        <p id="load-message" class="status"></p>
-      </section>
-
-      <section class="control-group">
-        <h2>Currency</h2>
-        <label>Portfolio currency (ISO)
-          <input type="text" id="base-currency" value="USD" maxlength="3" class="short">
-        </label>
-        <label>Asset currencies (optional)
-          <input type="text" id="currency-map" placeholder="EFA:EUR">
-          <span class="hint">ASSET:CURRENCY pairs; unspecified assets are treated as USD.</span>
-        </label>
-      </section>
-
-      <section class="control-group">
-        <h2>Correlation overrides</h2>
-        <label><input type="checkbox" id="use-corr-override" checked> Blend custom correlation view</label>
-        <label>View blend
-          <input type="number" id="corr-blend" value="0.4" min="0" max="1" step="0.05" class="short">
-        </label>
-        <div id="corr-sliders"></div>
-        <span class="hint">Applies to the first two selected tickers.</span>
-      </section>
-
-      <section class="control-group">
-        <h2>Calibration</h2>
-        <div class="two-col">
-          <label>Growth threshold
-            <select id="growth-threshold">
-              <option value="median" selected>median</option>
-              <option value="mean">mean</option>
-              <option value="fixed">fixed</option>
+          <div class="two-col">
+            <label>Inflation threshold
+              <select id="inflation-threshold">
+                <option value="median" selected>median</option>
+                <option value="mean">mean</option>
+                <option value="fixed">fixed</option>
+              </select>
+            </label>
+            <label>Inflation value <input type="number" id="inflation-fixed" value="3" step="0.25"></label>
+          </div>
+          <label>Macro release lag
+            <select id="macro-lag">
+              <option value="0">0</option>
+              <option value="1" selected>1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
             </select>
           </label>
-          <label>Growth fixed value <input type="number" id="growth-fixed" value="0" step="0.25" class="short"></label>
-        </div>
-        <div class="two-col">
-          <label>Inflation threshold
-            <select id="inflation-threshold">
-              <option value="median" selected>median</option>
-              <option value="mean">mean</option>
-              <option value="fixed">fixed</option>
-            </select>
+          <label>Transition uncertainty
+            <input type="range" id="transition-uncertainty" min="0" max="1" step="0.05" value="0">
+            <output id="transition-uncertainty-output">0.00</output>
+            <span class="hint">0 uses the calibrated matrix; higher values sample more uncertain transitions.</span>
           </label>
-          <label>Inflation fixed value <input type="number" id="inflation-fixed" value="3" step="0.25" class="short"></label>
-        </div>
-        <label>Macro release lag (periods)
-          <select id="macro-lag">
-            <option value="0">0</option>
-            <option value="1" selected>1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-          </select>
-        </label>
-        <label>Transition uncertainty
-          <input type="range" id="transition-uncertainty" min="0" max="1" step="0.05" value="0">
-          <output id="transition-uncertainty-output">0.00</output>
-          <span class="hint">0 uses the calibrated matrix; higher values sample more uncertain transitions.</span>
-        </label>
+        </details>
       </section>
 
       <section class="control-group">
-        <h2>Simulation</h2>
-        <div class="two-col">
-          <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12"></label>
-          <label>Paths <input type="number" id="paths" value="3000" min="250" max="20000" step="250"></label>
-        </div>
-        <div class="two-col">
-          <label>Random seed <input type="number" id="seed" value="7" min="1" step="1" class="short"></label>
-          <label>Start state
-            <select id="start-state">
-              <option value="Stationary" selected>Stationary</option>
+        <details>
+          <summary>Simulation</summary>
+          <div class="two-col">
+            <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12"></label>
+            <label>Paths <input type="number" id="paths" value="3000" min="250" max="20000" step="250"></label>
+          </div>
+          <div class="two-col">
+            <label>Random seed <input type="number" id="seed" value="7" min="1" step="1"></label>
+            <label>Start state
+              <select id="start-state">
+                <option value="Stationary" selected>Stationary</option>
+              </select>
+            </label>
+          </div>
+          <label>Return distribution
+            <select id="distribution">
+              <option value="normal" selected>Normal</option>
+              <option value="student_t">Student-t</option>
+              <option value="bootstrap">Historical bootstrap</option>
+              <option value="block_bootstrap">Block bootstrap</option>
             </select>
           </label>
-        </div>
-        <label>Return distribution
-          <select id="distribution">
-            <option value="normal" selected>Normal</option>
-            <option value="student_t">Student-t</option>
-            <option value="bootstrap">Historical bootstrap</option>
-            <option value="block_bootstrap">Block bootstrap</option>
-          </select>
-        </label>
-        <div class="two-col" id="distribution-params">
-          <label>Student-t dof <input type="number" id="degrees-of-freedom" value="5" min="3" max="30" step="1"></label>
-          <label>Block size <input type="number" id="block-size" value="3" min="2" max="12" step="1"></label>
-        </div>
-        <div class="two-col">
-          <label>Rebalancing
-            <select id="rebalance">
-              <option value="monthly" selected>Monthly</option>
-              <option value="quarterly">Quarterly</option>
-              <option value="annual">Annual</option>
-              <option value="legacy">Weighted log (legacy)</option>
-            </select>
-          </label>
-          <label>Cost (bps) <input type="number" id="cost-bps" value="10" min="0" max="100" step="1"></label>
-        </div>
+          <div class="two-col" id="distribution-params">
+            <label>Student-t dof <input type="number" id="degrees-of-freedom" value="5" min="3" max="30" step="1"></label>
+            <label>Block size <input type="number" id="block-size" value="3" min="2" max="12" step="1"></label>
+          </div>
+          <div class="two-col">
+            <label>Rebalancing
+              <select id="rebalance">
+                <option value="monthly" selected>Monthly</option>
+                <option value="quarterly">Quarterly</option>
+                <option value="annual">Annual</option>
+                <option value="legacy">Weighted log (legacy)</option>
+              </select>
+            </label>
+            <label>Cost (bps) <input type="number" id="cost-bps" value="10" min="0" max="100" step="1"></label>
+          </div>
+        </details>
       </section>
 
       <section class="control-group">
-        <h2>Portfolio</h2>
-        <p class="status" id="portfolio-status">Load data to select tickers.</p>
-        <div id="ticker-list" class="check-list"></div>
-        <div id="weight-editor"></div>
-        <p id="weight-total" class="status"></p>
+        <details open>
+          <summary>Portfolio</summary>
+          <p class="status" id="portfolio-status">Load data to select tickers.</p>
+          <div id="ticker-list" class="check-list"></div>
+          <div id="weight-editor"></div>
+          <p id="weight-total" class="status"></p>
+        </details>
       </section>
 
-      <button id="run-btn" class="primary" disabled>Run Simulation</button>
-      <button id="compare-btn" disabled>Compare Normal vs Student-t</button>
+      <button id="run-btn" class="btn btn-primary btn-block btn-lg" disabled>Run Simulation</button>
+      <button id="compare-btn" class="btn btn-block" disabled>Compare Normal vs Student-t</button>
       <p id="run-message" class="status"></p>
     </aside>
 
-    <main class="panel" id="results">
-      <div id="intro" class="empty-state">
-        <h2>Load data and run a simulation to see results.</h2>
-        <p>Choose Demo for offline synthetic history, Yahoo Finance for real data (with optional proxies and synthetic backfills), or upload your own CSVs.</p>
+    <main class="panel panel-main" id="results">
+      <div class="tabs" id="result-tabs">
+        <button class="tab-btn active" data-tab="tab-results">Results</button>
+        <button class="tab-btn" data-tab="tab-diagnostics">Diagnostics</button>
+        <button class="tab-btn" data-tab="tab-data">Data</button>
       </div>
 
-      <div id="results-content" class="hidden">
-        <section class="metric-grid" id="metric-grid"></section>
-        <p class="caption" id="risk-caption"></p>
-        <p class="caption" id="performance-caption"></p>
-
-        <div class="chart-grid">
-          <div class="card"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
-          <div class="card"><h3>Terminal Wealth Distribution</h3><div class="chart" id="chart-terminal"></div></div>
-          <div class="card"><h3>Simulated Regime Mix</h3><div class="chart" id="chart-regime-mix"></div></div>
-          <div class="card"><h3>Macro Quadrants</h3><div class="chart" id="chart-macro"></div></div>
-          <div class="card"><h3>Transition Matrix</h3><div class="chart" id="chart-transition"></div></div>
-          <div class="card"><h3>Historical Observations</h3><div class="chart" id="chart-observations"></div></div>
-          <div class="card">
-            <h3>Correlation Matrix <select id="correlation-regime"></select></h3>
-            <div class="chart" id="chart-correlation"></div>
+      <div id="tab-results" class="tab-panel active">
+        <div id="intro" class="empty-state">
+          <h2>Welcome to the Four-Quadrant Simulator</h2>
+          <p>Choose <strong>Demo</strong> for offline synthetic history, <strong>Yahoo</strong> for real data (with optional proxies and synthetic backfills), or upload your own <strong>CSVs</strong>.</p>
+          <p>1. Load data &nbsp;·&nbsp; 2. Select tickers and weights &nbsp;·&nbsp; 3. Run the simulation</p>
+        </div>
+        <div id="results-content" class="hidden">
+          <div class="metric-grid" id="metric-grid"></div>
+          <p class="caption" id="risk-caption"></p>
+          <p class="caption" id="performance-caption"></p>
+          <div class="chart-grid">
+            <div class="card"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
+            <div class="card"><h3>Terminal Wealth Distribution</h3><div class="chart" id="chart-terminal"></div></div>
+            <div class="card"><h3>Simulated Regime Mix</h3><div class="chart" id="chart-regime-mix"></div></div>
+            <div class="card"><h3>Macro Quadrants</h3><div class="chart" id="chart-macro"></div></div>
+            <div class="card"><h3>Transition Matrix</h3><div class="chart" id="chart-transition"></div></div>
+            <div class="card"><h3>Historical Observations</h3><div class="chart" id="chart-observations"></div></div>
+            <div class="card card-wide">
+              <h3>Correlation Matrix <select id="correlation-regime"></select></h3>
+              <div class="chart" id="chart-correlation"></div>
+            </div>
           </div>
         </div>
+      </div>
 
-        <section class="card">
-          <h3>Calibration Diagnostics</h3>
-          <div class="table-wrap" id="diagnostics-table"></div>
-          <p class="warning" id="warnings-box"></p>
-        </section>
+      <div id="tab-diagnostics" class="tab-panel">
+        <div id="diagnostics-empty" class="empty-state">Run a simulation to see calibration diagnostics.</div>
+        <div id="diagnostics-content" class="hidden">
+          <section class="card">
+            <h3>Calibration Diagnostics</h3>
+            <div class="table-wrap" id="diagnostics-table"></div>
+            <p class="warning" id="warnings-box"></p>
+          </section>
+          <section class="card">
+            <h3>Scenario Comparison</h3>
+            <div class="table-wrap" id="comparison-table"></div>
+          </section>
+        </div>
+      </div>
 
-        <section class="card">
-          <h3>Scenario Comparison</h3>
-          <div class="table-wrap" id="comparison-table"></div>
-        </section>
-
-        <section class="card">
-          <h3>Data Preview</h3>
-          <div class="two-col-table">
-            <div>
-              <h4>Macro</h4>
-              <div class="table-wrap" id="macro-preview"></div>
+      <div id="tab-data" class="tab-panel">
+        <div id="data-empty" class="empty-state">Load data to preview it here.</div>
+        <div id="data-content" class="hidden">
+          <section class="card">
+            <h3>Data Preview</h3>
+            <div class="two-col-table">
+              <div>
+                <h4>Macro</h4>
+                <div class="table-wrap" id="macro-preview"></div>
+              </div>
+              <div>
+                <h4>Returns</h4>
+                <div class="table-wrap" id="returns-preview"></div>
+              </div>
             </div>
-            <div>
-              <h4>Returns</h4>
-              <div class="table-wrap" id="returns-preview"></div>
-            </div>
-          </div>
-        </section>
-
-        <section class="card actions">
-          <button id="download-summary">Download risk summary</button>
-          <button id="download-diagnostics">Download diagnostics</button>
-        </section>
+          </section>
+          <section class="card actions">
+            <button id="download-summary" class="btn">Download risk summary</button>
+            <button id="download-diagnostics" class="btn">Download diagnostics</button>
+          </section>
+        </div>
       </div>
     </main>
   </div>
+
+  <div id="overlay" class="overlay hidden">
+    <div class="spinner"></div>
+    <div id="overlay-text">Working...</div>
+  </div>
+  <div id="toast-container"></div>
+
   <script src="app.js"></script>
 </body>
 </html>
