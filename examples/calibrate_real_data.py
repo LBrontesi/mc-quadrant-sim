@@ -16,7 +16,7 @@ from mc_quadrants.simulation import simulate_portfolio_paths, simulate_returns, 
 
 
 def main() -> None:
-    tickers = ["SPY", "IEF", "GLD", "DBC"]
+    tickers = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
     prices = fetch_yahoo_prices(tickers, start="2006-01-01")
     returns = prices_to_returns(prices, method="log").resample("ME").sum().dropna()
 
@@ -61,7 +61,16 @@ def main() -> None:
     )
     wealth = simulate_portfolio_paths(
         result,
-        weights={"SPY": 0.55, "IEF": 0.30, "GLD": 0.10, "DBC": 0.05},
+        weights={
+            "SPY": 0.40,
+            "IEF": 0.20,
+            "GLD": 0.10,
+            "DBC": 0.10,
+            "EFA": 0.10,
+            "VNQ": 0.05,
+            "TIP": 0.03,
+            "SHY": 0.02,
+        },
         rebalance_frequency=1,
         transaction_cost_bps=10,
     )

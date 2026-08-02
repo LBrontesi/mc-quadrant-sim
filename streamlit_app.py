@@ -46,9 +46,13 @@ DEMO_TICKERS = {
     "Bonds": "IEF",
     "Gold": "GLD",
     "Commodities": "DBC",
+    "International Stocks": "EFA",
+    "Real Estate": "VNQ",
+    "TIPS": "TIP",
+    "Short Treasuries": "SHY",
 }
 
-DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC"]
+DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
 
 
 st.set_page_config(
@@ -95,10 +99,14 @@ def threshold_control(label: str, key: str) -> str | float:
 
 def default_weight(asset: str, assets: list[str]) -> float:
     defaults = {
-        "SPY": 55.0,
-        "IEF": 30.0,
+        "SPY": 40.0,
+        "IEF": 20.0,
         "GLD": 10.0,
-        "DBC": 5.0,
+        "DBC": 10.0,
+        "EFA": 10.0,
+        "VNQ": 5.0,
+        "TIP": 3.0,
+        "SHY": 2.0,
     }
     return defaults.get(asset, round(100.0 / max(len(assets), 1), 2))
 
@@ -126,17 +134,35 @@ def parse_tickers(raw_tickers: str) -> list[str]:
     return parsed
 
 
+def parse_proxy_map(raw_proxies: str) -> dict[str, str]:
+    """Parse ``ASSET:PROXY`` pairs used to extend pre-inception history."""
+
+    parsed: dict[str, str] = {}
+    for pair in re.split(r"[,;\s]+", raw_proxies.strip().upper()):
+        if not pair:
+            continue
+        if ":" not in pair:
+            raise ValueError(f"Invalid proxy '{pair}'. Use ASSET:PROXY.")
+        asset, proxy = pair.split(":", 1)
+        if not asset or not proxy:
+            raise ValueError(f"Invalid proxy '{pair}'. Use ASSET:PROXY.")
+        parsed[asset] = proxy
+    return parsed
+
+
 @st.cache_data(ttl=3_600, show_spinner=False)
 def load_market_data(
     tickers: tuple[str, ...],
     start: date,
     end: date,
+    historical_proxies: tuple[tuple[str, str], ...] = (),
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
     """Load market prices plus FRED industrial production and CPI macro inputs."""
     macro, returns, available = load_market_data_shared(
         tickers,
         start=start.isoformat(),
         end=end.isoformat(),
+        historical_proxies=dict(historical_proxies),
     )
     return macro, returns, tuple(available)
 
@@ -257,23 +283,34 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
     if source == "Yahoo Finance":
         ticker_text = st.sidebar.text_area(
             "Market tickers",
-            value="SPY, IEF, GLD, DBC",
-            help="Use Yahoo Finance symbols separated by commas or spaces, for example SPY, TLT, GLD, BTC-USD.",
+            value="SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY",
+            help="Use Yahoo Finance symbols separated by commas or spaces.",
+        )
+        proxy_text = st.sidebar.text_input(
+            "Historical proxies (optional)",
+            value="",
+            help="Use ASSET:PROXY pairs, for example SPY:^GSPC, GLD:GC=F. Proxy levels are scaled to the asset during the overlap.",
         )
         tickers = parse_tickers(ticker_text)
         if not tickers:
             st.error("Enter at least one Yahoo Finance ticker.")
             st.stop()
 
-        start = st.sidebar.date_input("History start", value=date(2005, 1, 1))
+        start = st.sidebar.date_input("History start", value=date(1990, 1, 1))
         end = st.sidebar.date_input("History end", value=date.today())
         if end <= start:
             st.error("History end must be after history start.")
             st.stop()
 
         try:
+            historical_proxies = parse_proxy_map(proxy_text)
             with st.spinner("Downloading prices and macro data..."):
-                macro, returns, available = load_market_data(tuple(tickers), start, end)
+                macro, returns, available = load_market_data(
+                    tuple(tickers),
+                    start,
+                    end,
+                    tuple(historical_proxies.items()),
+                )
         except (ImportError, ValueError, RuntimeError) as exc:
             st.error(f"Could not load market data: {exc}")
             st.stop()

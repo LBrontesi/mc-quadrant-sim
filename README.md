@@ -27,6 +27,12 @@ path, aggregated to monthly frequency. FRED industrial production and CPI are
 converted to year-over-year percentage changes. Uploaded macro CSVs are assumed
 to already contain the growth and inflation measures selected by the user.
 
+Yahoo Finance inputs can optionally use historical proxy tickers to extend an
+asset before its inception. A proxy is level-scaled at the last overlapping
+observation and only fills missing primary prices; it never overwrites primary
+history. Proxy returns are therefore an explicit approximation, not a claim
+that the ETF existed earlier.
+
 Macro observations are classified before they are joined to asset returns. The
 dashboard defaults to a one-period macro release lag: a macro regime observed
 at period `t` is used for asset returns beginning at `t + 1`. Remaining dates
@@ -150,7 +156,8 @@ mcq-demo
 ```
 
 The demo uses synthetic history so it runs offline, but it exercises the same
-calibration and simulation pipeline used for real data.
+calibration and simulation pipeline used for real data. It includes eight asset
+classes and 420 monthly observations from January 1990 through December 2024.
 
 ## Run The Streamlit Dashboard
 
@@ -162,7 +169,8 @@ streamlit run streamlit_app.py
 The dashboard starts with the same offline demo data and can also calibrate from
 uploaded CSV files. Asset selection is ticker-based: choose the tickers in the
 sidebar, then enter weights only for those selected tickers before running the
-simulation.
+simulation. Yahoo Finance mode starts at 1990 by default and accepts optional
+proxy pairs such as `SPY:^GSPC, GLD:GC=F`.
 
 ## Run The Gradio App
 
@@ -175,8 +183,8 @@ The Gradio app supports the offline demo, Yahoo Finance/FRED downloads, and
 uploaded asset and macro CSVs. Uploading a macro CSV populates the growth and
 inflation column selectors from its headers. It also exposes release-lag
 handling, Gaussian/Student-t/bootstrap sampling, transition uncertainty,
-rebalancing costs, risk metrics, diagnostics, scenario comparison, and CSV
-downloads.
+rebalancing costs, proxy backfills, risk metrics, diagnostics, scenario
+comparison, and CSV downloads.
 
 ## Run With Docker
 
@@ -240,6 +248,9 @@ calibration diagnostics together.
 
 Asset prices can come from Yahoo Finance, Bloomberg, Refinitiv, your broker, or
 flat CSVs. Macro inputs can come from FRED, OECD, World Bank, or internal data.
+When an ETF does not have enough history, use a clearly labeled asset-class
+proxy or upload a total-return history from a data vendor. Proxy backfills
+should not be interpreted as the ETF's actual pre-inception performance.
 
 Reasonable monthly macro choices:
 

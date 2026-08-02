@@ -52,31 +52,50 @@ def _demo_history(seed: int = 42) -> tuple[pd.DataFrame, pd.DataFrame]:
         index=dates,
     )
 
-    assets = ["Stocks", "Bonds", "Gold", "Commodities"]
+    assets = [
+        "Stocks",
+        "Bonds",
+        "Gold",
+        "Commodities",
+        "International Stocks",
+        "Real Estate",
+        "TIPS",
+        "Short Treasuries",
+    ]
     means = {
-        Regime.HIGH_GROWTH_LOW_INFLATION.value: [0.008, 0.003, 0.002, 0.002],
-        Regime.HIGH_GROWTH_HIGH_INFLATION.value: [0.006, -0.003, 0.005, 0.010],
-        Regime.LOW_GROWTH_HIGH_INFLATION.value: [-0.006, -0.002, 0.008, 0.009],
-        Regime.LOW_GROWTH_LOW_INFLATION.value: [-0.008, 0.007, 0.004, -0.004],
+        Regime.HIGH_GROWTH_LOW_INFLATION.value: [0.008, 0.003, 0.002, 0.002, 0.006, 0.006, 0.0025, 0.0015],
+        Regime.HIGH_GROWTH_HIGH_INFLATION.value: [0.006, -0.003, 0.005, 0.010, 0.004, 0.005, 0.0010, 0.0012],
+        Regime.LOW_GROWTH_HIGH_INFLATION.value: [-0.006, -0.002, 0.008, 0.009, -0.005, -0.004, 0.0020, 0.0010],
+        Regime.LOW_GROWTH_LOW_INFLATION.value: [-0.008, 0.007, 0.004, -0.004, -0.008, -0.006, 0.0040, 0.0015],
     }
-    vols = np.array([0.045, 0.018, 0.040, 0.055])
+    vols = np.array([0.045, 0.018, 0.040, 0.055, 0.050, 0.050, 0.025, 0.005])
     stock_bond_corr = {
         Regime.HIGH_GROWTH_LOW_INFLATION.value: -0.10,
         Regime.HIGH_GROWTH_HIGH_INFLATION.value: 0.35,
         Regime.LOW_GROWTH_HIGH_INFLATION.value: 0.25,
         Regime.LOW_GROWTH_LOW_INFLATION.value: -0.45,
     }
+    factor_loadings = np.array(
+        [
+            [0.75, 0.15, 0.10],
+            [0.00, 0.65, 0.10],
+            [0.10, 0.20, 0.65],
+            [0.45, 0.05, 0.35],
+            [0.70, 0.10, 0.10],
+            [0.55, 0.15, 0.25],
+            [0.20, 0.55, 0.20],
+            [0.05, 0.60, 0.05],
+        ]
+    )
+    idiosyncratic_vol = np.array([0.35, 0.35, 0.45, 0.40, 0.40, 0.45, 0.40, 0.35])
 
     rows = []
     for regime in regimes[state_index]:
-        corr = np.array(
-            [
-                [1.00, stock_bond_corr[regime], 0.05, 0.35],
-                [stock_bond_corr[regime], 1.00, 0.10, -0.15],
-                [0.05, 0.10, 1.00, 0.25],
-                [0.35, -0.15, 0.25, 1.00],
-            ]
-        )
+        loadings = factor_loadings.copy()
+        loadings[1, 0] = stock_bond_corr[regime]
+        raw_covariance = loadings @ loadings.T + np.diag(idiosyncratic_vol**2)
+        raw_vols = np.sqrt(np.diag(raw_covariance))
+        corr = raw_covariance / np.outer(raw_vols, raw_vols)
         cov = corr * np.outer(vols, vols)
         rows.append(rng.multivariate_normal(means[regime], cov))
 
@@ -110,7 +129,16 @@ def main() -> None:
     )
     wealth = simulate_portfolio_paths(
         result,
-        weights={"Stocks": 0.55, "Bonds": 0.30, "Gold": 0.10, "Commodities": 0.05},
+        weights={
+            "Stocks": 0.40,
+            "Bonds": 0.20,
+            "Gold": 0.10,
+            "Commodities": 0.10,
+            "International Stocks": 0.10,
+            "Real Estate": 0.05,
+            "TIPS": 0.03,
+            "Short Treasuries": 0.02,
+        },
         rebalance_frequency=1,
         transaction_cost_bps=10,
     )

@@ -48,9 +48,13 @@ DEMO_TICKERS = {
     "Bonds": "IEF",
     "Gold": "GLD",
     "Commodities": "DBC",
+    "International Stocks": "EFA",
+    "Real Estate": "VNQ",
+    "TIPS": "TIP",
+    "Short Treasuries": "SHY",
 }
 
-DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC"]
+DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
 
 REGIME_LABELS = [REGIME_NAMES[state] for state in REGIME_ORDER]
 REGIME_LOOKUP = {REGIME_NAMES[state]: state for state in REGIME_ORDER}
@@ -115,12 +119,32 @@ def parse_tickers(raw_tickers: str) -> list[str]:
     return parsed
 
 
+def parse_proxy_map(raw_proxies: str) -> dict[str, str]:
+    """Parse ``ASSET:PROXY`` pairs used to extend pre-inception history."""
+
+    parsed: dict[str, str] = {}
+    for pair in re.split(r"[,;\s]+", raw_proxies.strip().upper()):
+        if not pair:
+            continue
+        if ":" not in pair:
+            raise ValueError(f"Invalid proxy '{pair}'. Use ASSET:PROXY.")
+        asset, proxy = pair.split(":", 1)
+        if not asset or not proxy:
+            raise ValueError(f"Invalid proxy '{pair}'. Use ASSET:PROXY.")
+        parsed[asset] = proxy
+    return parsed
+
+
 def default_weight(asset: str, assets: list[str]) -> float:
     defaults = {
-        "SPY": 55.0,
-        "IEF": 30.0,
+        "SPY": 40.0,
+        "IEF": 20.0,
         "GLD": 10.0,
-        "DBC": 5.0,
+        "DBC": 10.0,
+        "EFA": 10.0,
+        "VNQ": 5.0,
+        "TIP": 3.0,
+        "SHY": 2.0,
     }
     return defaults.get(asset, round(100.0 / max(len(assets), 1), 2))
 
@@ -360,6 +384,7 @@ def load_data(
     source: str,
     demo_seed: int,
     ticker_text: str,
+    proxy_text: str,
     start_date: str,
     end_date: str,
     prices_file,
@@ -381,11 +406,19 @@ def load_data(
             tickers = parse_tickers(ticker_text)
             if not tickers:
                 raise ValueError("Enter at least one Yahoo Finance ticker.")
-            macro, returns, available = load_market_data(tickers, start_date, end_date)
+            historical_proxies = parse_proxy_map(proxy_text)
+            macro, returns, available = load_market_data(
+                tickers,
+                start_date,
+                end_date,
+                historical_proxies=historical_proxies,
+            )
             unavailable = [t for t in tickers if t not in available]
             msg = f"Loaded {len(available)} tickers from Yahoo Finance."
             if unavailable:
                 msg += f" No usable history for: {', '.join(unavailable)}"
+            if historical_proxies:
+                msg += f" Backfilled proxies: {', '.join(historical_proxies.values())}."
             return macro, returns, available, "growth", "inflation", msg
 
         # CSV upload
@@ -755,11 +788,16 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
 
             with gr.Group(visible=False) as yahoo_group:
                 ticker_text = gr.Textbox(
-                    value="SPY, IEF, GLD, DBC",
+                    value="SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY",
                     label="Market tickers",
                     info="Yahoo Finance symbols separated by commas or spaces.",
                 )
-                start_date = gr.Textbox(value="2005-01-01", label="History start (YYYY-MM-DD)")
+                proxy_text = gr.Textbox(
+                    value="",
+                    label="Historical proxies (optional)",
+                    info="ASSET:PROXY pairs, for example SPY:^GSPC, GLD:GC=F. Proxy levels are scaled during the overlap.",
+                )
+                start_date = gr.Textbox(value="1990-01-01", label="History start (YYYY-MM-DD)")
                 end_date = gr.Textbox(value=date.today().isoformat(), label="History end (YYYY-MM-DD)")
 
             with gr.Group(visible=False) as csv_group:
@@ -1025,12 +1063,12 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
     )
 
     def on_load(
-        source, demo_seed, ticker_text, start_date, end_date,
+        source, demo_seed, ticker_text, proxy_text, start_date, end_date,
         prices_file, macro_file, asset_input, monthly_returns,
         growth_col, inflation_col,
     ):
         macro, returns, tickers, gcol, icol, msg = load_data(
-            source, demo_seed, ticker_text, start_date, end_date,
+            source, demo_seed, ticker_text, proxy_text, start_date, end_date,
             prices_file, macro_file, asset_input, monthly_returns,
             growth_col, inflation_col,
         )
@@ -1052,7 +1090,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
     load_btn.click(
         on_load,
         inputs=[
-            source, demo_seed, ticker_text, start_date, end_date,
+            source, demo_seed, ticker_text, proxy_text, start_date, end_date,
             prices_file, macro_file, asset_input, monthly_returns,
             growth_col, inflation_col,
         ],
