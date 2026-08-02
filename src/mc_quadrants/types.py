@@ -55,6 +55,8 @@ class SimulationResult:
     assets: list[str]
     states: list[str]
     frequency: str
+    distribution: str = "normal"
+    degrees_of_freedom: float | None = None
 
     def returns_frame(self) -> pd.DataFrame:
         periods, paths, _ = self.returns.shape

@@ -100,10 +100,19 @@ def main() -> None:
         },
         override_weight=0.40,
     )
-    result = simulate_returns(model, periods=120, paths=3000, random_seed=7)
+    result = simulate_returns(
+        model,
+        periods=120,
+        paths=3000,
+        random_seed=7,
+        distribution="student_t",
+        degrees_of_freedom=5,
+    )
     wealth = simulate_portfolio_paths(
         result,
         weights={"Stocks": 0.55, "Bonds": 0.30, "Gold": 0.10, "Commodities": 0.05},
+        rebalance_frequency=1,
+        transaction_cost_bps=10,
     )
 
     print("\nTransition matrix")

@@ -1,12 +1,14 @@
 import numpy as np
 import pandas as pd
+import pytest
 
 from mc_quadrants.calibration import calibrate_quadrant_model
 from mc_quadrants.regimes import Regime
 from mc_quadrants.simulation import simulate_portfolio_paths, simulate_returns
+from mc_quadrants.types import SimulationResult
 
 
-def test_calibration_and_simulation_shapes():
+def _calibrated_model():
     dates = pd.date_range("2020-01-31", periods=48, freq="ME")
     macro = pd.DataFrame(
         {
@@ -22,8 +24,7 @@ def test_calibration_and_simulation_shapes():
         },
         index=dates,
     )
-
-    model = calibrate_quadrant_model(
+    return calibrate_quadrant_model(
         returns,
         macro,
         growth_threshold=0.0,
@@ -36,9 +37,70 @@ def test_calibration_and_simulation_shapes():
         override_weight=0.50,
     )
 
+
+def test_calibration_and_simulation_shapes():
+    model = _calibrated_model()
+
     result = simulate_returns(model, periods=6, paths=10, random_seed=1)
     wealth = simulate_portfolio_paths(result, {"Stocks": 0.6, "Bonds": 0.4})
 
     assert result.returns.shape == (6, 10, 2)
     assert result.regimes.shape == (6, 10)
     assert wealth.shape == (6, 10)
+
+
+def test_student_t_sampling_is_reproducible():
+    model = _calibrated_model()
+
+    first = simulate_returns(
+        model,
+        periods=6,
+        paths=10,
+        random_seed=1,
+        distribution="student_t",
+        degrees_of_freedom=5,
+    )
+    second = simulate_returns(
+        model,
+        periods=6,
+        paths=10,
+        random_seed=1,
+        distribution="student_t",
+        degrees_of_freedom=5,
+    )
+
+    assert np.array_equal(first.returns, second.returns)
+    assert first.distribution == "student_t"
+    assert first.degrees_of_freedom == 5.0
+
+    with pytest.raises(ValueError, match="greater than 2"):
+        simulate_returns(model, periods=1, paths=1, distribution="student_t", degrees_of_freedom=2)
+
+
+def test_rebalancing_transaction_costs_reduce_wealth():
+    result = SimulationResult(
+        returns=np.array(
+            [
+                [[0.10, 0.00]],
+                [[0.00, 0.10]],
+            ]
+        ),
+        regimes=np.empty((2, 1), dtype=object),
+        assets=["Stocks", "Bonds"],
+        states=[],
+        frequency="M",
+    )
+
+    without_costs = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        rebalance_frequency=1,
+    )
+    with_costs = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        rebalance_frequency=1,
+        transaction_cost_bps=100,
+    )
+
+    assert with_costs.iloc[-1, 0] < without_costs.iloc[-1, 0]

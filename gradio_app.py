@@ -59,6 +59,16 @@ DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC"]
 
 REGIME_LABELS = [REGIME_NAMES[state] for state in REGIME_ORDER]
 REGIME_LOOKUP = {REGIME_NAMES[state]: state for state in REGIME_ORDER}
+RETURN_DISTRIBUTIONS = {
+    "Normal": "normal",
+    "Student-t": "student_t",
+}
+REBALANCE_FREQUENCIES = {
+    "Weighted log (legacy)": None,
+    "Monthly": 1,
+    "Quarterly": 3,
+    "Annual": 12,
+}
 
 
 def demo_history(seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -469,6 +479,10 @@ def run_simulation(
     corr_high_growth_high_inflation: float = DEFAULT_CORRELATIONS["high_growth_high_inflation"],
     corr_low_growth_high_inflation: float = DEFAULT_CORRELATIONS["low_growth_high_inflation"],
     corr_low_growth_low_inflation: float = DEFAULT_CORRELATIONS["low_growth_low_inflation"],
+    distribution_label: str = "Normal",
+    degrees_of_freedom: float = 5.0,
+    rebalance_frequency_label: str = "Weighted log (legacy)",
+    transaction_cost_bps: float = 0.0,
 ) -> tuple[go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, str, str, str, str, str]:
     """Run the full calibration + simulation pipeline and return all outputs."""
     try:
@@ -485,6 +499,17 @@ def run_simulation(
         paths = int(paths)
         if periods <= 0 or paths <= 0:
             raise ValueError("Periods and paths must be positive.")
+
+        distribution_key = str(distribution_label).strip()
+        distribution = RETURN_DISTRIBUTIONS.get(
+            distribution_key,
+            distribution_key.lower().replace("-", "_"),
+        )
+        if distribution not in {"normal", "student_t"}:
+            raise ValueError("Return distribution must be Normal or Student-t.")
+        if rebalance_frequency_label not in REBALANCE_FREQUENCIES:
+            raise ValueError(f"Unknown rebalancing frequency: {rebalance_frequency_label}")
+        rebalance_frequency = REBALANCE_FREQUENCIES[rebalance_frequency_label]
 
         # Parse thresholds
         growth_thr: str | float = growth_threshold
@@ -552,8 +577,16 @@ def run_simulation(
             paths=paths,
             start_state=start_state,
             random_seed=int(seed),
+            distribution=distribution,
+            degrees_of_freedom=float(degrees_of_freedom),
         )
-        wealth = simulate_portfolio_paths(result, weights=weights, initial_value=100.0)
+        wealth = simulate_portfolio_paths(
+            result,
+            weights=weights,
+            initial_value=100.0,
+            rebalance_frequency=rebalance_frequency,
+            transaction_cost_bps=float(transaction_cost_bps),
+        )
         summary = summarize_terminal_wealth(wealth)
 
         # Build charts
@@ -592,13 +625,20 @@ def run_simulation(
             f"**P95:** {summary['p95']:.2f} | "
             f"**Volatility:** {summary['std']:.2f}"
         )
+        distribution_text = "Student-t" if distribution == "student_t" else "Normal"
+        friction_text = (
+            f"{rebalance_frequency_label}, {float(transaction_cost_bps):.1f} bps"
+            if rebalance_frequency is not None
+            else "Weighted log (no rebalancing)"
+        )
 
         return (
             wealth_fig, terminal_fig, mix_fig,
             transition_fig, scatter_fig, obs_fig, corr_fig,
             transition_text, obs_text, corr_text,
             summary_text,
-            f"Simulation complete: {paths} paths x {periods} periods.",
+            f"Simulation complete: {paths} paths x {periods} periods. "
+            f"Distribution: {distribution_text}. Portfolio: {friction_text}.",
             f"Selected tickers: {', '.join(selected_tickers)}",
         )
 
@@ -679,6 +719,33 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                 ["Stationary"] + REGIME_LABELS,
                 value="Stationary",
                 label="Start state",
+            )
+            return_distribution = gr.Dropdown(
+                choices=list(RETURN_DISTRIBUTIONS),
+                value="Normal",
+                label="Return distribution",
+            )
+            degrees_of_freedom = gr.Slider(
+                3.0,
+                30.0,
+                value=5.0,
+                step=1.0,
+                label="Student-t degrees of freedom",
+                info="Lower values produce heavier tails.",
+                visible=False,
+            )
+            rebalance_frequency = gr.Dropdown(
+                choices=list(REBALANCE_FREQUENCIES),
+                value="Monthly",
+                label="Portfolio rebalancing",
+            )
+            transaction_cost_bps = gr.Slider(
+                0.0,
+                100.0,
+                value=10.0,
+                step=1.0,
+                label="Transaction cost (basis points)",
+                info="Charged on traded notional at each rebalance.",
             )
 
         with gr.Column(scale=2):
@@ -814,6 +881,26 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
         outputs=[demo_group, yahoo_group, csv_group],
     )
 
+    def toggle_student_t(value):
+        return gr.update(visible=value == "Student-t")
+
+    return_distribution.change(
+        toggle_student_t,
+        inputs=[return_distribution],
+        outputs=[degrees_of_freedom],
+    )
+
+    def toggle_transaction_cost(value):
+        if value == "Weighted log (legacy)":
+            return gr.update(value=0.0, interactive=False)
+        return gr.update(interactive=True)
+
+    rebalance_frequency.change(
+        toggle_transaction_cost,
+        inputs=[rebalance_frequency],
+        outputs=[transaction_cost_bps],
+    )
+
     macro_file.change(
         macro_column_updates,
         inputs=[macro_file],
@@ -888,12 +975,14 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
         growth_threshold, inflation_threshold, periods, paths, seed, start_state,
         weights_df, correlation_regime, use_corr_override, correlation_a, correlation_b,
         correlation_weight, corr_hgli, corr_hghi, corr_lghi, corr_lgli,
+        return_distribution, degrees_df, rebalance_label, transaction_cost,
     ):
         return run_simulation(
             macro, returns, selected_tickers, growth_col, inflation_col,
             growth_threshold, inflation_threshold, periods, paths, seed, start_state,
             weights_df, correlation_regime, use_corr_override, correlation_a, correlation_b,
             correlation_weight, corr_hgli, corr_hghi, corr_lghi, corr_lgli,
+            return_distribution, degrees_df, rebalance_label, transaction_cost,
         )
 
     run_btn.click(
@@ -908,6 +997,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
             correlation_blend,
             corr_high_growth_low_inflation, corr_high_growth_high_inflation,
             corr_low_growth_high_inflation, corr_low_growth_low_inflation,
+            return_distribution, degrees_of_freedom, rebalance_frequency, transaction_cost_bps,
         ],
         outputs=[
             wealth_plot, terminal_plot, mix_plot,

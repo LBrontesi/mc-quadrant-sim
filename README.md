@@ -95,10 +95,19 @@ model = calibrate_quadrant_model(
     override_weight=0.50,
 )
 
-result = simulate_returns(model, periods=120, paths=5000, random_seed=7)
+result = simulate_returns(
+    model,
+    periods=120,
+    paths=5000,
+    random_seed=7,
+    distribution="student_t",
+    degrees_of_freedom=5,
+)
 wealth = simulate_portfolio_paths(
     result,
     weights={"SPY": 0.55, "IEF": 0.30, "GLD": 0.10, "DBC": 0.05},
+    rebalance_frequency=1,
+    transaction_cost_bps=10,
     initial_value=100.0,
 )
 print(summarize_terminal_wealth(wealth))
@@ -123,4 +132,5 @@ inflation above 3 percent.
 - Correlations are estimated separately by quadrant.
 - A covariance shrinkage parameter blends each quadrant estimate with the full-sample covariance. This helps when one quadrant has few observations.
 - Correlation overrides are optional. They are useful when history is sparse or when you want to blend empirical estimates with an investment view.
-- The simulator assumes returns are normally distributed within each quadrant. That is a simple baseline; fat tails, bootstrapping, or regime-specific t-distributions would be natural next additions.
+- Returns can be sampled from either a Gaussian or finite-variance Student-t distribution within each quadrant. Lower Student-t degrees of freedom create heavier tails.
+- Portfolio paths can model periodic rebalancing and transaction costs charged on traded notional. The default `rebalance_frequency=None` preserves the original weighted-log behavior.
