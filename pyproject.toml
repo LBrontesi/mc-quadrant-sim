@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mc-quadrant-sim"
+version = "0.1.0"
+description = "Four-quadrant macro regime Monte Carlo simulator with Markov transitions and regime-specific asset correlations."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+app = [
+  "altair>=5.0",
+  "streamlit>=1.36",
+]
+gradio = [
+  "gradio>=4.0",
+  "plotly>=5.0",
+]
+data = [
+  "pandas-datareader>=0.10",
+  "yfinance>=0.2",
+]
+dev = [
+  "pytest>=8.0",
+]
+
+[project.scripts]
+mcq-demo = "mc_quadrants.demo:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mc_quadrants"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

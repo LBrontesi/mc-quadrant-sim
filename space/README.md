@@ -1,0 +1,45 @@
+---
+title: Four-Quadrant Monte Carlo Simulator
+emoji: 📈
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 4.44.1
+app_file: gradio_app.py
+pinned: false
+---
+
+# Four-Quadrant Monte Carlo Simulator
+
+A Monte Carlo simulator built around the classic four macro quadrants:
+
+| Regime | Growth | Inflation | Typical interpretation |
+| --- | --- | --- | --- |
+| `high_growth_low_inflation` | High | Low | Goldilocks / disinflationary expansion |
+| `high_growth_high_inflation` | High | High | Overheating expansion |
+| `low_growth_high_inflation` | Low | High | Stagflation |
+| `low_growth_low_inflation` | Low | Low | Recession / deflationary slowdown |
+
+## Features
+
+- **Demo mode** - runs offline with synthetic data
+- **Yahoo Finance** - fetch real asset prices and FRED macro data
+- **CSV upload** - calibrate from your own data
+- **Markov transition matrix** - estimated from historical regime changes
+- **Regime-specific asset moments** - expected returns, volatility, covariance, and correlation per quadrant
+- **Monte Carlo simulation** - draws regime paths and samples asset returns
+- **Portfolio analysis** - wealth percentiles, terminal distribution, regime mix
+
+## How to use
+
+1. Choose a data source (Demo, Yahoo Finance, or CSV upload)
+2. Select portfolio tickers and set weights
+3. Configure calibration thresholds and simulation parameters
+4. Click **Run Simulation** to see results
+
+## Local development
+
+```bash
+cd mc-quadrant-sim
+python -m pip install -e ".[gradio,data]"
+python gradio_app.py

@@ -1,0 +1,543 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import date, timedelta
+import re
+
+import altair as alt
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from mc_quadrants.calibration import calibrate_quadrant_model
+from mc_quadrants.data import (
+    fetch_fred_macro,
+    fetch_yahoo_prices,
+    prices_to_returns,
+    yoy_change,
+)
+from mc_quadrants.demo import _demo_history
+from mc_quadrants.regimes import REGIME_ORDER, classify_quadrants
+from mc_quadrants.simulation import (
+    simulate_portfolio_paths,
+    simulate_returns,
+    summarize_terminal_wealth,
+)
+
+
+REGIME_NAMES = {
+    "high_growth_low_inflation": "High growth / low inflation",
+    "high_growth_high_inflation": "High growth / high inflation",
+    "low_growth_high_inflation": "Low growth / high inflation",
+    "low_growth_low_inflation": "Low growth / low inflation",
+}
+
+REGIME_COLORS = {
+    "high_growth_low_inflation": "#2f855a",
+    "high_growth_high_inflation": "#d97706",
+    "low_growth_high_inflation": "#c2410c",
+    "low_growth_low_inflation": "#2563eb",
+}
+
+DEFAULT_CORRELATIONS = {
+    "high_growth_low_inflation": -0.10,
+    "high_growth_high_inflation": 0.35,
+    "low_growth_high_inflation": 0.25,
+    "low_growth_low_inflation": -0.40,
+}
+
+DEMO_TICKERS = {
+    "Stocks": "SPY",
+    "Bonds": "IEF",
+    "Gold": "GLD",
+    "Commodities": "DBC",
+}
+
+DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC"]
+
+
+st.set_page_config(
+    page_title="Four-Quadrant Monte Carlo",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+@st.cache_data
+def demo_history(seed: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    macro, returns = _demo_history(seed)
+    return macro, returns.rename(columns=DEMO_TICKERS)
+
+
+def read_uploaded_csv(uploaded_file) -> pd.DataFrame | None:
+    if uploaded_file is None:
+        return None
+
+    data = pd.read_csv(uploaded_file)
+    if "Date" not in data.columns:
+        st.error("CSV files need a Date column.")
+        st.stop()
+
+    data["Date"] = pd.to_datetime(data["Date"])
+    return data.set_index("Date").sort_index()
+
+
+def threshold_control(label: str, key: str) -> str | float:
+    mode = st.sidebar.selectbox(
+        label,
+        ["median", "mean", "fixed"],
+        key=f"{key}_mode",
+    )
+    if mode == "fixed":
+        return st.sidebar.number_input(
+            f"{label} value",
+            value=0.0,
+            step=0.25,
+            key=f"{key}_value",
+        )
+    return mode
+
+
+def default_weight(asset: str, assets: list[str]) -> float:
+    defaults = {
+        "SPY": 55.0,
+        "IEF": 30.0,
+        "GLD": 10.0,
+        "DBC": 5.0,
+    }
+    return defaults.get(asset, round(100.0 / max(len(assets), 1), 2))
+
+
+def normalize_ticker_columns(data: pd.DataFrame) -> pd.DataFrame:
+    normalized = data.copy()
+    normalized.columns = [str(column).strip().upper() for column in normalized.columns]
+    return normalized
+
+
+def default_selected_tickers(tickers: list[str]) -> list[str]:
+    preferred = [ticker for ticker in DEFAULT_TICKER_ORDER if ticker in tickers]
+    if preferred:
+        return preferred
+    return tickers[: min(4, len(tickers))]
+
+
+def parse_tickers(raw_tickers: str) -> list[str]:
+    """Return unique Yahoo Finance tickers from a comma or space-separated field."""
+
+    parsed: list[str] = []
+    for ticker in re.split(r"[,;\s]+", raw_tickers.strip().upper()):
+        if ticker and ticker not in parsed:
+            parsed.append(ticker)
+    return parsed
+
+
+@st.cache_data(ttl=3_600, show_spinner=False)
+def load_market_data(
+    tickers: tuple[str, ...],
+    start: date,
+    end: date,
+) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
+    """Load market prices plus FRED industrial production and CPI macro inputs."""
+
+    prices = normalize_ticker_columns(
+        fetch_yahoo_prices(
+            list(tickers),
+            start=start.isoformat(),
+            end=(end + timedelta(days=1)).isoformat(),
+        )
+    )
+    available = tuple(
+        ticker
+        for ticker in tickers
+        if ticker in prices.columns and prices[ticker].notna().sum() >= 2
+    )
+    if not available:
+        raise ValueError("Yahoo Finance did not return usable price history for these tickers.")
+
+    returns = prices_to_returns(prices.loc[:, list(available)], method="log")
+    returns = returns.resample("ME").sum(min_count=1).dropna(how="all")
+
+    macro_levels = fetch_fred_macro(
+        {"growth": "INDPRO", "inflation": "CPIAUCSL"},
+        start=start.isoformat(),
+        end=end.isoformat(),
+    ).resample("ME").last()
+    macro = yoy_change(macro_levels).dropna(how="any")
+    if macro.empty:
+        raise ValueError("Not enough FRED history to calculate year-over-year growth and inflation.")
+
+    return macro, returns, available
+
+
+def ticker_selector(returns: pd.DataFrame) -> list[str]:
+    tickers = list(returns.dropna(how="all").columns)
+    if not tickers:
+        st.error("No ticker columns were found in the asset data.")
+        st.stop()
+
+    selected = st.sidebar.multiselect(
+        "Portfolio tickers",
+        options=tickers,
+        default=default_selected_tickers(tickers),
+        help="The model will calibrate and simulate only the selected tickers.",
+    )
+    if not selected:
+        st.warning("Select at least one ticker to run the simulation.")
+        st.stop()
+    return selected
+
+
+def matrix_chart(
+    matrix: pd.DataFrame,
+    value_name: str,
+    domain: tuple[float, float],
+    scheme: str,
+    height: int = 320,
+) -> alt.Chart:
+    chart_data = (
+        matrix.reset_index(names="from")
+        .melt(id_vars="from", var_name="to", value_name=value_name)
+        .replace({"from": REGIME_NAMES, "to": REGIME_NAMES})
+    )
+    base = (
+        alt.Chart(chart_data)
+        .mark_rect()
+        .encode(
+            x=alt.X("to:N", title=None, sort=None),
+            y=alt.Y("from:N", title=None, sort=None),
+            color=alt.Color(
+                f"{value_name}:Q",
+                scale=alt.Scale(domain=list(domain), scheme=scheme),
+                title=value_name.replace("_", " ").title(),
+            ),
+            tooltip=[
+                alt.Tooltip("from:N", title="From"),
+                alt.Tooltip("to:N", title="To"),
+                alt.Tooltip(f"{value_name}:Q", title="Value", format=".3f"),
+            ],
+        )
+    )
+    labels = (
+        alt.Chart(chart_data)
+        .mark_text(fontSize=12)
+        .encode(
+            x=alt.X("to:N", sort=None),
+            y=alt.Y("from:N", sort=None),
+            text=alt.Text(f"{value_name}:Q", format=".2f"),
+            color=alt.condition(
+                alt.datum[value_name] > (domain[0] + domain[1]) / 2,
+                alt.value("white"),
+                alt.value("#111827"),
+            ),
+        )
+    )
+    return (base + labels).properties(height=height)
+
+
+def correlation_overrides(
+    assets: list[str],
+) -> tuple[Mapping[str, Mapping[tuple[str, str], float]] | None, float]:
+    if len(assets) < 2:
+        return None, 0.0
+
+    use_override = st.sidebar.toggle("Blend custom correlation", value=True)
+    if not use_override:
+        return None, 0.0
+
+    default_a = "SPY" if "SPY" in assets else assets[0]
+    default_b = "IEF" if "IEF" in assets else assets[min(1, len(assets) - 1)]
+    asset_a = st.sidebar.selectbox("First ticker", assets, index=assets.index(default_a))
+    asset_b_options = [asset for asset in assets if asset != asset_a]
+    asset_b = st.sidebar.selectbox(
+        "Second ticker",
+        asset_b_options,
+        index=asset_b_options.index(default_b) if default_b in asset_b_options else 0,
+    )
+    weight = st.sidebar.slider("View blend", 0.0, 1.0, 0.40, 0.05)
+
+    overrides: dict[str, dict[tuple[str, str], float]] = {}
+    for state in REGIME_ORDER:
+        value = st.sidebar.slider(
+            REGIME_NAMES[state],
+            -1.0,
+            1.0,
+            float(DEFAULT_CORRELATIONS[state]),
+            0.05,
+            key=f"corr_{state}",
+        )
+        overrides[state] = {(asset_a, asset_b): value}
+
+    return overrides, weight
+
+
+def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
+    source = st.sidebar.radio(
+        "Data source",
+        ["Demo", "Yahoo Finance", "CSV upload"],
+        horizontal=True,
+    )
+
+    if source == "Demo":
+        seed = st.sidebar.number_input("Demo seed", value=42, min_value=1, step=1)
+        macro, returns = demo_history(int(seed))
+        return macro, normalize_ticker_columns(returns), "growth", "inflation"
+
+    if source == "Yahoo Finance":
+        ticker_text = st.sidebar.text_area(
+            "Market tickers",
+            value="SPY, IEF, GLD, DBC",
+            help="Use Yahoo Finance symbols separated by commas or spaces, for example SPY, TLT, GLD, BTC-USD.",
+        )
+        tickers = parse_tickers(ticker_text)
+        if not tickers:
+            st.error("Enter at least one Yahoo Finance ticker.")
+            st.stop()
+
+        start = st.sidebar.date_input("History start", value=date(2005, 1, 1))
+        end = st.sidebar.date_input("History end", value=date.today())
+        if end <= start:
+            st.error("History end must be after history start.")
+            st.stop()
+
+        try:
+            with st.spinner("Downloading prices and macro data..."):
+                macro, returns, available = load_market_data(tuple(tickers), start, end)
+        except (ImportError, ValueError, RuntimeError) as exc:
+            st.error(f"Could not load market data: {exc}")
+            st.stop()
+
+        unavailable = [ticker for ticker in tickers if ticker not in available]
+        if unavailable:
+            st.warning(f"No usable price history was returned for: {', '.join(unavailable)}")
+        return macro, returns, "growth", "inflation"
+
+    prices_file = st.sidebar.file_uploader("Asset CSV", type="csv")
+    macro_file = st.sidebar.file_uploader("Macro CSV", type="csv")
+    asset_data = read_uploaded_csv(prices_file)
+    macro = read_uploaded_csv(macro_file)
+
+    if asset_data is None or macro is None:
+        st.info("Upload an asset CSV and macro CSV to calibrate from your own data.")
+        st.stop()
+
+    asset_input = st.sidebar.selectbox("Asset CSV values", ["Price levels", "Returns"])
+    if asset_input == "Price levels":
+        returns = prices_to_returns(asset_data, method="log")
+    else:
+        returns = asset_data.astype(float)
+
+    if st.sidebar.toggle("Monthly asset returns", value=True):
+        returns = returns.resample("ME").sum()
+    macro = macro.resample("ME").last()
+    returns = normalize_ticker_columns(returns)
+
+    growth_col = st.sidebar.selectbox("Growth column", list(macro.columns))
+    inflation_options = [col for col in macro.columns if col != growth_col]
+    inflation_col = st.sidebar.selectbox(
+        "Inflation column",
+        inflation_options or list(macro.columns),
+    )
+    return macro, returns, growth_col, inflation_col
+
+
+def macro_scatter(
+    macro: pd.DataFrame,
+    regimes: pd.Series,
+    growth_col: str,
+    inflation_col: str,
+) -> alt.Chart:
+    data = macro[[growth_col, inflation_col]].copy()
+    data["regime"] = regimes.map(REGIME_NAMES)
+    data["date"] = data.index.astype(str)
+    colors = [REGIME_COLORS[state] for state in REGIME_ORDER]
+    labels = [REGIME_NAMES[state] for state in REGIME_ORDER]
+
+    return (
+        alt.Chart(data.dropna())
+        .mark_circle(size=58, opacity=0.72)
+        .encode(
+            x=alt.X(f"{growth_col}:Q", title="Growth"),
+            y=alt.Y(f"{inflation_col}:Q", title="Inflation"),
+            color=alt.Color(
+                "regime:N",
+                scale=alt.Scale(domain=labels, range=colors),
+                title="Regime",
+            ),
+            tooltip=[
+                alt.Tooltip("date:N", title="Date"),
+                alt.Tooltip("regime:N", title="Regime"),
+                alt.Tooltip(f"{growth_col}:Q", title="Growth", format=".2f"),
+                alt.Tooltip(f"{inflation_col}:Q", title="Inflation", format=".2f"),
+            ],
+        )
+        .properties(height=420)
+    )
+
+
+def terminal_distribution(terminal: pd.Series) -> alt.Chart:
+    data = pd.DataFrame({"terminal_wealth": terminal.to_numpy(dtype=float)})
+    return (
+        alt.Chart(data)
+        .mark_bar(color="#2563eb", opacity=0.82)
+        .encode(
+            x=alt.X("terminal_wealth:Q", bin=alt.Bin(maxbins=45), title="Terminal wealth"),
+            y=alt.Y("count():Q", title="Paths"),
+            tooltip=[alt.Tooltip("count():Q", title="Paths")],
+        )
+        .properties(height=320)
+    )
+
+
+st.title("Four-Quadrant Monte Carlo Simulator")
+
+with st.sidebar:
+    st.header("Calibration")
+    macro, returns, growth_col, inflation_col = load_inputs()
+    selected_tickers = ticker_selector(returns)
+    returns = returns[selected_tickers]
+    growth_threshold = threshold_control("Growth threshold", "growth")
+    inflation_threshold = threshold_control("Inflation threshold", "inflation")
+
+    overrides, override_weight = correlation_overrides(selected_tickers)
+
+    st.header("Simulation")
+    periods = st.slider("Periods", min_value=12, max_value=360, value=120, step=12)
+    paths = st.slider("Paths", min_value=250, max_value=20000, value=3000, step=250)
+    seed = st.number_input("Random seed", value=7, min_value=1, step=1)
+    start_options = ["Stationary"] + [REGIME_NAMES[state] for state in REGIME_ORDER]
+    start_label = st.selectbox("Start state", start_options)
+    start_state = None
+    if start_label != "Stationary":
+        start_state = {REGIME_NAMES[state]: state for state in REGIME_ORDER}[start_label]
+
+    st.header("Portfolio")
+    st.caption("Weights are entered for the selected tickers only.")
+    weights = {
+        ticker: st.number_input(
+            ticker,
+            min_value=0.0,
+            max_value=100.0,
+            value=default_weight(ticker, selected_tickers),
+            step=1.0,
+        )
+        for ticker in selected_tickers
+    }
+    weight_total = sum(weights.values())
+    st.caption(f"Total weight: {weight_total:.1f}%. The simulator normalizes this to 100%.")
+    if np.isclose(weight_total, 0.0):
+        st.warning("Set at least one ticker weight above zero.")
+        st.stop()
+
+st.caption(f"Selected tickers: {', '.join(selected_tickers)}")
+
+model = calibrate_quadrant_model(
+    returns=returns,
+    macro=macro,
+    growth_col=growth_col,
+    inflation_col=inflation_col,
+    growth_threshold=growth_threshold,
+    inflation_threshold=inflation_threshold,
+    correlation_overrides=overrides,
+    override_weight=override_weight,
+)
+regimes = classify_quadrants(
+    macro,
+    growth_col=growth_col,
+    inflation_col=inflation_col,
+    growth_threshold=growth_threshold,
+    inflation_threshold=inflation_threshold,
+)
+result = simulate_returns(
+    model,
+    periods=periods,
+    paths=paths,
+    start_state=start_state,
+    random_seed=int(seed),
+)
+wealth = simulate_portfolio_paths(
+    result,
+    weights=weights,
+    initial_value=100.0,
+)
+summary = summarize_terminal_wealth(wealth)
+
+metric_cols = st.columns(5)
+metric_cols[0].metric("Mean", f"{summary['mean']:.2f}")
+metric_cols[1].metric("P05", f"{summary['p05']:.2f}")
+metric_cols[2].metric("Median", f"{summary['p50']:.2f}")
+metric_cols[3].metric("P95", f"{summary['p95']:.2f}")
+metric_cols[4].metric("Volatility", f"{summary['std']:.2f}")
+
+tab_simulation, tab_regimes, tab_correlations, tab_data = st.tabs(
+    ["Simulation", "Regimes", "Correlations", "Data"]
+)
+
+with tab_simulation:
+    left, right = st.columns([1.2, 1.0])
+    with left:
+        percentiles = wealth.quantile([0.05, 0.50, 0.95], axis=1).T
+        percentiles.columns = ["P05", "Median", "P95"]
+        st.subheader("Wealth Percentiles")
+        st.line_chart(percentiles)
+    with right:
+        st.subheader("Terminal Wealth")
+        st.altair_chart(terminal_distribution(wealth.iloc[-1]), width="stretch")
+
+    regime_mix = (
+        pd.Series(result.regimes.ravel())
+        .value_counts(normalize=True)
+        .reindex(REGIME_ORDER)
+        .fillna(0.0)
+        .rename(index=REGIME_NAMES)
+    )
+    st.subheader("Simulated Regime Mix")
+    st.bar_chart(regime_mix)
+
+with tab_regimes:
+    left, right = st.columns([1.0, 1.1])
+    with left:
+        st.subheader("Transition Matrix")
+        transition_chart = matrix_chart(
+            model.transition_matrix.rename(index=REGIME_NAMES, columns=REGIME_NAMES),
+            value_name="probability",
+            domain=(0.0, 1.0),
+            scheme="blues",
+        )
+        st.altair_chart(transition_chart, width="stretch")
+    with right:
+        st.subheader("Macro Quadrants")
+        st.altair_chart(
+            macro_scatter(macro, regimes, growth_col, inflation_col),
+            width="stretch",
+        )
+
+    observations = pd.Series(
+        {REGIME_NAMES[state]: moments.observations for state, moments in model.moments.items()},
+        name="Observations",
+    )
+    st.subheader("Historical Observations")
+    st.bar_chart(observations)
+
+with tab_correlations:
+    regime_label = st.selectbox(
+        "Regime",
+        [REGIME_NAMES[state] for state in REGIME_ORDER],
+    )
+    regime_lookup = {REGIME_NAMES[state]: state for state in REGIME_ORDER}
+    selected_regime = regime_lookup[regime_label]
+    correlation = model.moments[selected_regime].correlation
+    st.subheader("Correlation Matrix")
+    st.altair_chart(
+        matrix_chart(correlation, value_name="correlation", domain=(-1.0, 1.0), scheme="redblue"),
+        width="stretch",
+    )
+    st.dataframe(correlation.round(3), width="stretch")
+
+with tab_data:
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Macro")
+        st.dataframe(macro.tail(120), width="stretch")
+    with right:
+        st.subheader("Returns")
+        st.dataframe(returns.tail(120), width="stretch")
