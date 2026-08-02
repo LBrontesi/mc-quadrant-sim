@@ -18,6 +18,106 @@ The model is designed to be calibrated from real historical data:
 4. Each quadrant receives its own expected returns, volatility, covariance, and correlation matrix.
 5. Monte Carlo paths draw the next quadrant from the transition matrix and sample asset returns from that quadrant's distribution.
 
+## Methodology
+
+### 1. Data And Alignment
+
+Asset prices are converted to log returns and, for the dashboard market-data
+path, aggregated to monthly frequency. FRED industrial production and CPI are
+converted to year-over-year percentage changes. Uploaded macro CSVs are assumed
+to already contain the growth and inflation measures selected by the user.
+
+Macro observations are classified before they are joined to asset returns. The
+dashboard defaults to a one-period macro release lag: a macro regime observed
+at period `t` is used for asset returns beginning at `t + 1`. Remaining dates
+are aligned with forward-fill. This is a conservative approximation, not a
+full real-time vintage or release-calendar database.
+
+### 2. Quadrant Classification
+
+For each macro observation, growth and inflation are compared with their chosen
+thresholds. The default threshold is the historical median; mean and fixed
+numeric thresholds are also supported. Values greater than or equal to the
+threshold are considered high.
+
+| Growth | Inflation | Regime |
+| --- | --- | --- |
+| High | Low | High growth / low inflation |
+| High | High | High growth / high inflation |
+| Low | High | Low growth / high inflation |
+| Low | Low | Low growth / low inflation |
+
+### 3. Markov Regime Model
+
+The transition matrix counts adjacent historical regime changes and adds the
+configured smoothing value to every cell before normalizing each row. The
+default smoothing value is `1.0`, which prevents zero-probability transitions
+when history is sparse.
+
+When transition uncertainty is non-zero, each transition row is sampled from a
+Dirichlet distribution. The dashboard maps uncertainty `u` in `[0, 1]` to a
+row concentration of `max(1, 1 / u^2)`. Higher uncertainty therefore produces
+more variation around the calibrated transition probabilities.
+
+### 4. Regime-Specific Return Moments
+
+Returns aligned to each regime provide a state-specific mean and covariance. If
+a regime has fewer observations than `min_observations`, its estimates are
+blended toward the full-sample estimates. Covariance matrices are additionally
+shrunk toward the full-sample covariance, projected to the nearest positive
+semidefinite matrix, and converted to correlations. Optional pairwise
+correlation views are blended into each regime and projected back to a valid
+correlation matrix.
+
+The diagnostics panel reports observations per regime and covariance condition
+numbers so sparse or unstable calibrations are visible rather than hidden.
+
+### 5. Return Sampling
+
+Each simulated period first draws a regime, then draws asset returns using that
+regime's parameters:
+
+- `normal`: multivariate Gaussian sampling.
+- `student_t`: a scale-mixture multivariate Student-t draw. The covariance is
+  rescaled so finite degrees of freedom preserve the calibrated covariance.
+- `bootstrap`: samples historical returns observed in the selected regime.
+- `block_bootstrap`: samples short consecutive blocks from regime history,
+  preserving some local return structure while a path remains in a regime.
+
+Student-t degrees of freedom must be greater than `2` so the variance is
+finite. Bootstrap methods require historical returns saved during calibration.
+
+### 6. Portfolio Accounting
+
+Weights are normalized to sum to one. The legacy mode combines simulated log
+returns with the weighted-log approximation. Rebalancing mode instead tracks
+asset holdings, applies each asset's gross return, and rebalances monthly,
+quarterly, or annually. Transaction costs are charged as:
+
+```text
+cost = transaction_cost_bps / 10,000 * sum(abs(target_holdings - current_holdings))
+```
+
+The dashboard defaults to monthly rebalancing with a 10 basis-point cost; the
+core API retains the legacy mode unless a rebalancing frequency is supplied.
+
+### 7. Reported Risk Metrics
+
+Terminal wealth includes the mean, standard deviation, 5th/50th/95th
+percentiles, and probability of finishing below the initial value. At 95%
+confidence, VaR is `initial value - 5th percentile`, while expected shortfall
+is `initial value - average wealth in the worst 5% tail`. Maximum drawdown is
+calculated path-by-path from the initial value and each subsequent running
+peak.
+
+### 8. Important Assumptions
+
+- Macro release lag is period-based and does not model data revisions or exact publication dates.
+- Regime transitions are Markovian and depend only on the current regime.
+- Parametric draws do not model volatility clustering; bootstrap methods are the better choice when preserving historical shape matters.
+- Transaction costs are charged only at modeled rebalancing events.
+- Results are scenario estimates, not forecasts or investment advice.
+
 ## Install
 
 ```bash
