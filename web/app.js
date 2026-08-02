@@ -39,6 +39,8 @@ const DEFAULT_CORRELATIONS = {
 
 const METRIC_FIELDS = [
   ["mean", "Mean"], ["p05", "P05"], ["p50", "Median"], ["p95", "P95"], ["std", "Volatility"],
+  ["ulcer_index_mean", "Ulcer Index"], ["sortino_ratio", "Sortino"], ["calmar_ratio", "Calmar"],
+  ["geometric_annualized_return", "CAGR"],
 ];
 
 const state = {
@@ -705,7 +707,10 @@ function renderResults(data) {
   $("performance-caption").textContent =
     `Annualized return: ${pct(data.summary.annualized_return)} | ` +
     `Annualized volatility: ${pct(data.summary.annualized_volatility)} | ` +
-    `Sharpe ratio (0% risk-free): ${fmt(data.summary.sharpe_ratio, 2)}`;
+    `Sharpe ratio (0% risk-free): ${fmt(data.summary.sharpe_ratio, 2)} | ` +
+    `Ulcer index: ${fmt(data.summary.ulcer_index_mean, 2)} (p95 ${fmt(data.summary.ulcer_index_p95, 2)}) | ` +
+    `Terminal skew: ${fmt(data.summary.terminal_skewness, 2)} | ` +
+    `Excess kurtosis: ${fmt(data.summary.terminal_kurtosis, 2)}`;
 
   lineChart($("chart-wealth"), data.wealth.periods, [
     { name: "P05", color: "#f97316", values: data.wealth.p05 },

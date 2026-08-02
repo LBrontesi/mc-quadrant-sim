@@ -152,6 +152,10 @@ def test_compare_demo_returns_two_rows():
         "var_95",
         "expected_shortfall_95",
         "worst_max_drawdown",
+        "ulcer_index_mean",
+        "sortino_ratio",
+        "calmar_ratio",
+        "geometric_annualized_return",
     ]
     assert [row[0] for row in response["rows"]] == ["Normal", "Student-t"]
 

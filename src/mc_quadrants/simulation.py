@@ -383,6 +383,26 @@ def summarize_wealth_risk(
         if annualized_volatility > 0
         else 0.0
     )
+    ulcer = np.sqrt((drawdown**2).mean(axis=0))
+
+    period_returns = (wealth / wealth.shift(1) - 1.0).to_numpy(dtype=float).ravel()
+    period_returns = period_returns[np.isfinite(period_returns)]
+    downside = period_returns - risk_free_rate / periods_per_year
+    downside_squared = np.where(downside < 0, downside**2, 0.0)
+    downside_deviation = float(np.sqrt(downside_squared.mean())) if downside_squared.size else 0.0
+    annualized_downside = downside_deviation * np.sqrt(periods_per_year)
+    sortino_ratio = (
+        float((annualized_return - risk_free_rate) / annualized_downside)
+        if annualized_downside > 0
+        else 0.0
+    )
+    mean_max_drawdown = float(max_drawdown.mean())
+    calmar_ratio = float(annualized_return / mean_max_drawdown) if mean_max_drawdown > 0 else 0.0
+    geometric_annualized_return = float(
+        np.exp(np.log(terminal / initial_value).mean() * annualization) - 1.0
+    )
+    skewness = terminal.skew()
+    kurtosis = terminal.kurt()
     return pd.Series(
         {
             "mean": terminal.mean(),
@@ -392,12 +412,19 @@ def summarize_wealth_risk(
             "p95": terminal.quantile(0.95),
             "annualized_return": float(annualized_return),
             "annualized_volatility": float(annualized_volatility),
+            "geometric_annualized_return": geometric_annualized_return,
             "sharpe_ratio": sharpe_ratio,
+            "sortino_ratio": sortino_ratio,
+            "calmar_ratio": calmar_ratio,
             "probability_of_loss": float((terminal < initial_value).mean()),
             "var_95": initial_value - lower_tail,
             "expected_shortfall_95": initial_value - float(tail.mean()),
-            "max_drawdown_mean": float(max_drawdown.mean()),
+            "max_drawdown_mean": mean_max_drawdown,
             "max_drawdown_p95": float(max_drawdown.quantile(0.95)),
             "max_drawdown_worst": float(max_drawdown.max()),
+            "ulcer_index_mean": float(ulcer.mean()),
+            "ulcer_index_p95": float(ulcer.quantile(0.95)),
+            "terminal_skewness": float(skewness) if np.isfinite(skewness) else 0.0,
+            "terminal_kurtosis": float(kurtosis) if np.isfinite(kurtosis) else 0.0,
         }
     )

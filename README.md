@@ -138,6 +138,15 @@ Sharpe ratio uses a zero risk-free rate. These are approximations that assume
 independent, identically distributed monthly returns, not a full time-series
 return decomposition.
 
+Downside-focused metrics are also reported. The Ulcer Index is the square
+root of the mean squared path drawdown, penalizing both depth and duration of
+declines. The Sortino ratio divides excess return by annualized downside
+deviation instead of total volatility. The Calmar ratio divides annualized
+return by the mean maximum drawdown. The geometric annualized return
+compounds the mean logarithmic terminal growth and is always lower than or
+equal to the arithmetic annualized return. Terminal skewness and excess
+kurtosis describe the shape of the terminal distribution.
+
 ### 8. Important Assumptions
 
 - Macro release lag is period-based and does not model data revisions or exact publication dates.

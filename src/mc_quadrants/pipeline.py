@@ -184,6 +184,10 @@ def compare_distributions(
                 "var_95": summary["var_95"],
                 "expected_shortfall_95": summary["expected_shortfall_95"],
                 "worst_max_drawdown": summary["max_drawdown_worst"],
+                "ulcer_index_mean": summary["ulcer_index_mean"],
+                "sortino_ratio": summary["sortino_ratio"],
+                "calmar_ratio": summary["calmar_ratio"],
+                "geometric_annualized_return": summary["geometric_annualized_return"],
             }
         )
     return pd.DataFrame(rows)

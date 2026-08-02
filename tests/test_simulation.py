@@ -136,6 +136,41 @@ def test_wealth_risk_summary_includes_downside_metrics():
     assert summary["var_95"] > 0
     assert summary["expected_shortfall_95"] >= summary["var_95"]
     assert 0 < summary["max_drawdown_mean"] < 1
+    assert {
+        "ulcer_index_mean",
+        "sortino_ratio",
+        "calmar_ratio",
+        "geometric_annualized_return",
+        "terminal_skewness",
+        "terminal_kurtosis",
+    }.issubset(summary.index)
+
+
+def test_ulcer_index_matches_known_drawdown_series():
+    wealth = pd.DataFrame({"path_0": [90.0]})
+
+    summary = summarize_wealth_risk(wealth)
+
+    assert summary["ulcer_index_mean"] == pytest.approx(np.sqrt(0.005))
+
+
+def test_sortino_uses_downside_deviation():
+    wealth = pd.DataFrame({"path_0": [100.0, 95.0]})
+
+    summary = summarize_wealth_risk(wealth, periods_per_year=12)
+
+    annualized_return = 0.95**6 - 1.0
+    annualized_downside = 0.05 * np.sqrt(12)
+    assert summary["sortino_ratio"] == pytest.approx(annualized_return / annualized_downside)
+
+
+def test_geometric_annualized_return_matches_single_path():
+    wealth = pd.DataFrame({"path_0": [110.0]})
+
+    summary = summarize_wealth_risk(wealth, periods_per_year=1)
+
+    assert summary["geometric_annualized_return"] == pytest.approx(0.10)
+    assert summary["calmar_ratio"] == 0.0
 
 
 def test_stationary_distribution_solves_markov_balance_equation():
