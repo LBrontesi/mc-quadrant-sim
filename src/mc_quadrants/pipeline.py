@@ -53,6 +53,8 @@ def run_scenario(
     asset_currencies: Mapping[str, str] | None = None,
     fx_rates: pd.DataFrame | None = None,
     fx_quote: str = "base_per_foreign",
+    risk_free_rate: float = 0.0,
+    annual_inflation: float = 0.0,
 ) -> SimulationRun:
     """Calibrate and simulate one fully specified investment scenario."""
 
@@ -148,7 +150,12 @@ def run_scenario(
         regimes=regimes,
         result=result,
         wealth=wealth,
-        summary=summarize_wealth_risk(wealth, initial_value=initial_value),
+        summary=summarize_wealth_risk(
+            wealth,
+            initial_value=initial_value,
+            risk_free_rate=risk_free_rate,
+            annual_inflation=annual_inflation,
+        ),
         diagnostics=diagnostics,
     )
 

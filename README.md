@@ -146,6 +146,54 @@ return decomposition.
 - Transaction costs are charged only at modeled rebalancing events.
 - Results are scenario estimates, not forecasts or investment advice.
 
+### 9. Coherence With Market Reality
+
+The model is designed to stay consistent with how long-term portfolios behave
+in practice:
+
+**Strengths**
+
+- Regime conditioning captures the well-documented tendency for asset
+  correlations and volatilities to change with the growth/inflation cycle,
+  which a single full-sample covariance matrix misses.
+- Student-t and bootstrap/block-bootstrap sampling produce fat tails and
+  extreme outcomes instead of assuming Gaussian returns.
+- Rebalancing with transaction costs models the friction investors actually
+  pay, and the macro release lag removes obvious look-ahead bias.
+- Correlation overrides allow investment views to be blended with empirical
+  estimates when history is short or regimes are structurally different.
+
+**Limitations and honest approximations**
+
+- Returns are drawn from static regime distributions; volatility clustering,
+  skewness, and regime-switching within a quarter are not modeled.
+- The annualized volatility estimate scales terminal dispersion by the square
+  root of time and assumes independent monthly returns.
+- Markov probabilities and regime moments are estimated from the available
+  history; sparse regimes are blended toward the full sample.
+- Deterministic inflation and risk-free assumptions are constant, not
+  stochastic. A positive inflation assumption expresses results in real terms;
+  the default is nominal.
+
+**Long-term analysis features**
+
+- Set **Inflation assumption** above zero to report inflation-adjusted
+  (purchasing power) wealth, VaR, drawdowns, and annualized metrics.
+- Set **Risk-free rate** to compute a proper Sharpe ratio instead of a zero
+  risk-free baseline.
+- The **Portfolio preset** picker applies PortfolioCharts-style allocations
+  (60/40, Three-Fund, Permanent Portfolio, Golden Butterfly, All Seasons,
+  Core Four, Risk Parity) mapped onto the loaded tickers. Approximations are
+  labeled; for example IEF stands in for long-term treasuries and SHY for
+  short-term/cash holdings.
+
+**Future directions**
+
+- Periodic contributions (dollar-cost averaging) and withdrawals for
+  retirement-style analysis.
+- GARCH-style volatility clustering or regime-dependent t distributions.
+- Bond duration and yield-curve simulation instead of price-only histories.
+
 ## Install
 
 ```bash
@@ -201,7 +249,11 @@ accepts optional proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or
 `DBMFSIM` series for a backtest. Select a portfolio currency such as `EUR`
 and optionally map assets with values such as `EFA:EUR`; Yahoo FX pairs are
 loaded automatically. The correlation overrides section blends per-regime
-targets for the first two selected tickers. Results include metric cards,
+targets for the first two selected tickers. Portfolio presets (60/40,
+Three-Fund, Permanent, Golden Butterfly, All Seasons, Core Four, Risk Parity)
+apply PortfolioCharts-style allocations to the loaded tickers, and the
+inflation/risk-free inputs report real terms and a proper Sharpe ratio.
+Results include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, macro scatter, calibration diagnostics, scenario
 comparison, and CSV downloads. Charts are rendered client-side as SVG.

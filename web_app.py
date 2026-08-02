@@ -55,6 +55,19 @@ DEFAULT_CORRELATIONS = {
     "low_growth_low_inflation": -0.40,
 }
 
+# Portfolio presets inspired by PortfolioCharts, mapped onto the available
+# ticker universe. Approximations are noted per preset (for example, IEF
+# stands in for long-term treasuries and SHY for short-term/cash holdings).
+PORTFOLIO_PRESETS: dict[str, dict[str, float]] = {
+    "Classic 60/40": {"SPY": 60.0, "IEF": 40.0},
+    "Three-Fund": {"SPY": 60.0, "EFA": 30.0, "IEF": 10.0},
+    "Permanent Portfolio": {"SPY": 25.0, "IEF": 25.0, "SHY": 25.0, "GLD": 25.0},
+    "Golden Butterfly (approx)": {"SPY": 40.0, "IEF": 20.0, "SHY": 20.0, "GLD": 20.0},
+    "All Seasons (approx)": {"SPY": 30.0, "IEF": 40.0, "TIP": 15.0, "GLD": 7.5, "DBC": 7.5},
+    "Core Four": {"SPY": 48.0, "EFA": 24.0, "IEF": 20.0, "VNQ": 8.0},
+    "Risk Parity (simplified)": {"SPY": 30.0, "IEF": 40.0, "GLD": 15.0, "SHY": 15.0},
+}
+
 DISTRIBUTION_KEYS = {
     "normal": "normal",
     "student_t": "student_t",
@@ -306,6 +319,10 @@ def build_load_response(
         "inflation_col": inflation_col,
         "message": message,
         "coverage": _coverage(returns),
+        "presets": [
+            {"name": name, "weights": dict(weights)}
+            for name, weights in PORTFOLIO_PRESETS.items()
+        ],
         "macro": _frame_preview(macro, columns=[growth_col, inflation_col]),
         "returns": _frame_preview(returns),
     }
@@ -353,6 +370,8 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "rebalance_frequency": REBALANCE_KEYS[rebalance_label],
         "transaction_cost_bps": float(payload.get("cost_bps", 10.0)),
         "base_currency": base_currency,
+        "risk_free_rate": float(payload.get("risk_free_rate", 0.0)) / 100.0,
+        "annual_inflation": float(payload.get("annual_inflation", 0.0)) / 100.0,
     }
 
 
@@ -423,6 +442,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "ok": True,
         "summary": {str(key): _json_value(value) for key, value in summary.items()},
         "currency": scenario.model.metadata.get("base_currency", "USD"),
+        "terms": "real" if scenario_kwargs(payload)["annual_inflation"] > 0 else "nominal",
         "warnings": list(scenario.diagnostics.warnings),
         "wealth": {
             "periods": list(range(1, len(wealth) + 1)),

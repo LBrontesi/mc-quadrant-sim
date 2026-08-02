@@ -81,6 +81,35 @@ def test_load_response_has_coverage_and_preview():
     assert response["returns"]["columns"] == ["Date"] + tickers
 
 
+def test_load_response_includes_portfolio_presets():
+    macro, returns, tickers, growth_col, inflation_col, message = web_app.load_data_source({"source": "demo", "seed": 7})
+    response = web_app.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
+    presets = response["presets"]
+    assert len(presets) >= 5
+    for preset in presets:
+        assert "name" in preset and preset["weights"]
+        assert sum(preset["weights"].values()) == pytest.approx(100.0)
+    assert any(preset["name"] == "Classic 60/40" for preset in presets)
+
+
+def test_simulate_reports_real_terms_with_inflation():
+    payload = dict(DEMO_PAYLOAD)
+    payload["annual_inflation"] = 2.5
+    payload["risk_free_rate"] = 1.0
+    response = web_app.build_simulate_response(payload)
+    assert response["ok"] is True
+    assert response["terms"] == "real"
+    assert response["summary"]["sharpe_ratio"] == response["summary"]["sharpe_ratio"]
+
+
+def test_scenario_kwargs_include_long_term_fields():
+    kwargs = web_app.scenario_kwargs(
+        {"weights": {"SPY": 100}, "risk_free_rate": 2.0, "annual_inflation": 3.0}
+    )
+    assert kwargs["risk_free_rate"] == pytest.approx(0.02)
+    assert kwargs["annual_inflation"] == pytest.approx(0.03)
+
+
 def test_simulate_demo_returns_full_result():
     response = web_app.build_simulate_response(dict(DEMO_PAYLOAD))
     assert response["ok"] is True

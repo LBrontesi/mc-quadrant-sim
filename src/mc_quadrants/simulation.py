@@ -329,8 +329,15 @@ def summarize_wealth_risk(
     initial_value: float = 100.0,
     confidence: float = 0.95,
     periods_per_year: float = 12.0,
+    risk_free_rate: float = 0.0,
+    annual_inflation: float = 0.0,
 ) -> pd.Series:
-    """Calculate terminal, loss-tail, drawdown, and annualized metrics."""
+    """Calculate terminal, loss-tail, drawdown, and annualized metrics.
+
+    With ``annual_inflation > 0`` all metrics are computed on inflation-adjusted
+    wealth, so results are expressed in real (purchasing power) terms. The
+    Sharpe ratio uses ``risk_free_rate`` as the annualized risk-free return.
+    """
 
     if wealth.empty or wealth.shape[1] == 0:
         raise ValueError("wealth must contain at least one simulated path.")
@@ -340,12 +347,21 @@ def summarize_wealth_risk(
         raise ValueError("confidence must be between 0 and 1.")
     if not np.isfinite(periods_per_year) or periods_per_year <= 0:
         raise ValueError("periods_per_year must be positive and finite.")
+    if not np.isfinite(risk_free_rate):
+        raise ValueError("risk_free_rate must be finite.")
+    if not np.isfinite(annual_inflation) or annual_inflation < 0:
+        raise ValueError("annual_inflation must be a finite, non-negative number.")
     try:
         wealth_values = wealth.to_numpy(dtype=float)
     except (TypeError, ValueError) as exc:
         raise ValueError("wealth must contain numeric values.") from exc
     if not np.isfinite(wealth_values).all():
         raise ValueError("wealth must contain only finite values.")
+
+    if annual_inflation > 0:
+        period = np.arange(1, len(wealth) + 1, dtype=float)
+        deflator = (1.0 + annual_inflation) ** (-period / periods_per_year)
+        wealth = wealth.mul(deflator, axis=0)
 
     terminal = wealth.iloc[-1]
     tail_probability = 1.0 - confidence
@@ -363,7 +379,9 @@ def summarize_wealth_risk(
     annualized_return = (mean_terminal / initial_value) ** annualization - 1.0
     annualized_volatility = (float(terminal.std(ddof=0)) / initial_value) * np.sqrt(annualization)
     sharpe_ratio = (
-        float(annualized_return / annualized_volatility) if annualized_volatility > 0 else 0.0
+        float((annualized_return - risk_free_rate) / annualized_volatility)
+        if annualized_volatility > 0
+        else 0.0
     )
     return pd.Series(
         {

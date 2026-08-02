@@ -528,6 +528,8 @@ function gatherScenario() {
     block_size: Number($("block-size").value),
     rebalance: $("rebalance").value,
     cost_bps: Number($("cost-bps").value),
+    risk_free_rate: Number($("risk-free").value) / 100,
+    annual_inflation: Number($("annual-inflation").value) / 100,
     base_currency: $("base-currency").value,
     currency_map: $("currency-map").value,
     use_correlation_override: $("use-corr-override").checked,
@@ -606,6 +608,44 @@ function gatherWeights() {
   return weights;
 }
 
+function applyPreset() {
+  const name = $("preset-select").value;
+  if (!name || !state.loadResult) return;
+  const preset = state.loadResult.presets.find((p) => p.name === name);
+  if (!preset) return;
+  const selected = selectedTickers();
+  const matched = {};
+  let total = 0;
+  selected.forEach((ticker) => {
+    const base = ticker.endsWith("_SIM") ? ticker.slice(0, -4) : ticker.endsWith("SIM") ? ticker.slice(0, -3) : ticker;
+    if (preset.weights[base] !== undefined) {
+      matched[ticker] = preset.weights[base];
+      total += preset.weights[base];
+    }
+  });
+  if (total <= 0) {
+    notify("Preset assets are not selected. Select matching tickers first.", "error");
+    return;
+  }
+  const factor = 100 / total;
+  selected.forEach((ticker) => { state.weights[ticker] = matched[ticker] !== undefined ? matched[ticker] * factor : 0; });
+  renderWeightEditor();
+  notify(`Applied ${name}`, "success");
+}
+
+function populatePresets(presets) {
+  const select = $("preset-select");
+  const current = select.value;
+  select.innerHTML = '<option value="">— choose —</option>';
+  (presets || []).forEach((preset) => {
+    const option = document.createElement("option");
+    option.value = preset.name;
+    option.textContent = preset.name;
+    select.appendChild(option);
+  });
+  select.value = current && presets.some((p) => p.name === current) ? current : "";
+}
+
 /* ---------- Tabs ---------- */
 
 function switchTab(tabId) {
@@ -656,6 +696,7 @@ function renderResults(data) {
     animateNumber(valueEl, data.summary[key], 2);
   });
   $("risk-caption").textContent =
+    `${data.terms === "real" ? "Real (inflation-adjusted) | " : "Nominal | "}` +
     `Currency: ${data.currency} | ` +
     `Probability of loss: ${pct(data.summary.probability_of_loss)} | ` +
     `VaR (95%): ${fmt(data.summary.var_95)} | ` +
@@ -741,6 +782,8 @@ async function onLoad() {
     state.weights = {};
     renderWeightEditor();
     renderTables(data);
+    populatePresets(data.presets);
+    $("preset-apply").disabled = false;
     $("portfolio-status").textContent = `${data.tickers.length} tickers available. Select tickers and set weights.`;
     $("data-empty").classList.add("hidden");
     $("data-content").classList.remove("hidden");
@@ -878,6 +921,7 @@ function init() {
   $("compare-btn").addEventListener("click", onCompare);
   $("download-summary").addEventListener("click", onDownloadSummary);
   $("download-diagnostics").addEventListener("click", onDownloadDiagnostics);
+  $("preset-apply").addEventListener("click", applyPreset);
 
   fetch("/api/health")
     .then((response) => response.json())

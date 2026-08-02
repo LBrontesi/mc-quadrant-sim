@@ -186,6 +186,39 @@ def test_annualized_metrics_default_to_single_period_scaling():
         summarize_wealth_risk(wealth, periods_per_year=0)
 
 
+def test_sharpe_uses_risk_free_rate():
+    wealth = pd.DataFrame({"path_0": [120.0]})
+
+    summary = summarize_wealth_risk(wealth, periods_per_year=1, risk_free_rate=0.02)
+
+    assert summary["sharpe_ratio"] == pytest.approx(0.0)
+    assert summary["annualized_return"] == pytest.approx(0.20)
+
+    with pytest.raises(ValueError, match="risk_free_rate"):
+        summarize_wealth_risk(wealth, risk_free_rate=np.nan)
+
+
+def test_inflation_adjusts_wealth_to_real_terms():
+    wealth = pd.DataFrame({"path_0": [110.0]})
+
+    summary = summarize_wealth_risk(wealth, periods_per_year=1, annual_inflation=0.10)
+
+    assert summary["annualized_return"] == pytest.approx(0.0)
+    assert summary["mean"] == pytest.approx(100.0)
+
+    with pytest.raises(ValueError, match="annual_inflation"):
+        summarize_wealth_risk(wealth, annual_inflation=-0.1)
+
+
+def test_inflation_compounds_per_year_not_per_period():
+    wealth = pd.DataFrame({"path_0": list(np.linspace(100.0, 110.0, 12))})
+
+    summary = summarize_wealth_risk(wealth, periods_per_year=12, annual_inflation=0.10)
+
+    assert summary["mean"] == pytest.approx(100.0)
+    assert summary["annualized_return"] == pytest.approx(0.0)
+
+
 def test_portfolio_rejects_non_finite_weights():
     result = SimulationResult(
         returns=np.zeros((1, 1, 1)),
