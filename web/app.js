@@ -30,6 +30,13 @@ const DEFAULT_WEIGHTS = {
   SPY: 40, IEF: 20, GLD: 10, DBC: 10, EFA: 10, VNQ: 5, TIP: 3, SHY: 2, DBMF: 5, KMLM: 5,
 };
 
+const DEFAULT_CORRELATIONS = {
+  high_growth_low_inflation: -0.10,
+  high_growth_high_inflation: 0.35,
+  low_growth_high_inflation: 0.25,
+  low_growth_low_inflation: -0.40,
+};
+
 const METRIC_FIELDS = [
   ["mean", "Mean"], ["p05", "P05"], ["p50", "Median"], ["p95", "P95"], ["std", "Volatility"],
 ];
@@ -271,7 +278,7 @@ function heatmap(container, labels, values, domain, title) {
   container.appendChild(svg);
 }
 
-function scatterChart(container, points, xLabel, yLabel) {
+function scatterChart(container, points, xLabel, yLabel, legend = null) {
   container.innerHTML = "";
   const width = 560, height = 300;
   const plotW = width - MARGIN.left - MARGIN.right;
@@ -289,7 +296,6 @@ function scatterChart(container, points, xLabel, yLabel) {
   const xTicks = niceTicks(xMin, xMax, 5).map((v) => [xScale(v), v.toFixed(1)]);
   const yTicks = niceTicks(yMin, yMax, 5).map((v) => [yScale(v), v.toFixed(1)]);
   drawAxes(svg, plotW, plotH, xTicks, yTicks, xLabel, yLabel);
-  const seen = new Set();
   points.forEach((p) => {
     const circle = document.createElementNS(SVG_NS, "circle");
     circle.setAttribute("cx", xScale(p.x));
@@ -300,6 +306,16 @@ function scatterChart(container, points, xLabel, yLabel) {
     svg.appendChild(circle);
   });
   container.appendChild(svg);
+  if (legend) {
+    const box = document.createElement("div");
+    box.className = "legend";
+    legend.forEach((entry) => {
+      const item = document.createElement("span");
+      item.innerHTML = `<span class="legend-dot" style="background:${entry.color}"></span>${entry.label}`;
+      box.appendChild(item);
+    });
+    container.appendChild(box);
+  }
 }
 
 function histChart(container, values, bins = 45) {
@@ -399,7 +415,18 @@ function gatherScenario() {
     cost_bps: Number($("cost-bps").value),
     base_currency: $("base-currency").value,
     currency_map: $("currency-map").value,
+    use_correlation_override: $("use-corr-override").checked,
+    correlation_blend: Number($("corr-blend").value),
+    correlation_override_targets: gatherCorrelationTargets(),
   };
+}
+
+function gatherCorrelationTargets() {
+  const targets = {};
+  document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
+    targets[slider.dataset.state] = Number(slider.value);
+  });
+  return targets;
 }
 
 /* ---------- Portfolio editor ---------- */
@@ -449,10 +476,13 @@ function renderWeightEditor() {
 }
 
 function updateWeightTotal() {
-  const total = selectedTickers().reduce((sum, ticker) => sum + (Number(state.weights[ticker]) || 0), 0);
+  const selected = selectedTickers();
+  const total = selected.reduce((sum, ticker) => sum + (Number(state.weights[ticker]) || 0), 0);
   const el = $("weight-total");
   el.textContent = `Total weight: ${total.toFixed(1)}%. The simulator normalizes this to 100%.`;
   el.style.color = total <= 0 ? "var(--danger)" : "var(--muted)";
+  $("run-btn").disabled = !state.loadResult || selected.length === 0 || total <= 0;
+  $("compare-btn").disabled = !state.loadResult || selected.length === 0 || total <= 0;
 }
 
 function gatherWeights() {
@@ -500,6 +530,7 @@ function renderResults(data) {
     grid.appendChild(card);
   });
   $("risk-caption").textContent =
+    `Currency: ${data.currency} | ` +
     `Probability of loss: ${pct(data.summary.probability_of_loss)} | ` +
     `VaR (95%): ${fmt(data.summary.var_95)} | ` +
     `Expected shortfall (95%): ${fmt(data.summary.expected_shortfall_95)} | ` +
@@ -524,7 +555,8 @@ function renderResults(data) {
     $("chart-macro"),
     data.macro_scatter.map((p) => ({ x: p.growth, y: p.inflation, color: REGIME_COLORS[regimeNameToState(p.regime)] || "#94a3b8" })),
     "Growth",
-    "Inflation"
+    "Inflation",
+    REGIME_ORDER.map((state) => ({ label: REGIME_NAMES[state], color: REGIME_COLORS[state] }))
   );
   heatmap($("chart-transition"), data.transition.labels, data.transition.values, [0, 1], "From / To");
   barChart($("chart-observations"), Object.entries(data.observations).map(([label, value]) => ({
@@ -665,6 +697,26 @@ function init() {
 
   const transition = $("transition-uncertainty");
   transition.addEventListener("input", () => { $("transition-uncertainty-output").textContent = Number(transition.value).toFixed(2); });
+
+  const sliderBox = $("corr-sliders");
+  REGIME_ORDER.forEach((state) => {
+    const label = document.createElement("label");
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "-1";
+    slider.max = "1";
+    slider.step = "0.05";
+    slider.value = DEFAULT_CORRELATIONS[state];
+    slider.dataset.state = state;
+    const output = document.createElement("output");
+    const update = () => { output.textContent = Number(slider.value).toFixed(2); };
+    slider.addEventListener("input", update);
+    update();
+    label.appendChild(document.createTextNode(REGIME_NAMES[state]));
+    label.appendChild(slider);
+    label.appendChild(output);
+    sliderBox.appendChild(label);
+  });
 
   document.querySelectorAll('input[name="source"]').forEach((radio) => radio.addEventListener("change", toggleSourceGroups));
   toggleSourceGroups();

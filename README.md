@@ -200,10 +200,11 @@ accepts optional proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or
 `DBMF` in the synthetic asset picker, then choose the resulting `IEFSIM` or
 `DBMFSIM` series for a backtest. Select a portfolio currency such as `EUR`
 and optionally map assets with values such as `EFA:EUR`; Yahoo FX pairs are
-loaded automatically. Results include metric cards, wealth percentile curves,
-terminal wealth histograms, regime mix, transition and correlation heatmaps,
-macro scatter, calibration diagnostics, scenario comparison, and CSV
-downloads. Charts are rendered client-side as SVG.
+loaded automatically. The correlation overrides section blends per-regime
+targets for the first two selected tickers. Results include metric cards,
+wealth percentile curves, terminal wealth histograms, regime mix, transition
+and correlation heatmaps, macro scatter, calibration diagnostics, scenario
+comparison, and CSV downloads. Charts are rendered client-side as SVG.
 
 ## Run With Docker
 

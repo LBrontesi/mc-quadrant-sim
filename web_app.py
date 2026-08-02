@@ -48,6 +48,13 @@ DEMO_TICKERS = {
 DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
 SYNTHETIC_TICKER_OPTIONS = DEFAULT_TICKER_ORDER + ["DBMF", "KMLM", "TLT", "QQQ"]
 
+DEFAULT_CORRELATIONS = {
+    "high_growth_low_inflation": -0.10,
+    "high_growth_high_inflation": 0.35,
+    "low_growth_high_inflation": 0.25,
+    "low_growth_low_inflation": -0.40,
+}
+
 DISTRIBUTION_KEYS = {
     "normal": "normal",
     "student_t": "student_t",
@@ -154,6 +161,31 @@ def default_selected_tickers(tickers: list[str]) -> list[str]:
     if stitched:
         return stitched
     return tickers[: min(4, len(tickers))]
+
+
+def correlation_overrides(
+    payload: Mapping[str, Any],
+    selected_tickers: list[str],
+) -> tuple[dict[str, dict[tuple[str, str], float]] | None, float]:
+    """Build per-regime pairwise correlation targets for the first two assets."""
+
+    if not bool(payload.get("use_correlation_override", False)):
+        return None, 1.0
+    if len(selected_tickers) < 2:
+        raise ValueError("Correlation overrides require at least two selected tickers.")
+    blend = float(payload.get("correlation_blend", 0.40))
+    if not 0 <= blend <= 1:
+        raise ValueError("Correlation blend must be between 0 and 1.")
+    targets = payload.get("correlation_override_targets") or {}
+    pair = (selected_tickers[0], selected_tickers[1])
+    overrides: dict[str, dict[tuple[str, str], float]] = {}
+    for state in REGIME_ORDER:
+        raw = targets.get(state, DEFAULT_CORRELATIONS[state])
+        value = float(raw)
+        if not -1 <= value <= 1:
+            raise ValueError(f"Correlation override for {state} must be between -1 and 1.")
+        overrides[state] = {pair: value}
+    return overrides, blend
 
 
 def _read_csv_text(content: str | None) -> pd.DataFrame | None:
@@ -341,13 +373,15 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         scenario_kwargs(payload)["base_currency"],
         currency_map,
     )
+    correlation_targets, override_weight = correlation_overrides(payload, selected_tickers)
     scenario = run_scenario(
         returns=returns,
         macro=macro,
         selected_tickers=selected_tickers,
         growth_col=growth_col,
         inflation_col=inflation_col,
-        correlation_overrides=None,
+        correlation_overrides=correlation_targets,
+        override_weight=override_weight,
         **scenario_kwargs(payload),
         asset_currencies=asset_currencies,
         fx_rates=fx_rates,
@@ -451,6 +485,7 @@ def build_compare_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     kwargs.pop("distribution", None)
     currency_map = parse_pair_map(payload.get("currency_map", ""), "currency")
     asset_currencies, fx_rates = prepare_fx_rates(returns, selected_tickers, kwargs["base_currency"], currency_map)
+    correlation_targets, override_weight = correlation_overrides(payload, selected_tickers)
     comparison = compare_distributions(
         {"Normal": "normal", "Student-t": "student_t"},
         returns=returns,
@@ -458,7 +493,8 @@ def build_compare_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         selected_tickers=selected_tickers,
         growth_col=growth_col,
         inflation_col=inflation_col,
-        correlation_overrides=None,
+        correlation_overrides=correlation_targets,
+        override_weight=override_weight,
         **kwargs,
         asset_currencies=asset_currencies,
         fx_rates=fx_rates,

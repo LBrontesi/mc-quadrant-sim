@@ -79,6 +79,16 @@
       </section>
 
       <section class="control-group">
+        <h2>Correlation overrides</h2>
+        <label><input type="checkbox" id="use-corr-override" checked> Blend custom correlation view</label>
+        <label>View blend
+          <input type="number" id="corr-blend" value="0.4" min="0" max="1" step="0.05" class="short">
+        </label>
+        <div id="corr-sliders"></div>
+        <span class="hint">Applies to the first two selected tickers.</span>
+      </section>
+
+      <section class="control-group">
         <h2>Calibration</h2>
         <div class="two-col">
           <label>Growth threshold

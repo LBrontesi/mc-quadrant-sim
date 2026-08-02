@@ -132,6 +132,10 @@ th { background: var(--panel); color: var(--muted); position: sticky; top: 0; }
 .warning { color: var(--warn); font-size: 12px; white-space: pre-line; }
 .actions { display: flex; gap: 10px; }
 
+.legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+.legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); margin-right: 10px; }
+.legend-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+
 @media (max-width: 1000px) {
   .layout { grid-template-columns: 1fr; }
   .chart-grid, .two-col-table { grid-template-columns: 1fr; }
