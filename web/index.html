@@ -191,7 +191,10 @@
           <summary>Portfolio</summary>
           <p class="status" id="portfolio-status">Load data to select tickers.</p>
           <div id="ticker-list" class="check-list"></div>
-          <div id="weight-editor"></div>
+          <div class="portfolio-blocks">
+            <div id="weight-editor"></div>
+            <div id="donut" class="donut"></div>
+          </div>
           <p id="weight-total" class="status"></p>
           <div class="two-col">
             <label>Portfolio preset
@@ -222,12 +225,15 @@
           <p>1. Load data &nbsp;·&nbsp; 2. Select tickers and weights &nbsp;·&nbsp; 3. Run the simulation</p>
         </div>
         <div id="results-content" class="hidden">
+          <div id="scenario-chips" class="chips"></div>
           <div class="metric-grid" id="metric-grid"></div>
           <p class="caption" id="risk-caption"></p>
           <p class="caption" id="performance-caption"></p>
           <div class="chart-grid">
             <div class="card"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
             <div class="card"><h3>Terminal Wealth Distribution</h3><div class="chart" id="chart-terminal"></div></div>
+            <div class="card"><h3>Maximum Drawdown Distribution</h3><div class="chart" id="chart-drawdowns"></div></div>
+            <div class="card"><h3>Regime Timeline (sample path)</h3><div class="chart" id="chart-timeline"></div></div>
             <div class="card"><h3>Simulated Regime Mix</h3><div class="chart" id="chart-regime-mix"></div></div>
             <div class="card"><h3>Macro Quadrants</h3><div class="chart" id="chart-macro"></div></div>
             <div class="card"><h3>Transition Matrix</h3><div class="chart" id="chart-transition"></div></div>
@@ -259,6 +265,10 @@
         <div id="data-empty" class="empty-state">Load data to preview it here.</div>
         <div id="data-content" class="hidden">
           <section class="card">
+            <h3>Data Coverage</h3>
+            <div class="table-wrap" id="coverage-table"></div>
+          </section>
+          <section class="card">
             <h3>Data Preview</h3>
             <div class="two-col-table">
               <div>
@@ -274,6 +284,7 @@
           <section class="card actions">
             <button id="download-summary" class="btn">Download risk summary</button>
             <button id="download-diagnostics" class="btn">Download diagnostics</button>
+            <button id="download-wealth" class="btn">Download wealth paths</button>
           </section>
         </div>
       </div>

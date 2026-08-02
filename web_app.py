@@ -375,7 +375,9 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
+def run_scenario_payload(payload: Mapping[str, Any]) -> tuple[Any, list[str], pd.DataFrame]:
+    """Load, select, and run a single scenario from a client payload."""
+
     macro, returns, tickers, growth_col, inflation_col, _ = load_data_source(payload)
     selected_tickers = parse_tickers(payload.get("selected_tickers", tickers))
     if not selected_tickers:
@@ -385,11 +387,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Selected tickers are missing from the loaded returns: {', '.join(missing)}")
     returns = returns.loc[:, selected_tickers]
 
+    kwargs = scenario_kwargs(payload)
     currency_map = parse_pair_map(payload.get("currency_map", ""), "currency")
     asset_currencies, fx_rates = prepare_fx_rates(
         returns,
         selected_tickers,
-        scenario_kwargs(payload)["base_currency"],
+        kwargs["base_currency"],
         currency_map,
     )
     correlation_targets, override_weight = correlation_overrides(payload, selected_tickers)
@@ -401,14 +404,21 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         inflation_col=inflation_col,
         correlation_overrides=correlation_targets,
         override_weight=override_weight,
-        **scenario_kwargs(payload),
+        **kwargs,
         asset_currencies=asset_currencies,
         fx_rates=fx_rates,
     )
+    return scenario, selected_tickers, macro
+
+
+def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
+    scenario, selected_tickers, macro = run_scenario_payload(payload)
     model = scenario.model
     result = scenario.result
     wealth = scenario.wealth
     summary = scenario.summary
+    growth_col = scenario.model.metadata.get("growth_col", "growth")
+    inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
 
     percentiles = wealth.quantile([0.05, 0.50, 0.95], axis=1).T
     regime_mix = (
@@ -451,6 +461,8 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "p95": percentiles[0.95].tolist(),
         },
         "terminal": wealth.iloc[-1].tolist(),
+        "drawdowns": _max_drawdown_paths(wealth).tolist(),
+        "regime_timeline": [str(state) for state in result.regimes[0]],
         "regime_mix": [{"label": label, "share": float(share)} for label, share in regime_mix.items()],
         "transition": {
             "labels": [REGIME_NAMES[state] for state in model.transition_matrix.index],
@@ -478,6 +490,22 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             f"Distribution: {scenario.result.distribution}."
         ),
     }
+
+
+def _max_drawdown_paths(wealth: pd.DataFrame, initial_value: float = 100.0) -> np.ndarray:
+    wealth_with_initial = pd.concat(
+        [pd.DataFrame([[initial_value] * wealth.shape[1]], columns=wealth.columns), wealth],
+        ignore_index=True,
+    )
+    running_max = wealth_with_initial.cummax(axis=0)
+    return -(wealth_with_initial / running_max - 1.0).min(axis=0).to_numpy(dtype=float)
+
+
+def build_wealth_csv(payload: Mapping[str, Any]) -> dict[str, Any]:
+    scenario, selected_tickers, _ = run_scenario_payload(payload)
+    wealth = scenario.wealth.copy()
+    wealth.insert(0, "period", range(1, len(wealth) + 1))
+    return {"ok": True, "csv": wealth.to_csv(index=False), "tickers": selected_tickers}
 
 
 def _simulated_regime_summary(result: Any) -> pd.DataFrame:
@@ -594,6 +622,8 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._send_json(200, build_simulate_response(payload))
             elif path == "/api/compare":
                 self._send_json(200, build_compare_response(payload))
+            elif path == "/api/wealth":
+                self._send_json(200, build_wealth_csv(payload))
             else:
                 self._send_json(404, {"ok": False, "error": f"Unknown endpoint: {path}"})
         except Exception as exc:

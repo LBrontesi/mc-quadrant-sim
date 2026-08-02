@@ -50,6 +50,7 @@ const state = {
   weights: {},
   results: null,
   diagnostics: null,
+  lastSimPayload: null,
 };
 
 /* ---------- Helpers ---------- */
@@ -427,7 +428,7 @@ function scatterChart(container, points, xLabel, yLabel, legend = null) {
   }
 }
 
-function histChart(container, values, bins = 45) {
+function histChart(container, values, bins = 45, label = "Terminal wealth", color = "#3b82f6") {
   container.innerHTML = "";
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -443,7 +444,7 @@ function histChart(container, values, bins = 45) {
   const peak = Math.max(...counts) || 1;
   const svg = createSvg(width, height);
   const yTicks = niceTicks(0, peak, 4).map((v) => [MARGIN.top + (1 - v / peak) * plotH, v.toFixed(0)]);
-  drawAxes(svg, plotW, plotH, [], yTicks, "Terminal wealth", "Paths");
+  drawAxes(svg, plotW, plotH, [], yTicks, label, "Paths");
   const slot = plotW / bins;
   const tooltip = attachTooltip(container);
   counts.forEach((count, index) => {
@@ -453,7 +454,7 @@ function histChart(container, values, bins = 45) {
     const rect = document.createElementNS(SVG_NS, "rect");
     rect.setAttribute("x", x); rect.setAttribute("y", y);
     rect.setAttribute("width", barW); rect.setAttribute("height", plotH - (y - MARGIN.top));
-    rect.setAttribute("fill", "#3b82f6");
+    rect.setAttribute("fill", color);
     rect.setAttribute("opacity", "0.82");
     const low = min + (index / bins) * span;
     const high = min + ((index + 1) / bins) * span;
@@ -464,6 +465,71 @@ function histChart(container, values, bins = 45) {
     rect.addEventListener("mouseleave", () => { rect.setAttribute("opacity", "0.82"); tooltip.hide(); });
     svg.appendChild(rect);
   });
+  container.appendChild(svg);
+}
+
+function timelineChart(container, states) {
+  container.innerHTML = "";
+  const width = 560, height = 66;
+  const svg = createSvg(width, height);
+  const slot = width / states.length;
+  const tooltip = attachTooltip(container);
+  states.forEach((state, index) => {
+    const rect = document.createElementNS(SVG_NS, "rect");
+    rect.setAttribute("x", index * slot);
+    rect.setAttribute("y", 6);
+    rect.setAttribute("width", Math.max(slot - 1, 1));
+    rect.setAttribute("height", 34);
+    rect.setAttribute("fill", REGIME_COLORS[state] || "#94a3b8");
+    rect.addEventListener("mouseenter", () => {
+      rect.setAttribute("opacity", "0.85");
+      tooltip.show(index * slot + slot / 2, 30, `Period ${index + 1}<br>${REGIME_NAMES[state]}`);
+    });
+    rect.addEventListener("mouseleave", () => { rect.setAttribute("opacity", "1"); tooltip.hide(); });
+    svg.appendChild(rect);
+  });
+  container.appendChild(svg);
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  REGIME_ORDER.forEach((state) => {
+    const item = document.createElement("span");
+    item.innerHTML = `<span class="legend-dot" style="background:${REGIME_COLORS[state]}"></span>${REGIME_NAMES[state]}`;
+    legend.appendChild(item);
+  });
+  container.appendChild(legend);
+}
+
+function donutChart(container, items) {
+  container.innerHTML = "";
+  if (!items.length) return;
+  const size = 110, cx = size / 2, cy = size / 2, r = 42, stroke = 15;
+  const total = items.reduce((sum, item) => sum + item.value, 0) || 1;
+  const svg = createSvg(size, size);
+  const palette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#14b8a6", "#a78bfa", "#22c55e"];
+  let angle = -Math.PI / 2;
+  items.forEach((item, index) => {
+    const frac = item.value / total;
+    const start = angle;
+    const end = angle + frac * 2 * Math.PI;
+    angle = end;
+    const large = frac > 0.5 ? 1 : 0;
+    const x1 = cx + r * Math.cos(start);
+    const y1 = cy + r * Math.sin(start);
+    const x2 = cx + r * Math.cos(end);
+    const y2 = cy + r * Math.sin(end);
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", `M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`);
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", palette[index % palette.length]);
+    path.setAttribute("stroke-width", stroke);
+    const tooltip = attachTooltip(container);
+    path.addEventListener("mouseenter", () => {
+      tooltip.show(cx, cy, `<b>${escapeHtml(item.label)}</b><br>${item.value.toFixed(1)}%`);
+    });
+    path.addEventListener("mouseleave", () => tooltip.hide());
+    svg.appendChild(path);
+  });
+  svgText(svg, cx, cy + 4, total.toFixed(0) + "%", "chart-title");
   container.appendChild(svg);
 }
 
@@ -600,6 +666,7 @@ function updateWeightTotal() {
   const el = $("weight-total");
   el.textContent = `Total weight: ${total.toFixed(1)}%. The simulator normalizes this to 100%.`;
   el.style.color = total <= 0 ? "var(--danger)" : "var(--muted)";
+  donutChart($("donut"), selected.map((ticker) => ({ label: ticker, value: Number(state.weights[ticker]) || 0 })));
   $("run-btn").disabled = !state.loadResult || selected.length === 0 || total <= 0;
   $("compare-btn").disabled = !state.loadResult || selected.length === 0 || total <= 0;
 }
@@ -669,6 +736,36 @@ function renderTables(preview) {
   render("returns-preview", preview.returns);
 }
 
+function renderCoverage(coverage) {
+  const rows = Object.entries(coverage || {}).map(([ticker, range]) => [ticker, range.first, range.last]);
+  $("coverage-table").innerHTML = rows.length
+    ? "<table><thead><tr><th>Ticker</th><th>First</th><th>Last</th></tr></thead><tbody>" +
+      rows.map((row) => `<tr><td>${escapeHtml(row[0])}</td><td>${row[1]}</td><td>${row[2]}</td></tr>`).join("") +
+      "</tbody></table>"
+    : "<p class='status'>No coverage data.</p>";
+}
+
+const DISTRIBUTION_LABELS = {
+  normal: "Normal",
+  student_t: "Student-t",
+  bootstrap: "Historical bootstrap",
+  block_bootstrap: "Block bootstrap",
+};
+
+function renderScenarioChips(payload, data) {
+  const el = $("scenario-chips");
+  if (!payload) { el.innerHTML = ""; return; }
+  const chips = [];
+  Object.entries(payload.weights || {}).forEach(([ticker, weight]) => {
+    if (Number(weight) > 0) chips.push(`${ticker} ${Number(weight).toFixed(0)}%`);
+  });
+  chips.push(`${payload.periods} periods x ${payload.paths} paths`);
+  chips.push(data.terms === "real" ? "Real terms" : "Nominal");
+  chips.push(data.currency);
+  chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
+  el.innerHTML = chips.map((text) => `<span class="chip">${escapeHtml(text)}</span>`).join("");
+}
+
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
@@ -684,6 +781,7 @@ function regimeNameToState(name) {
 function renderResults(data) {
   $("intro").classList.add("hidden");
   $("results-content").classList.remove("hidden");
+  renderScenarioChips(state.lastSimPayload, data);
 
   const grid = $("metric-grid");
   grid.innerHTML = "";
@@ -718,6 +816,8 @@ function renderResults(data) {
     { name: "P95", color: "#10b981", values: data.wealth.p95 },
   ]);
   histChart($("chart-terminal"), data.terminal);
+  histChart($("chart-drawdowns"), data.drawdowns, 45, "Maximum drawdown", "#f97316");
+  timelineChart($("chart-timeline"), data.regime_timeline);
   barChart($("chart-regime-mix"), data.regime_mix.map((item) => ({
     label: item.label,
     value: item.share,
@@ -787,6 +887,7 @@ async function onLoad() {
     state.weights = {};
     renderWeightEditor();
     renderTables(data);
+    renderCoverage(data.coverage);
     populatePresets(data.presets);
     $("preset-apply").disabled = false;
     $("portfolio-status").textContent = `${data.tickers.length} tickers available. Select tickers and set weights.`;
@@ -818,6 +919,7 @@ async function onRun() {
   showOverlay("Running simulation...");
   try {
     const payload = gatherSimPayload();
+    state.lastSimPayload = payload;
     const data = await postJSON("/api/simulate", payload);
     state.results = data;
     setStatus(message, data.message);
@@ -867,6 +969,68 @@ function onDownloadDiagnostics() {
   if (!state.diagnostics) return;
   downloadCSV("calibration_diagnostics.csv", toCSV(state.diagnostics.columns, state.diagnostics.rows));
   notify("Diagnostics downloaded", "success");
+}
+
+async function onDownloadWealth() {
+  if (!state.lastSimPayload) {
+    notify("Run a simulation first.", "error");
+    return;
+  }
+  showOverlay("Exporting wealth paths...");
+  try {
+    const data = await postJSON("/api/wealth", state.lastSimPayload);
+    downloadCSV("wealth_paths.csv", data.csv);
+    notify("Wealth paths downloaded", "success");
+  } catch (error) {
+    notify(error.message, "error");
+  } finally {
+    hideOverlay();
+  }
+}
+
+/* ---------- Settings persistence ---------- */
+
+const CONTROL_IDS = [
+  "demo-seed", "yahoo-tickers", "yahoo-start", "yahoo-end", "yahoo-proxies", "synthetic-seed",
+  "csv-growth", "csv-inflation", "base-currency", "currency-map", "corr-blend",
+  "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
+  "macro-lag", "transition-uncertainty", "periods", "paths", "seed", "distribution",
+  "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "risk-free", "annual-inflation",
+];
+
+function saveControls() {
+  const data = { source: sourceValue() };
+  CONTROL_IDS.forEach((id) => {
+    const el = $(id);
+    if (el) data[id] = el.value;
+  });
+  data.synthetic = Array.from(document.querySelectorAll('#synthetic-options input[type="checkbox"]:checked')).map((el) => el.value);
+  data.useCorr = $("use-corr-override").checked;
+  data.corrTargets = gatherCorrelationTargets();
+  localStorage.setItem("mcq-controls", JSON.stringify(data));
+}
+
+function restoreControls() {
+  try {
+    const raw = localStorage.getItem("mcq-controls");
+    if (!raw) return;
+    const data = JSON.parse(raw);
+    CONTROL_IDS.forEach((id) => {
+      const el = $(id);
+      if (el && data[id] !== undefined) el.value = data[id];
+    });
+    const radio = document.querySelector(`input[name="source"][value="${data.source}"]`);
+    if (radio) radio.checked = true;
+    document.querySelectorAll("#synthetic-options input[type='checkbox']").forEach((checkbox) => {
+      checkbox.checked = (data.synthetic || []).includes(checkbox.value);
+    });
+    if (data.useCorr !== undefined) $("use-corr-override").checked = data.useCorr;
+    document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
+      if (data.corrTargets && data.corrTargets[slider.dataset.state] !== undefined) slider.value = data.corrTargets[slider.dataset.state];
+    });
+  } catch (error) {
+    // ignore corrupted saved settings
+  }
 }
 
 /* ---------- Init ---------- */
@@ -926,7 +1090,20 @@ function init() {
   $("compare-btn").addEventListener("click", onCompare);
   $("download-summary").addEventListener("click", onDownloadSummary);
   $("download-diagnostics").addEventListener("click", onDownloadDiagnostics);
+  $("download-wealth").addEventListener("click", onDownloadWealth);
   $("preset-apply").addEventListener("click", applyPreset);
+
+  document.addEventListener("input", saveControls);
+  document.addEventListener("change", saveControls);
+  document.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !$("run-btn").disabled) {
+      event.preventDefault();
+      onRun();
+    }
+  });
+
+  restoreControls();
+  toggleSourceGroups();
 
   fetch("/api/health")
     .then((response) => response.json())

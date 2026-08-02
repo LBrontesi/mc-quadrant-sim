@@ -193,6 +193,20 @@ legend { font-size: 11px; color: var(--muted); padding: 0 6px; }
 
 .weight-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
 .weight-row input { width: 90px; margin: 0; }
+.portfolio-blocks { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
+.donut { width: 110px; height: 110px; }
+.donut svg { display: block; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.chip {
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.14);
+  border: 1px solid rgba(59, 130, 246, 0.45);
+  color: #bfdbfe;
+  font-size: 12px;
+  font-weight: 600;
+}
 
 .btn {
   padding: 10px 16px;
