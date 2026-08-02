@@ -136,6 +136,7 @@ def parse_proxy_map(raw_proxies: str) -> dict[str, str]:
 
 
 def default_weight(asset: str, assets: list[str]) -> float:
+    base_asset = asset.removesuffix("_EXTENDED").removesuffix("_SIM").removesuffix("SIM")
     defaults = {
         "SPY": 40.0,
         "IEF": 20.0,
@@ -146,11 +147,15 @@ def default_weight(asset: str, assets: list[str]) -> float:
         "TIP": 3.0,
         "SHY": 2.0,
     }
-    return defaults.get(asset, round(100.0 / max(len(assets), 1), 2))
+    return defaults.get(base_asset, round(100.0 / max(len(assets), 1), 2))
 
 
 def default_selected_tickers(tickers: list[str]) -> list[str]:
-    preferred = [ticker for ticker in DEFAULT_TICKER_ORDER if ticker in tickers]
+    preferred = [
+        f"{ticker}SIM" if f"{ticker}SIM" in tickers else ticker
+        for ticker in DEFAULT_TICKER_ORDER
+        if ticker in tickers or f"{ticker}SIM" in tickers
+    ]
     if preferred:
         return preferred
     return tickers[: min(4, len(tickers))]
@@ -160,9 +165,9 @@ def default_correlation_pair(tickers: list[str]) -> tuple[str | None, str | None
     if len(tickers) < 2:
         return (tickers[0], None) if tickers else (None, None)
 
-    asset_a = "SPY" if "SPY" in tickers else tickers[0]
+    asset_a = "SPYSIM" if "SPYSIM" in tickers else "SPY" if "SPY" in tickers else tickers[0]
     remaining = [ticker for ticker in tickers if ticker != asset_a]
-    asset_b = "IEF" if "IEF" in remaining else remaining[0]
+    asset_b = "IEFSIM" if "IEFSIM" in remaining else "IEF" if "IEF" in remaining else remaining[0]
     return asset_a, asset_b
 
 
@@ -385,6 +390,8 @@ def load_data(
     demo_seed: int,
     ticker_text: str,
     proxy_text: str,
+    synthetic_text: str,
+    synthetic_seed: int,
     start_date: str,
     end_date: str,
     prices_file,
@@ -407,18 +414,28 @@ def load_data(
             if not tickers:
                 raise ValueError("Enter at least one Yahoo Finance ticker.")
             historical_proxies = parse_proxy_map(proxy_text)
+            synthetic_assets = parse_tickers(synthetic_text)
             macro, returns, available = load_market_data(
                 tickers,
                 start_date,
                 end_date,
                 historical_proxies=historical_proxies,
+                synthetic_assets=synthetic_assets,
+                synthetic_seed=int(synthetic_seed),
             )
             unavailable = [t for t in tickers if t not in available]
-            msg = f"Loaded {len(available)} tickers from Yahoo Finance."
+            base_available = [
+                ticker
+                for ticker in available
+                if not ticker.endswith("_SIM") and not ticker.endswith("SIM")
+            ]
+            msg = f"Loaded {len(base_available)} tickers from Yahoo Finance."
             if unavailable:
                 msg += f" No usable history for: {', '.join(unavailable)}"
             if historical_proxies:
                 msg += f" Backfilled proxies: {', '.join(historical_proxies.values())}."
+            if synthetic_assets:
+                msg += f" Simulated sources: {', '.join(f'{asset}SIM' for asset in synthetic_assets)}."
             return macro, returns, available, "growth", "inflation", msg
 
         # CSV upload
@@ -797,6 +814,12 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                     label="Historical proxies (optional)",
                     info="ASSET:PROXY pairs, for example SPY:^GSPC, GLD:GC=F. Proxy levels are scaled during the overlap.",
                 )
+                synthetic_text = gr.Textbox(
+                    value="",
+                    label="Synthetic backfill assets (optional)",
+                    info="Add each asset to Market tickers first. IEF, SHY, or DBMF become IEF_SIM/IEFSIM-style source pairs.",
+                )
+                synthetic_seed = gr.Number(value=42, label="Synthetic history seed", precision=0, minimum=1)
                 start_date = gr.Textbox(value="1990-01-01", label="History start (YYYY-MM-DD)")
                 end_date = gr.Textbox(value=date.today().isoformat(), label="History end (YYYY-MM-DD)")
 
@@ -1063,12 +1086,12 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
     )
 
     def on_load(
-        source, demo_seed, ticker_text, proxy_text, start_date, end_date,
+        source, demo_seed, ticker_text, proxy_text, synthetic_text, synthetic_seed, start_date, end_date,
         prices_file, macro_file, asset_input, monthly_returns,
         growth_col, inflation_col,
     ):
         macro, returns, tickers, gcol, icol, msg = load_data(
-            source, demo_seed, ticker_text, proxy_text, start_date, end_date,
+            source, demo_seed, ticker_text, proxy_text, synthetic_text, synthetic_seed, start_date, end_date,
             prices_file, macro_file, asset_input, monthly_returns,
             growth_col, inflation_col,
         )
@@ -1090,7 +1113,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
     load_btn.click(
         on_load,
         inputs=[
-            source, demo_seed, ticker_text, proxy_text, start_date, end_date,
+            source, demo_seed, ticker_text, proxy_text, synthetic_text, synthetic_seed, start_date, end_date,
             prices_file, macro_file, asset_input, monthly_returns,
             growth_col, inflation_col,
         ],

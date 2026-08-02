@@ -33,6 +33,15 @@ observation and only fills missing primary prices; it never overwrites primary
 history. Proxy returns are therefore an explicit approximation, not a claim
 that the ETF existed earlier.
 
+The Yahoo dashboards also support source-labeled synthetic backfills inspired
+by the `IEFSIM`/`DBMFSIM` convention used by portfolio backtesters. Entering
+`IEF, DBMF` as synthetic assets (with both tickers included in the Yahoo input)
+keeps `IEF` and `DBMF` as observed-only series,
+creates `IEF_SIM` and `DBMF_SIM` for modeled pre-inception segments, and
+creates `IEFSIM` and `DBMFSIM` as stitched series for calibration. The generated
+segment is reproducible from its seed and calibrated from observed monthly
+returns; it is not an official index history.
+
 Macro observations are classified before they are joined to asset returns. The
 dashboard defaults to a one-period macro release lag: a macro regime observed
 at period `t` is used for asset returns beginning at `t + 1`. Remaining dates
@@ -170,7 +179,9 @@ The dashboard starts with the same offline demo data and can also calibrate from
 uploaded CSV files. Asset selection is ticker-based: choose the tickers in the
 sidebar, then enter weights only for those selected tickers before running the
 simulation. Yahoo Finance mode starts at 1990 by default and accepts optional
-proxy pairs such as `SPY:^GSPC, GLD:GC=F`.
+proxy pairs such as `SPY:^GSPC, GLD:GC=F`. The synthetic asset field accepts
+values such as `IEF, DBMF`; select the resulting `IEFSIM` or `DBMFSIM` series
+for a backtest.
 
 ## Run The Gradio App
 

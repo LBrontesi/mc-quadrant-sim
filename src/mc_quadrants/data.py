@@ -106,6 +106,133 @@ def backfill_prices(
     return extended.sort_index()
 
 
+def simulate_pre_inception_returns(
+    returns: pd.DataFrame,
+    assets: Sequence[str] | str,
+    start: str | pd.Timestamp,
+    random_seed: int = 42,
+    distribution: str = "student_t",
+    degrees_of_freedom: float = 5.0,
+    frequency: str = "ME",
+) -> pd.DataFrame:
+    """Generate source-labeled monthly returns before each asset's inception.
+
+    The observed return mean and covariance are used as calibration inputs. A
+    generated series ends immediately before the first observed return for its
+    asset, so it cannot overwrite or overlap the observed source.
+    """
+
+    if returns.empty:
+        raise ValueError("returns must contain at least one row.")
+    if returns.index.has_duplicates:
+        raise ValueError("returns must not contain duplicate dates.")
+
+    raw_assets = (assets,) if isinstance(assets, str) else assets
+    asset_list = list(dict.fromkeys(str(asset).strip() for asset in raw_assets))
+    if not asset_list or any(not asset for asset in asset_list):
+        raise ValueError("At least one non-empty asset is required.")
+    missing_assets = [asset for asset in asset_list if asset not in returns.columns]
+    if missing_assets:
+        raise KeyError(f"Returns are missing synthetic assets: {', '.join(missing_assets)}")
+
+    distribution = str(distribution).lower().replace("-", "_")
+    if distribution not in {"normal", "student_t", "t"}:
+        raise ValueError("distribution must be 'normal' or 'student_t'.")
+    if distribution == "t":
+        distribution = "student_t"
+    if distribution == "student_t" and (
+        not np.isfinite(degrees_of_freedom) or degrees_of_freedom <= 2
+    ):
+        raise ValueError("degrees_of_freedom must be finite and greater than 2 for Student-t returns.")
+
+    try:
+        observed = returns.sort_index().loc[:, asset_list].apply(pd.to_numeric, errors="raise")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("returns must contain only numeric values.") from exc
+    if np.isinf(observed.to_numpy(dtype=float)).any():
+        raise ValueError("returns must contain only finite values.")
+
+    first_observations: dict[str, pd.Timestamp] = {}
+    for asset in asset_list:
+        valid = observed[asset].dropna()
+        if len(valid) < 2:
+            raise ValueError(f"At least two observed returns are required for synthetic asset: {asset}")
+        first_observations[asset] = pd.Timestamp(valid.index[0])
+
+    first_observation = max(first_observations.values())
+    start_period = pd.Timestamp(start).to_period("M").to_timestamp("M")
+    end_period = first_observation - pd.offsets.MonthEnd(1)
+    columns = [f"{asset}_SIM" for asset in asset_list]
+    if start_period > end_period:
+        return pd.DataFrame(columns=columns, index=pd.DatetimeIndex([], name=observed.index.name))
+    simulation_index = pd.date_range(start_period, end_period, freq=frequency)
+
+    means = observed.mean().to_numpy(dtype=float)
+    covariance = observed.cov().reindex(index=asset_list, columns=asset_list)
+    variances = observed.var(ddof=1).to_numpy(dtype=float)
+    covariance_values = covariance.to_numpy(dtype=float)
+    for index, variance in enumerate(variances):
+        if not np.isfinite(covariance_values[index, index]):
+            covariance_values[index, index] = variance if np.isfinite(variance) else 0.0
+    covariance_values = np.nan_to_num(covariance_values, nan=0.0, posinf=0.0, neginf=0.0)
+    covariance_values = (covariance_values + covariance_values.T) / 2.0
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance_values)
+    covariance_values = (eigenvectors * np.clip(eigenvalues, 1e-12, None)) @ eigenvectors.T
+    covariance_values = (covariance_values + covariance_values.T) / 2.0
+
+    rng = np.random.default_rng(random_seed)
+    if distribution == "normal":
+        draws = rng.multivariate_normal(means, covariance_values, size=len(simulation_index))
+    else:
+        scale = covariance_values * (degrees_of_freedom - 2.0) / degrees_of_freedom
+        normal_draws = rng.multivariate_normal(
+            np.zeros(len(asset_list)),
+            scale,
+            size=len(simulation_index),
+        )
+        chi_squared = rng.chisquare(degrees_of_freedom, size=len(simulation_index))
+        draws = means + normal_draws / np.sqrt(chi_squared / degrees_of_freedom)[:, None]
+
+    simulated = pd.DataFrame(np.nan, index=simulation_index, columns=columns)
+    for index, asset in enumerate(asset_list):
+        asset_dates = simulation_index < first_observations[asset]
+        simulated.loc[asset_dates, f"{asset}_SIM"] = draws[asset_dates, index]
+    simulated.index.name = observed.index.name
+    return simulated
+
+
+def combine_observed_and_simulated_returns(
+    observed_returns: pd.DataFrame,
+    simulated_returns: pd.DataFrame,
+    simulation_suffix: str = "_SIM",
+    stitched_suffix: str = "SIM",
+) -> pd.DataFrame:
+    """Keep source columns and add a full stitched ``ASSETSIM`` series."""
+
+    if observed_returns.index.has_duplicates or simulated_returns.index.has_duplicates:
+        raise ValueError("Observed and simulated returns must not contain duplicate dates.")
+    if not simulation_suffix or not stitched_suffix:
+        raise ValueError("Source suffixes must not be empty.")
+
+    simulated = simulated_returns.sort_index()
+    combined_index = observed_returns.index.union(simulated.index)
+    combined = observed_returns.sort_index().reindex(combined_index)
+    for simulation_column in simulated.columns:
+        if not str(simulation_column).endswith(simulation_suffix):
+            raise ValueError(f"Simulated return column must end with {simulation_suffix}: {simulation_column}")
+        asset = str(simulation_column)[: -len(simulation_suffix)]
+        if asset not in combined.columns:
+            raise KeyError(f"Observed returns are missing simulated asset: {asset}")
+        stitched_column = f"{asset}{stitched_suffix}"
+        if stitched_column in combined.columns:
+            raise ValueError(f"Stitched return column already exists: {stitched_column}")
+        simulated_series = simulated[simulation_column].reindex(combined_index)
+        combined[simulation_column] = simulated_series
+        combined[stitched_column] = combined[asset].combine_first(simulated_series)
+
+    return combined.sort_index()
+
+
 def fetch_yahoo_prices(
     tickers: Sequence[str] | str,
     start: str,
@@ -172,6 +299,8 @@ def _load_market_data_cached(
     start: str,
     end: str,
     historical_proxies: tuple[tuple[str, str], ...] = (),
+    synthetic_assets: tuple[str, ...] = (),
+    synthetic_seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
     start_date = pd.Timestamp(start)
     end_date = pd.Timestamp(end)
@@ -213,6 +342,15 @@ def _load_market_data_cached(
 
     returns = prices_to_returns(prices.loc[:, list(available)], method="log")
     returns = returns.resample("ME").sum(min_count=1).dropna(how="all")
+    if synthetic_assets:
+        simulated_returns = simulate_pre_inception_returns(
+            returns,
+            assets=synthetic_assets,
+            start=start_date,
+            random_seed=synthetic_seed,
+        )
+        returns = combine_observed_and_simulated_returns(returns, simulated_returns)
+        available = tuple(returns.columns)
     macro_levels = fetch_fred_macro(
         {"growth": "INDPRO", "inflation": "CPIAUCSL"},
         start=start_date.strftime("%Y-%m-%d"),
@@ -229,6 +367,8 @@ def load_market_data(
     start: str,
     end: str,
     historical_proxies: Mapping[str, str] | None = None,
+    synthetic_assets: Sequence[str] | str = (),
+    synthetic_seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """Load Yahoo prices/FRED macro data, optionally backfilling with proxies."""
 
@@ -243,12 +383,24 @@ def load_market_data(
         if not normalized_proxy:
             raise ValueError(f"Historical proxy ticker is empty for asset: {normalized_asset}")
         normalized_proxies.append((normalized_asset, normalized_proxy))
+    raw_synthetic_assets = (synthetic_assets,) if isinstance(synthetic_assets, str) else synthetic_assets
+    normalized_synthetic_assets = tuple(
+        dict.fromkeys(str(asset).strip().upper() for asset in raw_synthetic_assets if str(asset).strip())
+    )
+    missing_synthetic = [asset for asset in normalized_synthetic_assets if asset not in normalized_tickers]
+    if missing_synthetic:
+        raise ValueError(
+            "Synthetic assets must be included in the selected tickers: "
+            + ", ".join(missing_synthetic)
+        )
 
     macro, returns, available = _load_market_data_cached(
         normalized_tickers,
         pd.Timestamp(start).strftime("%Y-%m-%d"),
         pd.Timestamp(end).strftime("%Y-%m-%d"),
         tuple(dict.fromkeys(normalized_proxies)),
+        normalized_synthetic_assets,
+        int(synthetic_seed),
     )
     return macro.copy(), returns.copy(), list(available)
 

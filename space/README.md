@@ -25,6 +25,7 @@ A Monte Carlo simulator built around the classic four macro quadrants:
 - **Demo mode** - runs offline with synthetic data
 - **Yahoo Finance** - fetch real asset prices and FRED macro data
 - **Historical proxies** - extend pre-inception history with explicit, scaled Yahoo series
+- **Synthetic series** - source-labeled `ASSETSIM` backtests with reproducible pre-inception segments
 - **CSV upload** - calibrate from your own data
 - **Markov transition matrix** - estimated from historical regime changes
 - **Regime-specific asset moments** - expected returns, volatility, covariance, and correlation per quadrant

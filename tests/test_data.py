@@ -2,7 +2,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mc_quadrants.data import backfill_prices, prices_to_returns
+from mc_quadrants.data import (
+    backfill_prices,
+    combine_observed_and_simulated_returns,
+    prices_to_returns,
+    simulate_pre_inception_returns,
+)
 
 
 def test_prices_to_returns_sorts_dates_and_preserves_return_method():
@@ -49,3 +54,22 @@ def test_backfill_prices_scales_proxy_and_preserves_primary_values():
     assert extended.loc[pd.Timestamp("2019-12-31"), "SPY"] == pytest.approx(200.0 / 110.0 * 100.0)
     assert extended.loc[pd.Timestamp("2020-02-29"), "SPY"] == pytest.approx(200.0)
     assert extended.loc[pd.Timestamp("2020-03-31"), "SPY"] == pytest.approx(220.0)
+
+
+def test_simulated_source_is_separate_from_stitched_series():
+    dates = pd.date_range("2020-02-29", periods=12, freq="ME")
+    observed = pd.DataFrame({"IEF": np.linspace(-0.02, 0.02, len(dates))}, index=dates)
+
+    simulated = simulate_pre_inception_returns(
+        observed,
+        assets=["IEF"],
+        start="2019-01-01",
+        random_seed=7,
+    )
+    combined = combine_observed_and_simulated_returns(observed, simulated)
+
+    assert "IEF_SIM" in combined.columns
+    assert "IEFSIM" in combined.columns
+    assert combined.loc[: "2020-01-31", "IEF_SIM"].notna().any()
+    assert combined.loc["2020-02-29":, "IEF_SIM"].isna().all()
+    assert combined.loc[:, "IEFSIM"].notna().all()

@@ -98,6 +98,7 @@ def threshold_control(label: str, key: str) -> str | float:
 
 
 def default_weight(asset: str, assets: list[str]) -> float:
+    base_asset = asset.removesuffix("_EXTENDED").removesuffix("_SIM").removesuffix("SIM")
     defaults = {
         "SPY": 40.0,
         "IEF": 20.0,
@@ -108,7 +109,7 @@ def default_weight(asset: str, assets: list[str]) -> float:
         "TIP": 3.0,
         "SHY": 2.0,
     }
-    return defaults.get(asset, round(100.0 / max(len(assets), 1), 2))
+    return defaults.get(base_asset, round(100.0 / max(len(assets), 1), 2))
 
 
 def normalize_ticker_columns(data: pd.DataFrame) -> pd.DataFrame:
@@ -118,10 +119,21 @@ def normalize_ticker_columns(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def default_selected_tickers(tickers: list[str]) -> list[str]:
-    preferred = [ticker for ticker in DEFAULT_TICKER_ORDER if ticker in tickers]
+    preferred = [
+        f"{ticker}SIM" if f"{ticker}SIM" in tickers else ticker
+        for ticker in DEFAULT_TICKER_ORDER
+        if ticker in tickers or f"{ticker}SIM" in tickers
+    ]
     if preferred:
         return preferred
     return tickers[: min(4, len(tickers))]
+
+
+def preferred_asset(asset: str, assets: list[str]) -> str | None:
+    for candidate in (f"{asset}SIM", asset, f"{asset}_SIM"):
+        if candidate in assets:
+            return candidate
+    return None
 
 
 def parse_tickers(raw_tickers: str) -> list[str]:
@@ -156,6 +168,8 @@ def load_market_data(
     start: date,
     end: date,
     historical_proxies: tuple[tuple[str, str], ...] = (),
+    synthetic_assets: tuple[str, ...] = (),
+    synthetic_seed: int = 42,
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
     """Load market prices plus FRED industrial production and CPI macro inputs."""
     macro, returns, available = load_market_data_shared(
@@ -163,6 +177,8 @@ def load_market_data(
         start=start.isoformat(),
         end=end.isoformat(),
         historical_proxies=dict(historical_proxies),
+        synthetic_assets=synthetic_assets,
+        synthetic_seed=synthetic_seed,
     )
     return macro, returns, tuple(available)
 
@@ -242,8 +258,8 @@ def correlation_overrides(
     if not use_override:
         return None, 0.0
 
-    default_a = "SPY" if "SPY" in assets else assets[0]
-    default_b = "IEF" if "IEF" in assets else assets[min(1, len(assets) - 1)]
+    default_a = preferred_asset("SPY", assets) or assets[0]
+    default_b = preferred_asset("IEF", assets) or assets[min(1, len(assets) - 1)]
     asset_a = st.sidebar.selectbox("First ticker", assets, index=assets.index(default_a))
     asset_b_options = [asset for asset in assets if asset != asset_a]
     asset_b = st.sidebar.selectbox(
@@ -291,6 +307,18 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
             value="",
             help="Use ASSET:PROXY pairs, for example SPY:^GSPC, GLD:GC=F. Proxy levels are scaled to the asset during the overlap.",
         )
+        synthetic_text = st.sidebar.text_input(
+            "Synthetic backfill assets (optional)",
+            value="",
+            help="Enter observed tickers such as IEF, SHY, or DBMF; each must also be in Market tickers. The loader creates *_SIM and *SIM columns using reproducible Student-t draws.",
+        )
+        synthetic_seed = st.sidebar.number_input(
+            "Synthetic history seed",
+            value=42,
+            min_value=1,
+            step=1,
+            disabled=not synthetic_text.strip(),
+        )
         tickers = parse_tickers(ticker_text)
         if not tickers:
             st.error("Enter at least one Yahoo Finance ticker.")
@@ -304,12 +332,15 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
 
         try:
             historical_proxies = parse_proxy_map(proxy_text)
+            synthetic_assets = parse_tickers(synthetic_text)
             with st.spinner("Downloading prices and macro data..."):
                 macro, returns, available = load_market_data(
                     tuple(tickers),
                     start,
                     end,
                     tuple(historical_proxies.items()),
+                    tuple(synthetic_assets),
+                    int(synthetic_seed),
                 )
         except (ImportError, ValueError, RuntimeError) as exc:
             st.error(f"Could not load market data: {exc}")
@@ -318,6 +349,11 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
         unavailable = [ticker for ticker in tickers if ticker not in available]
         if unavailable:
             st.warning(f"No usable price history was returned for: {', '.join(unavailable)}")
+        if synthetic_assets:
+            st.info(
+                "Synthetic sources loaded: "
+                + ", ".join(f"{asset}_SIM -> {asset}SIM" for asset in synthetic_assets)
+            )
         return macro, returns, "growth", "inflation"
 
     prices_file = st.sidebar.file_uploader("Asset CSV", type="csv")
