@@ -576,6 +576,8 @@ def run_simulation(
 ) -> tuple[go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, str, str, str, str, str]:
     """Run the full calibration + simulation pipeline and return all outputs."""
     try:
+        if macro is None or returns is None:
+            raise ValueError("Load Data before running the simulation.")
         selected_tickers = [str(ticker).strip().upper() for ticker in (selected_tickers or [])]
         if not selected_tickers:
             raise ValueError("Select at least one ticker.")
@@ -802,6 +804,8 @@ def compare_scenarios(
     """Compare Gaussian and Student-t outcomes using identical inputs."""
 
     try:
+        if macro is None or returns is None:
+            raise ValueError("Load Data before comparing scenarios.")
         selected_tickers = [str(ticker).strip().upper() for ticker in (selected_tickers or [])]
         weights = _weights_from_dataframe(weights_df, selected_tickers)
         base_currency = str(base_currency).strip().upper()
@@ -1028,6 +1032,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                 choices=DEFAULT_TICKER_ORDER,
                 value=[],
                 multiselect=True,
+                interactive=False,
                 label="Portfolio tickers",
                 info="Select tickers to include in the simulation. Load Data refreshes this list for the selected source.",
             )
@@ -1091,7 +1096,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                     label=REGIME_NAMES[REGIME_ORDER[3]],
                 )
 
-            run_btn = gr.Button("Run Simulation", variant="primary", size="lg")
+            run_btn = gr.Button("Run Simulation", variant="primary", size="lg", interactive=False)
             run_msg = gr.Markdown()
             selection_msg = gr.Markdown()
 
@@ -1102,7 +1107,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                 wealth_download = gr.File(label="Download wealth paths")
                 summary_download = gr.File(label="Download risk summary")
                 diagnostics_download = gr.File(label="Download diagnostics")
-            compare_btn = gr.Button("Compare Normal vs Student-t")
+            compare_btn = gr.Button("Compare Normal vs Student-t", interactive=False)
             comparison_table = gr.Dataframe(
                 label="Scenario Comparison",
                 interactive=False,
@@ -1164,12 +1169,15 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
             gr.update(visible=source == "Demo"),
             gr.update(visible=source == "Yahoo Finance"),
             gr.update(visible=source == "CSV upload"),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(value=[], interactive=False),
         )
 
     source.change(
         toggle_groups,
         inputs=[source],
-        outputs=[demo_group, yahoo_group, csv_group],
+        outputs=[demo_group, yahoo_group, csv_group, run_btn, compare_btn, ticker_selector],
     )
 
     def toggle_student_t(value):
@@ -1217,13 +1225,15 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
         correlation_a, correlation_b = default_correlation_pair(defaults)
         return (
             macro, returns, tickers, gcol, icol, msg,
-            gr.update(choices=tickers, value=defaults),
+            gr.update(choices=tickers, value=defaults, interactive=True),
             gr.update(value=weights_data, headers=["Ticker", "Weight (%)"], datatype=["str", "number"], interactive=True),
             gr.update(value=macro.tail(120)),
             gr.update(value=returns.tail(120)),
             gr.update(choices=defaults, value=correlation_a, interactive=correlation_a is not None),
             gr.update(choices=defaults, value=correlation_b, interactive=correlation_b is not None),
             gr.update(value=len(defaults) >= 2, interactive=len(defaults) >= 2),
+            gr.update(interactive=bool(defaults)),
+            gr.update(interactive=bool(defaults)),
         )
 
     load_btn.click(
@@ -1238,6 +1248,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
             growth_col_state, inflation_col_state, load_msg,
             ticker_selector, weights_table, macro_table, returns_table,
             correlation_asset_a, correlation_asset_b, use_correlation_override,
+            run_btn, compare_btn,
         ],
     )
 
@@ -1248,6 +1259,8 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                 gr.update(choices=[], value=None, interactive=False),
                 gr.update(choices=[], value=None, interactive=False),
                 gr.update(value=False, interactive=False),
+                gr.update(interactive=False),
+                gr.update(interactive=False),
             )
         weights_data = [[t, default_weight(t, tickers)] for t in tickers]
         correlation_a, correlation_b = default_correlation_pair(tickers)
@@ -1256,12 +1269,14 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
             gr.update(choices=tickers, value=correlation_a, interactive=correlation_a is not None),
             gr.update(choices=tickers, value=correlation_b, interactive=correlation_b is not None),
             gr.update(value=len(tickers) >= 2, interactive=len(tickers) >= 2),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
         )
 
     ticker_selector.change(
         on_ticker_change,
         inputs=[ticker_selector],
-        outputs=[weights_table, correlation_asset_a, correlation_asset_b, use_correlation_override],
+        outputs=[weights_table, correlation_asset_a, correlation_asset_b, use_correlation_override, run_btn, compare_btn],
     )
 
     def on_run(
