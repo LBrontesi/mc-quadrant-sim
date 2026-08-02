@@ -1002,9 +1002,11 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
         with gr.Column(scale=2):
             gr.Markdown("### Portfolio")
             ticker_selector = gr.Dropdown(
+                choices=DEFAULT_TICKER_ORDER,
+                value=[],
                 multiselect=True,
                 label="Portfolio tickers",
-                info="Select tickers to include in the simulation.",
+                info="Select tickers to include in the simulation. Load Data refreshes this list for the selected source.",
             )
             weights_table = gr.Dataframe(
                 headers=["Ticker", "Weight (%)"],
