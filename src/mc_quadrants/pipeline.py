@@ -140,6 +140,7 @@ def run_scenario(
         )
     model.metadata["base_currency"] = str(base_currency).strip().upper()
     model.metadata["fx_quote"] = fx_quote
+    model.metadata["initial_value"] = float(initial_value)
     if asset_currencies:
         model.metadata["asset_currencies"] = dict(asset_currencies)
     return SimulationRun(
@@ -169,6 +170,9 @@ def compare_distributions(
                 "p05": summary["p05"],
                 "median": summary["p50"],
                 "p95": summary["p95"],
+                "annualized_return": summary["annualized_return"],
+                "annualized_volatility": summary["annualized_volatility"],
+                "sharpe_ratio": summary["sharpe_ratio"],
                 "probability_of_loss": summary["probability_of_loss"],
                 "var_95": summary["var_95"],
                 "expected_shortfall_95": summary["expected_shortfall_95"],

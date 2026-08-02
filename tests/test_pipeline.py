@@ -73,4 +73,6 @@ def test_pipeline_applies_macro_lag_and_normalizes_asset_names():
         transaction_cost_bps=10,
     )
     assert comparison["distribution"].tolist() == ["Normal", "Student-t"]
-    assert {"probability_of_loss", "worst_max_drawdown"}.issubset(comparison.columns)
+    assert {"probability_of_loss", "worst_max_drawdown", "annualized_return", "sharpe_ratio"}.issubset(
+        comparison.columns
+    )

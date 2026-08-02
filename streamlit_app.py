@@ -69,12 +69,20 @@ def read_uploaded_csv(uploaded_file) -> pd.DataFrame | None:
     if uploaded_file is None:
         return None
 
-    data = pd.read_csv(uploaded_file)
+    try:
+        data = pd.read_csv(uploaded_file)
+    except (TypeError, ValueError) as exc:
+        st.error(f"Could not parse the uploaded CSV: {exc}")
+        st.stop()
     if "Date" not in data.columns:
         st.error("CSV files need a Date column.")
         st.stop()
 
-    data["Date"] = pd.to_datetime(data["Date"])
+    try:
+        data["Date"] = pd.to_datetime(data["Date"])
+    except (TypeError, ValueError):
+        st.error("The CSV Date column contains invalid dates.")
+        st.stop()
     return data.set_index("Date").sort_index()
 
 
@@ -642,6 +650,11 @@ st.caption(
     f"VaR (95%): {summary['var_95']:.2f} | "
     f"Expected shortfall (95%): {summary['expected_shortfall_95']:.2f} | "
     f"Worst max drawdown: {summary['max_drawdown_worst']:.1%}"
+)
+st.caption(
+    f"Annualized return: {summary['annualized_return']:.1%} | "
+    f"Annualized volatility: {summary['annualized_volatility']:.1%} | "
+    f"Sharpe ratio (0% risk-free): {summary['sharpe_ratio']:.2f}"
 )
 
 tab_simulation, tab_regimes, tab_correlations, tab_data = st.tabs(

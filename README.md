@@ -131,6 +131,13 @@ is `initial value - average wealth in the worst 5% tail`. Maximum drawdown is
 calculated path-by-path from the initial value and each subsequent running
 peak.
 
+Annualized metrics are derived from the terminal distribution: the annualized
+return scales the mean terminal growth to one year, the annualized volatility
+scales the terminal standard deviation by the square root of time, and the
+Sharpe ratio uses a zero risk-free rate. These are approximations that assume
+independent, identically distributed monthly returns, not a full time-series
+return decomposition.
+
 ### 8. Important Assumptions
 
 - Macro release lag is period-based and does not model data revisions or exact publication dates.

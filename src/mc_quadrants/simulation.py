@@ -328,8 +328,9 @@ def summarize_wealth_risk(
     wealth: pd.DataFrame,
     initial_value: float = 100.0,
     confidence: float = 0.95,
+    periods_per_year: float = 12.0,
 ) -> pd.Series:
-    """Calculate terminal, loss-tail, and drawdown metrics."""
+    """Calculate terminal, loss-tail, drawdown, and annualized metrics."""
 
     if wealth.empty or wealth.shape[1] == 0:
         raise ValueError("wealth must contain at least one simulated path.")
@@ -337,6 +338,8 @@ def summarize_wealth_risk(
         raise ValueError("initial_value must be positive and finite.")
     if not 0 < confidence < 1:
         raise ValueError("confidence must be between 0 and 1.")
+    if not np.isfinite(periods_per_year) or periods_per_year <= 0:
+        raise ValueError("periods_per_year must be positive and finite.")
     try:
         wealth_values = wealth.to_numpy(dtype=float)
     except (TypeError, ValueError) as exc:
@@ -355,6 +358,13 @@ def summarize_wealth_risk(
     running_max = wealth_with_initial.cummax(axis=0)
     drawdown = wealth_with_initial / running_max - 1.0
     max_drawdown = -drawdown.min(axis=0)
+    annualization = periods_per_year / len(wealth)
+    mean_terminal = float(terminal.mean())
+    annualized_return = (mean_terminal / initial_value) ** annualization - 1.0
+    annualized_volatility = (float(terminal.std(ddof=0)) / initial_value) * np.sqrt(annualization)
+    sharpe_ratio = (
+        float(annualized_return / annualized_volatility) if annualized_volatility > 0 else 0.0
+    )
     return pd.Series(
         {
             "mean": terminal.mean(),
@@ -362,6 +372,9 @@ def summarize_wealth_risk(
             "p05": terminal.quantile(0.05),
             "p50": terminal.quantile(0.50),
             "p95": terminal.quantile(0.95),
+            "annualized_return": float(annualized_return),
+            "annualized_volatility": float(annualized_volatility),
+            "sharpe_ratio": sharpe_ratio,
             "probability_of_loss": float((terminal < initial_value).mean()),
             "var_95": initial_value - lower_tail,
             "expected_shortfall_95": initial_value - float(tail.mean()),

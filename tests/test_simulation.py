@@ -159,6 +159,33 @@ def test_single_path_risk_summary_has_zero_standard_deviation():
     assert summary["std"] == 0.0
 
 
+def test_annualized_metrics_match_known_terminal_returns():
+    wealth = pd.DataFrame(
+        {
+            "path_0": [110.0],
+            "path_1": [130.0],
+        }
+    )
+
+    summary = summarize_wealth_risk(wealth, periods_per_year=12)
+
+    assert summary["annualized_return"] == pytest.approx((120.0 / 100.0) ** 12 - 1.0)
+    assert summary["annualized_volatility"] == pytest.approx((10.0 / 100.0) * np.sqrt(12))
+    assert summary["sharpe_ratio"] == pytest.approx(summary["annualized_return"] / summary["annualized_volatility"])
+
+
+def test_annualized_metrics_default_to_single_period_scaling():
+    wealth = pd.DataFrame({"path_0": [110.0]})
+
+    summary = summarize_wealth_risk(wealth, periods_per_year=1)
+
+    assert summary["annualized_return"] == pytest.approx(0.10)
+    assert summary["sharpe_ratio"] == 0.0
+
+    with pytest.raises(ValueError, match="periods_per_year"):
+        summarize_wealth_risk(wealth, periods_per_year=0)
+
+
 def test_portfolio_rejects_non_finite_weights():
     result = SimulationResult(
         returns=np.zeros((1, 1, 1)),

@@ -715,7 +715,10 @@ def run_simulation(
             f"**P05:** {summary['p05']:.2f} | "
             f"**Median:** {summary['p50']:.2f} | "
             f"**P95:** {summary['p95']:.2f} | "
-            f"**Volatility:** {summary['std']:.2f}"
+            f"**Volatility:** {summary['std']:.2f} | "
+            f"**Annualized return:** {summary['annualized_return']:.1%} | "
+            f"**Annualized volatility:** {summary['annualized_volatility']:.1%} | "
+            f"**Sharpe (0% rf):** {summary['sharpe_ratio']:.2f}"
         )
         distribution_text = next(
             label for label, value in RETURN_DISTRIBUTIONS.items() if value == distribution
