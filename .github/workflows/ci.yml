@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "feature/**"]
+    branches: ["main", "feature/**", "improvements"]
   pull_request:
 
 jobs:
@@ -21,3 +21,4 @@ jobs:
       - run: uv sync --frozen --extra dev
       - run: uv run ruff check .
       - run: uv run pytest -q
+      - run: uv run python -m compileall -q src tests gradio_app.py streamlit_app.py

@@ -25,12 +25,25 @@ def read_macro_csv(path: str, date_col: str = "Date") -> pd.DataFrame:
 def prices_to_returns(prices: pd.DataFrame, method: str = "log") -> pd.DataFrame:
     """Convert prices to log or simple returns."""
 
-    numeric_prices = prices.astype(float)
+    method = str(method).lower()
+    if method not in {"log", "simple"}:
+        raise ValueError("method must be 'log' or 'simple'.")
+    if prices.empty:
+        raise ValueError("prices must contain at least one row.")
+    if prices.index.has_duplicates:
+        raise ValueError("prices must not contain duplicate dates.")
+    try:
+        numeric_prices = prices.sort_index().apply(pd.to_numeric, errors="raise")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("prices must contain only numeric values.") from exc
+    values = numeric_prices.to_numpy(dtype=float)
+    invalid = np.isinf(values) | (np.isfinite(values) & (values <= 0))
+    if invalid.any():
+        raise ValueError("Price levels must be finite and greater than zero when present.")
     if method == "log":
         return np.log(numeric_prices / numeric_prices.shift(1))
     if method == "simple":
         return numeric_prices.pct_change()
-    raise ValueError("method must be 'log' or 'simple'.")
 
 
 def fetch_yahoo_prices(

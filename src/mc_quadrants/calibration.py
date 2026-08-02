@@ -31,6 +31,8 @@ def _clean_aligned_returns(
     regimes: pd.Series,
     lag_periods: int = 0,
 ) -> tuple[pd.DataFrame, pd.Series]:
+    if returns.index.has_duplicates or regimes.index.has_duplicates:
+        raise ValueError("returns and macro regime indexes must not contain duplicates.")
     clean_returns = returns.sort_index().dropna(how="all")
     aligned_regimes = _align_regimes_to_returns(regimes, clean_returns, lag_periods=lag_periods)
     clean_returns = clean_returns.dropna(how="any")
@@ -40,6 +42,12 @@ def _clean_aligned_returns(
     aligned_regimes = aligned_regimes.loc[valid_regime]
     if clean_returns.empty:
         raise ValueError("No overlapping return and regime observations after alignment.")
+    try:
+        finite_returns = np.isfinite(clean_returns.to_numpy(dtype=float)).all()
+    except (TypeError, ValueError) as exc:
+        raise ValueError("returns must contain only numeric values.") from exc
+    if not finite_returns:
+        raise ValueError("returns must contain only finite values.")
     return clean_returns, aligned_regimes
 
 
@@ -98,6 +106,8 @@ def estimate_regime_moments(
 
     if returns.empty:
         raise ValueError("returns must not be empty.")
+    if min_observations <= 0:
+        raise ValueError("min_observations must be positive.")
 
     state_list = states or REGIME_ORDER
     clean_returns, aligned_regimes = _clean_aligned_returns(

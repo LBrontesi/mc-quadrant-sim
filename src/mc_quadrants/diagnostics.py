@@ -19,7 +19,7 @@ class CalibrationDiagnostics:
 
 
 def _transition_counts(regimes: pd.Series) -> pd.DataFrame:
-    clean = regimes.dropna().astype(str)
+    clean = regimes.dropna().sort_index().astype(str)
     counts = pd.DataFrame(0, index=REGIME_ORDER, columns=REGIME_ORDER, dtype=int)
     for current, next_state in zip(clean.iloc[:-1], clean.iloc[1:]):
         if current in counts.index and next_state in counts.columns:

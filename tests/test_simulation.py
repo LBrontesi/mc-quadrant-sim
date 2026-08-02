@@ -4,7 +4,12 @@ import pytest
 
 from mc_quadrants.calibration import calibrate_quadrant_model
 from mc_quadrants.regimes import Regime
-from mc_quadrants.simulation import simulate_portfolio_paths, simulate_returns, summarize_wealth_risk
+from mc_quadrants.simulation import (
+    simulate_portfolio_paths,
+    simulate_returns,
+    stationary_distribution,
+    summarize_wealth_risk,
+)
 from mc_quadrants.types import SimulationResult
 
 
@@ -131,3 +136,37 @@ def test_wealth_risk_summary_includes_downside_metrics():
     assert summary["var_95"] > 0
     assert summary["expected_shortfall_95"] >= summary["var_95"]
     assert 0 < summary["max_drawdown_mean"] < 1
+
+
+def test_stationary_distribution_solves_markov_balance_equation():
+    transition = pd.DataFrame(
+        [[0.9, 0.1], [0.2, 0.8]],
+        index=["growth", "recession"],
+        columns=["growth", "recession"],
+    )
+
+    distribution = stationary_distribution(transition)
+
+    assert np.allclose(distribution.to_numpy(), [2 / 3, 1 / 3])
+    assert np.allclose(distribution.to_numpy() @ transition.to_numpy(), distribution.to_numpy())
+
+
+def test_single_path_risk_summary_has_zero_standard_deviation():
+    wealth = pd.DataFrame({"path_0": [101.0, 103.0]})
+
+    summary = summarize_wealth_risk(wealth)
+
+    assert summary["std"] == 0.0
+
+
+def test_portfolio_rejects_non_finite_weights():
+    result = SimulationResult(
+        returns=np.zeros((1, 1, 1)),
+        regimes=np.empty((1, 1), dtype=object),
+        assets=["Stocks"],
+        states=[],
+        frequency="M",
+    )
+
+    with pytest.raises(ValueError, match="finite"):
+        simulate_portfolio_paths(result, {"Stocks": np.nan})

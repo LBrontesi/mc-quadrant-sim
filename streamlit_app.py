@@ -446,34 +446,38 @@ with st.sidebar:
 
 st.caption(f"Selected tickers: {', '.join(selected_tickers)}")
 
-scenario = run_scenario(
-    returns=returns,
-    macro=macro,
-    selected_tickers=selected_tickers,
-    growth_col=growth_col,
-    inflation_col=inflation_col,
-    growth_threshold=growth_threshold,
-    inflation_threshold=inflation_threshold,
-    periods=periods,
-    paths=paths,
-    random_seed=int(seed),
-    start_state=start_state,
-    weights=weights,
-    correlation_overrides=overrides,
-    override_weight=override_weight,
-    macro_lag_periods=macro_lag_periods,
-    distribution={
-        "Normal": "normal",
-        "Student-t": "student_t",
-        "Historical bootstrap": "bootstrap",
-        "Block bootstrap": "block_bootstrap",
-    }[distribution_label],
-    degrees_of_freedom=degrees_of_freedom,
-    block_size=block_size,
-    transition_uncertainty=transition_uncertainty,
-    rebalance_frequency=rebalance_frequency,
-    transaction_cost_bps=transaction_cost_bps,
-)
+try:
+    scenario = run_scenario(
+        returns=returns,
+        macro=macro,
+        selected_tickers=selected_tickers,
+        growth_col=growth_col,
+        inflation_col=inflation_col,
+        growth_threshold=growth_threshold,
+        inflation_threshold=inflation_threshold,
+        periods=periods,
+        paths=paths,
+        random_seed=int(seed),
+        start_state=start_state,
+        weights=weights,
+        correlation_overrides=overrides,
+        override_weight=override_weight,
+        macro_lag_periods=macro_lag_periods,
+        distribution={
+            "Normal": "normal",
+            "Student-t": "student_t",
+            "Historical bootstrap": "bootstrap",
+            "Block bootstrap": "block_bootstrap",
+        }[distribution_label],
+        degrees_of_freedom=degrees_of_freedom,
+        block_size=block_size,
+        transition_uncertainty=transition_uncertainty,
+        rebalance_frequency=rebalance_frequency,
+        transaction_cost_bps=transaction_cost_bps,
+    )
+except (KeyError, TypeError, ValueError) as exc:
+    st.error(f"Simulation failed: {exc}")
+    st.stop()
 model = scenario.model
 regimes = scenario.regimes
 result = scenario.result

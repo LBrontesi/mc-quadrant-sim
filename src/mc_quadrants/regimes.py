@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from numbers import Real
 from typing import Iterable
 
 import numpy as np
@@ -29,8 +30,11 @@ def resolve_threshold(values: pd.Series, threshold: ThresholdSpec) -> float:
     if clean.empty:
         raise ValueError("Cannot resolve threshold from an empty series.")
 
-    if isinstance(threshold, (int, float)):
-        return float(threshold)
+    if isinstance(threshold, Real):
+        resolved = float(threshold)
+        if not np.isfinite(resolved):
+            raise ValueError("Numeric thresholds must be finite.")
+        return resolved
     if threshold == "median":
         return float(clean.median())
     if threshold == "mean":
@@ -93,11 +97,13 @@ def estimate_transition_matrix(
 ) -> pd.DataFrame:
     """Estimate a Markov transition matrix from a historical regime series."""
 
-    if smoothing < 0:
-        raise ValueError("smoothing must be non-negative.")
+    if not np.isfinite(smoothing) or smoothing < 0:
+        raise ValueError("smoothing must be a finite, non-negative number.")
 
-    state_list = list(states)
-    clean = regimes.dropna().astype(str)
+    state_list = list(dict.fromkeys(states))
+    if not state_list:
+        raise ValueError("At least one state is required.")
+    clean = regimes.dropna().sort_index().astype(str)
     counts = pd.DataFrame(
         smoothing,
         index=state_list,

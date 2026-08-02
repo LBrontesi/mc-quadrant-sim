@@ -12,17 +12,32 @@ from mc_quadrants.types import ScenarioModel, SimulationResult
 def stationary_distribution(transition_matrix: pd.DataFrame) -> pd.Series:
     """Compute the long-run state distribution implied by a transition matrix."""
 
-    matrix = transition_matrix.to_numpy(dtype=float).T
-    eigenvalues, eigenvectors = np.linalg.eig(matrix)
-    closest = np.argmin(np.abs(eigenvalues - 1.0))
-    vector = np.real(eigenvectors[:, closest])
-    if vector.sum() < 0:
-        vector = -vector
-    vector = np.maximum(vector, 0.0)
-    if vector.sum() == 0:
-        vector = np.ones(len(vector))
-    vector = vector / vector.sum()
-    return pd.Series(vector, index=transition_matrix.index)
+    if transition_matrix.empty:
+        raise ValueError("transition_matrix must contain at least one state.")
+    if transition_matrix.index.has_duplicates or transition_matrix.columns.has_duplicates:
+        raise ValueError("Transition matrix labels must be unique.")
+    if set(transition_matrix.index) != set(transition_matrix.columns):
+        raise ValueError("Transition matrix rows and columns must contain the same states.")
+
+    states = list(transition_matrix.index)
+    matrix = transition_matrix.loc[states, states].to_numpy(dtype=float)
+    if not np.isfinite(matrix).all() or (matrix < 0).any():
+        raise ValueError("Transition matrix must contain finite, non-negative probabilities.")
+    if not np.allclose(matrix.sum(axis=1), 1.0):
+        raise ValueError("Transition matrix rows must sum to 1.")
+
+    # Solve pi P = pi with a normalization row instead of selecting an
+    # eigenvector, which is unstable for repeated or nearly repeated eigenvalues.
+    system = matrix.T - np.eye(len(states))
+    system[-1] = 1.0
+    target = np.zeros(len(states))
+    target[-1] = 1.0
+    vector, *_ = np.linalg.lstsq(system, target, rcond=None)
+    vector = np.clip(vector, 0.0, None)
+    if not np.isfinite(vector).all() or np.isclose(vector.sum(), 0.0):
+        vector = np.ones(len(states), dtype=float)
+    vector /= vector.sum()
+    return pd.Series(vector, index=states)
 
 
 def _rng(random_seed: int | None = None) -> np.random.Generator:
@@ -123,13 +138,15 @@ def simulate_returns(
     than two degrees of freedom.
     """
 
-    distribution = distribution.lower().replace("-", "_")
+    distribution = str(distribution).lower().replace("-", "_")
     if distribution not in {"normal", "student_t", "t", "bootstrap", "block_bootstrap"}:
         raise ValueError("distribution must be 'normal', 'student_t', 'bootstrap', or 'block_bootstrap'.")
     if distribution == "t":
         distribution = "student_t"
-    if distribution == "student_t" and degrees_of_freedom <= 2:
-        raise ValueError("degrees_of_freedom must be greater than 2 for Student-t returns.")
+    if distribution == "student_t" and (
+        not np.isfinite(degrees_of_freedom) or degrees_of_freedom <= 2
+    ):
+        raise ValueError("degrees_of_freedom must be finite and greater than 2 for Student-t returns.")
     if block_size <= 0:
         raise ValueError("block_size must be positive.")
 
@@ -223,12 +240,26 @@ def simulate_portfolio_paths(
     and transaction costs in basis points charged on traded notional.
     """
 
-    weight_vector = pd.Series(weights, dtype=float).reindex(result.assets).fillna(0.0)
-    if np.isclose(weight_vector.sum(), 0.0):
-        raise ValueError("Portfolio weights must have a non-zero sum.")
-    if not np.isclose(weight_vector.sum(), 1.0):
-        weight_vector = weight_vector / weight_vector.sum()
+    if not np.isfinite(initial_value) or initial_value <= 0:
+        raise ValueError("initial_value must be positive and finite.")
+    if result.returns.ndim != 3 or result.returns.shape[2] != len(result.assets):
+        raise ValueError("result.returns must have shape (periods, paths, assets).")
+    if not np.isfinite(result.returns).all():
+        raise ValueError("Simulated returns must contain only finite values.")
 
+    provided_weights = pd.Series(weights, dtype=float)
+    weight_vector = provided_weights.reindex(result.assets)
+    missing_assets = ~pd.Index(result.assets).isin(provided_weights.index)
+    weight_vector.loc[missing_assets] = 0.0
+    if not np.isfinite(weight_vector.to_numpy(dtype=float)).all():
+        raise ValueError("Portfolio weights must be finite numbers.")
+    weight_total = float(weight_vector.sum())
+    if not np.isfinite(weight_total) or np.isclose(weight_total, 0.0):
+        raise ValueError("Portfolio weights must have a non-zero sum.")
+    if not np.isclose(weight_total, 1.0):
+        weight_vector = weight_vector / weight_total
+
+    return_kind = str(return_kind).lower()
     if return_kind not in {"log", "simple"}:
         raise ValueError("return_kind must be 'log' or 'simple'.")
     if rebalance_frequency is not None:
@@ -245,7 +276,11 @@ def simulate_portfolio_paths(
         if return_kind == "log":
             wealth = initial_value * np.exp(np.cumsum(portfolio_returns, axis=0))
         else:
+            if (1.0 + portfolio_returns <= 0).any():
+                raise ValueError("Simple returns must be greater than -100% for positive wealth.")
             wealth = initial_value * np.cumprod(1.0 + portfolio_returns, axis=0)
+        if not np.isfinite(wealth).all():
+            raise ValueError("Portfolio wealth contains non-finite values.")
         return pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(result.returns.shape[1])])
 
     if return_kind == "log":
@@ -254,6 +289,8 @@ def simulate_portfolio_paths(
         asset_growth = 1.0 + result.returns
         if (asset_growth <= 0).any():
             raise ValueError("Simple returns must be greater than -100% for rebalancing.")
+    if not np.isfinite(asset_growth).all():
+        raise ValueError("Asset growth contains non-finite values.")
 
     periods, paths, assets = result.returns.shape
     holdings = np.broadcast_to(
@@ -276,6 +313,8 @@ def simulate_portfolio_paths(
         else:
             wealth[period] = value_before_rebalance
 
+    if not np.isfinite(wealth).all():
+        raise ValueError("Portfolio wealth contains non-finite values.")
     return pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(result.returns.shape[1])])
 
 
@@ -298,6 +337,12 @@ def summarize_wealth_risk(
         raise ValueError("initial_value must be positive and finite.")
     if not 0 < confidence < 1:
         raise ValueError("confidence must be between 0 and 1.")
+    try:
+        wealth_values = wealth.to_numpy(dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("wealth must contain numeric values.") from exc
+    if not np.isfinite(wealth_values).all():
+        raise ValueError("wealth must contain only finite values.")
 
     terminal = wealth.iloc[-1]
     tail_probability = 1.0 - confidence
@@ -313,7 +358,7 @@ def summarize_wealth_risk(
     return pd.Series(
         {
             "mean": terminal.mean(),
-            "std": terminal.std(),
+            "std": terminal.std(ddof=0),
             "p05": terminal.quantile(0.05),
             "p50": terminal.quantile(0.50),
             "p95": terminal.quantile(0.95),

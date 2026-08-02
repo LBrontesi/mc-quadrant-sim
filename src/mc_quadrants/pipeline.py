@@ -47,6 +47,7 @@ def run_scenario(
     transition_uncertainty: float = 0.0,
     rebalance_frequency: int | None = None,
     transaction_cost_bps: float = 0.0,
+    initial_value: float = 100.0,
 ) -> SimulationRun:
     """Calibrate and simulate one fully specified investment scenario."""
 
@@ -107,7 +108,7 @@ def run_scenario(
     wealth = simulate_portfolio_paths(
         result,
         weights=normalized_weights,
-        initial_value=100.0,
+        initial_value=initial_value,
         rebalance_frequency=rebalance_frequency,
         transaction_cost_bps=float(transaction_cost_bps),
     )
@@ -130,7 +131,7 @@ def run_scenario(
         regimes=regimes,
         result=result,
         wealth=wealth,
-        summary=summarize_wealth_risk(wealth),
+        summary=summarize_wealth_risk(wealth, initial_value=initial_value),
         diagnostics=diagnostics,
     )
 
