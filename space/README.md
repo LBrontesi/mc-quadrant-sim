@@ -4,7 +4,7 @@ emoji: 📈
 colorFrom: blue
 colorTo: green
 sdk: gradio
-sdk_version: 4.44.1
+sdk_version: 6.22.0
 app_file: gradio_app.py
 pinned: false
 ---
@@ -28,7 +28,9 @@ A Monte Carlo simulator built around the classic four macro quadrants:
 - **Markov transition matrix** - estimated from historical regime changes
 - **Regime-specific asset moments** - expected returns, volatility, covariance, and correlation per quadrant
 - **Monte Carlo simulation** - draws regime paths and samples asset returns
-- **Portfolio analysis** - wealth percentiles, terminal distribution, regime mix
+- **Return models** - Gaussian, Student-t, historical bootstrap, and block bootstrap
+- **Portfolio analysis** - wealth percentiles, downside risk, drawdown, regime mix, and costs
+- **Diagnostics and exports** - calibration warnings, scenario comparisons, and CSV downloads
 
 ## How to use
 
@@ -36,6 +38,7 @@ A Monte Carlo simulator built around the classic four macro quadrants:
 2. Select portfolio tickers and set weights
 3. Configure calibration thresholds and simulation parameters
 4. Click **Run Simulation** to see results
+5. Use the download controls to export wealth paths, risk summaries, and diagnostics
 
 ## Local development
 

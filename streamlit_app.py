@@ -1,29 +1,24 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import date, timedelta
 import re
+from collections.abc import Mapping
+from datetime import date
 
 import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from mc_quadrants.calibration import calibrate_quadrant_model
 from mc_quadrants.data import (
-    fetch_fred_macro,
-    fetch_yahoo_prices,
+    load_market_data as load_market_data_shared,
+)
+from mc_quadrants.data import (
     prices_to_returns,
-    yoy_change,
 )
 from mc_quadrants.demo import _demo_history
-from mc_quadrants.regimes import REGIME_ORDER, classify_quadrants
-from mc_quadrants.simulation import (
-    simulate_portfolio_paths,
-    simulate_returns,
-    summarize_terminal_wealth,
-)
-
+from mc_quadrants.diagnostics import simulation_regime_summary
+from mc_quadrants.pipeline import compare_distributions, run_scenario
+from mc_quadrants.regimes import REGIME_ORDER
 
 REGIME_NAMES = {
     "high_growth_low_inflation": "High growth / low inflation",
@@ -138,35 +133,12 @@ def load_market_data(
     end: date,
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
     """Load market prices plus FRED industrial production and CPI macro inputs."""
-
-    prices = normalize_ticker_columns(
-        fetch_yahoo_prices(
-            list(tickers),
-            start=start.isoformat(),
-            end=(end + timedelta(days=1)).isoformat(),
-        )
-    )
-    available = tuple(
-        ticker
-        for ticker in tickers
-        if ticker in prices.columns and prices[ticker].notna().sum() >= 2
-    )
-    if not available:
-        raise ValueError("Yahoo Finance did not return usable price history for these tickers.")
-
-    returns = prices_to_returns(prices.loc[:, list(available)], method="log")
-    returns = returns.resample("ME").sum(min_count=1).dropna(how="all")
-
-    macro_levels = fetch_fred_macro(
-        {"growth": "INDPRO", "inflation": "CPIAUCSL"},
+    macro, returns, available = load_market_data_shared(
+        tickers,
         start=start.isoformat(),
         end=end.isoformat(),
-    ).resample("ME").last()
-    macro = yoy_change(macro_levels).dropna(how="any")
-    if macro.empty:
-        raise ValueError("Not enough FRED history to calculate year-over-year growth and inflation.")
-
-    return macro, returns, available
+    )
+    return macro, returns, tuple(available)
 
 
 def ticker_selector(returns: pd.DataFrame) -> list[str]:
@@ -397,6 +369,21 @@ with st.sidebar:
     returns = returns[selected_tickers]
     growth_threshold = threshold_control("Growth threshold", "growth")
     inflation_threshold = threshold_control("Inflation threshold", "inflation")
+    macro_lag_periods = st.sidebar.slider(
+        "Macro release lag (periods)",
+        min_value=0,
+        max_value=3,
+        value=1,
+        help="Use prior macro observations to reduce look-ahead bias.",
+    )
+    transition_uncertainty = st.sidebar.slider(
+        "Transition uncertainty",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.0,
+        step=0.05,
+        help="0 uses the calibrated matrix; higher values sample more uncertain transitions.",
+    )
 
     overrides, override_weight = correlation_overrides(selected_tickers)
 
@@ -409,6 +396,35 @@ with st.sidebar:
     start_state = None
     if start_label != "Stationary":
         start_state = {REGIME_NAMES[state]: state for state in REGIME_ORDER}[start_label]
+
+    distribution_label = st.selectbox(
+        "Return distribution",
+        ["Normal", "Student-t", "Historical bootstrap", "Block bootstrap"],
+    )
+    degrees_of_freedom = 5.0
+    block_size = 3
+    if distribution_label == "Student-t":
+        degrees_of_freedom = st.slider("Student-t degrees of freedom", 3.0, 30.0, 5.0, 1.0)
+    if distribution_label == "Block bootstrap":
+        block_size = st.slider("Bootstrap block size", 2, 12, 3, 1)
+    rebalance_label = st.selectbox(
+        "Portfolio rebalancing",
+        ["Monthly", "Quarterly", "Annual", "Weighted log (legacy)"],
+    )
+    rebalance_frequency = {
+        "Monthly": 1,
+        "Quarterly": 3,
+        "Annual": 12,
+        "Weighted log (legacy)": None,
+    }[rebalance_label]
+    transaction_cost_bps = st.number_input(
+        "Transaction cost (basis points)",
+        min_value=0.0,
+        max_value=100.0,
+        value=0.0 if rebalance_frequency is None else 10.0,
+        step=1.0,
+        disabled=rebalance_frequency is None,
+    )
 
     st.header("Portfolio")
     st.caption("Weights are entered for the selected tickers only.")
@@ -430,36 +446,39 @@ with st.sidebar:
 
 st.caption(f"Selected tickers: {', '.join(selected_tickers)}")
 
-model = calibrate_quadrant_model(
+scenario = run_scenario(
     returns=returns,
     macro=macro,
+    selected_tickers=selected_tickers,
     growth_col=growth_col,
     inflation_col=inflation_col,
     growth_threshold=growth_threshold,
     inflation_threshold=inflation_threshold,
-    correlation_overrides=overrides,
-    override_weight=override_weight,
-)
-regimes = classify_quadrants(
-    macro,
-    growth_col=growth_col,
-    inflation_col=inflation_col,
-    growth_threshold=growth_threshold,
-    inflation_threshold=inflation_threshold,
-)
-result = simulate_returns(
-    model,
     periods=periods,
     paths=paths,
-    start_state=start_state,
     random_seed=int(seed),
-)
-wealth = simulate_portfolio_paths(
-    result,
+    start_state=start_state,
     weights=weights,
-    initial_value=100.0,
+    correlation_overrides=overrides,
+    override_weight=override_weight,
+    macro_lag_periods=macro_lag_periods,
+    distribution={
+        "Normal": "normal",
+        "Student-t": "student_t",
+        "Historical bootstrap": "bootstrap",
+        "Block bootstrap": "block_bootstrap",
+    }[distribution_label],
+    degrees_of_freedom=degrees_of_freedom,
+    block_size=block_size,
+    transition_uncertainty=transition_uncertainty,
+    rebalance_frequency=rebalance_frequency,
+    transaction_cost_bps=transaction_cost_bps,
 )
-summary = summarize_terminal_wealth(wealth)
+model = scenario.model
+regimes = scenario.regimes
+result = scenario.result
+wealth = scenario.wealth
+summary = scenario.summary
 
 metric_cols = st.columns(5)
 metric_cols[0].metric("Mean", f"{summary['mean']:.2f}")
@@ -467,6 +486,12 @@ metric_cols[1].metric("P05", f"{summary['p05']:.2f}")
 metric_cols[2].metric("Median", f"{summary['p50']:.2f}")
 metric_cols[3].metric("P95", f"{summary['p95']:.2f}")
 metric_cols[4].metric("Volatility", f"{summary['std']:.2f}")
+st.caption(
+    f"Probability of loss: {summary['probability_of_loss']:.1%} | "
+    f"VaR (95%): {summary['var_95']:.2f} | "
+    f"Expected shortfall (95%): {summary['expected_shortfall_95']:.2f} | "
+    f"Worst max drawdown: {summary['max_drawdown_worst']:.1%}"
+)
 
 tab_simulation, tab_regimes, tab_correlations, tab_data = st.tabs(
     ["Simulation", "Regimes", "Correlations", "Data"]
@@ -492,6 +517,47 @@ with tab_simulation:
     )
     st.subheader("Simulated Regime Mix")
     st.bar_chart(regime_mix)
+    wealth_export = wealth.copy()
+    wealth_export.insert(0, "period", range(1, len(wealth_export) + 1))
+    summary_export = summary.rename("value").rename_axis("metric").reset_index()
+    st.download_button(
+        "Download wealth paths",
+        wealth_export.to_csv(index=False),
+        file_name="wealth_paths.csv",
+        mime="text/csv",
+    )
+    st.download_button(
+        "Download risk summary",
+        summary_export.to_csv(index=False),
+        file_name="risk_summary.csv",
+        mime="text/csv",
+    )
+    if st.button("Compare Normal vs Student-t"):
+        with st.spinner("Running comparison scenarios..."):
+            comparison = compare_distributions(
+                {"Normal": "normal", "Student-t": "student_t"},
+                returns=returns,
+                macro=macro,
+                selected_tickers=selected_tickers,
+                growth_col=growth_col,
+                inflation_col=inflation_col,
+                growth_threshold=growth_threshold,
+                inflation_threshold=inflation_threshold,
+                periods=periods,
+                paths=paths,
+                random_seed=int(seed),
+                start_state=start_state,
+                weights=weights,
+                correlation_overrides=overrides,
+                override_weight=override_weight,
+                macro_lag_periods=macro_lag_periods,
+                transition_uncertainty=transition_uncertainty,
+                degrees_of_freedom=degrees_of_freedom,
+                rebalance_frequency=rebalance_frequency,
+                transaction_cost_bps=transaction_cost_bps,
+            )
+        st.subheader("Scenario Comparison")
+        st.dataframe(comparison, width="stretch")
 
 with tab_regimes:
     left, right = st.columns([1.0, 1.1])
@@ -517,6 +583,25 @@ with tab_regimes:
     )
     st.subheader("Historical Observations")
     st.bar_chart(observations)
+    diagnostics = scenario.diagnostics.regime_summary.copy()
+    simulated_diagnostics = simulation_regime_summary(result).rename(
+        columns={
+            "observations": "simulated_observations",
+            "share": "simulated_share",
+        }
+    )
+    diagnostics = diagnostics.merge(simulated_diagnostics, on="regime", how="left")
+    diagnostics["regime"] = diagnostics["regime"].map(REGIME_NAMES)
+    st.subheader("Calibration Diagnostics")
+    st.dataframe(diagnostics, width="stretch")
+    if scenario.diagnostics.warnings:
+        st.warning("\n".join(scenario.diagnostics.warnings))
+    st.download_button(
+        "Download calibration diagnostics",
+        diagnostics.to_csv(index=False),
+        file_name="calibration_diagnostics.csv",
+        mime="text/csv",
+    )
 
 with tab_correlations:
     regime_label = st.selectbox(

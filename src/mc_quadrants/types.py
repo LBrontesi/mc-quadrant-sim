@@ -26,6 +26,7 @@ class ScenarioModel:
     moments: dict[str, RegimeMoments]
     frequency: str = "M"
     metadata: dict[str, Any] = field(default_factory=dict)
+    historical_returns: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     @property
     def assets(self) -> list[str]:
@@ -57,6 +58,7 @@ class SimulationResult:
     frequency: str
     distribution: str = "normal"
     degrees_of_freedom: float | None = None
+    transition_concentration: float | None = None
 
     def returns_frame(self) -> pd.DataFrame:
         periods, paths, _ = self.returns.shape

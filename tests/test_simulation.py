@@ -4,7 +4,7 @@ import pytest
 
 from mc_quadrants.calibration import calibrate_quadrant_model
 from mc_quadrants.regimes import Regime
-from mc_quadrants.simulation import simulate_portfolio_paths, simulate_returns
+from mc_quadrants.simulation import simulate_portfolio_paths, simulate_returns, summarize_wealth_risk
 from mc_quadrants.types import SimulationResult
 
 
@@ -76,6 +76,17 @@ def test_student_t_sampling_is_reproducible():
     with pytest.raises(ValueError, match="greater than 2"):
         simulate_returns(model, periods=1, paths=1, distribution="student_t", degrees_of_freedom=2)
 
+    bootstrap = simulate_returns(
+        model,
+        periods=6,
+        paths=10,
+        random_seed=1,
+        distribution="block_bootstrap",
+        block_size=3,
+    )
+    assert bootstrap.distribution == "block_bootstrap"
+    assert np.isfinite(bootstrap.returns).all()
+
 
 def test_rebalancing_transaction_costs_reduce_wealth():
     result = SimulationResult(
@@ -104,3 +115,19 @@ def test_rebalancing_transaction_costs_reduce_wealth():
     )
 
     assert with_costs.iloc[-1, 0] < without_costs.iloc[-1, 0]
+
+
+def test_wealth_risk_summary_includes_downside_metrics():
+    wealth = pd.DataFrame(
+        {
+            "path_0": [105.0, 90.0, 95.0],
+            "path_1": [110.0, 120.0, 130.0],
+        }
+    )
+
+    summary = summarize_wealth_risk(wealth)
+
+    assert summary["probability_of_loss"] == 0.5
+    assert summary["var_95"] > 0
+    assert summary["expected_shortfall_95"] >= summary["var_95"]
+    assert 0 < summary["max_drawdown_mean"] < 1

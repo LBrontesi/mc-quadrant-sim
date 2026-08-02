@@ -31,6 +31,12 @@ Optional data download helpers need:
 python -m pip install -e ".[data]"
 ```
 
+With `uv`, the checked-in lockfile provides a reproducible environment:
+
+```bash
+uv sync --extra dev --extra gradio --extra data
+```
+
 Then you can adapt:
 
 ```bash
@@ -67,7 +73,19 @@ python gradio_app.py
 
 The Gradio app supports the offline demo, Yahoo Finance/FRED downloads, and
 uploaded asset and macro CSVs. Uploading a macro CSV populates the growth and
-inflation column selectors from its headers.
+inflation column selectors from its headers. It also exposes release-lag
+handling, Gaussian/Student-t/bootstrap sampling, transition uncertainty,
+rebalancing costs, risk metrics, diagnostics, scenario comparison, and CSV
+downloads.
+
+## Run With Docker
+
+```bash
+docker build -t mc-quadrant-sim .
+docker run --rm -p 7860:7860 mc-quadrant-sim
+```
+
+Open `http://127.0.0.1:7860` after the container starts.
 
 ## Calibrate From Your Own CSVs
 
@@ -85,6 +103,7 @@ model = calibrate_quadrant_model(
     macro=macro,
     growth_col="growth",
     inflation_col="inflation",
+    macro_lag_periods=1,
     growth_threshold="median",
     inflation_threshold="median",
     correlation_overrides={
@@ -113,6 +132,10 @@ wealth = simulate_portfolio_paths(
 print(summarize_terminal_wealth(wealth))
 ```
 
+For a reusable application workflow, `mc_quadrants.pipeline.run_scenario()`
+returns the calibrated model, simulated paths, wealth, risk summary, and
+calibration diagnostics together.
+
 ## Suggested Real Data Inputs
 
 Asset prices can come from Yahoo Finance, Bloomberg, Refinitiv, your broker, or
@@ -133,4 +156,8 @@ inflation above 3 percent.
 - A covariance shrinkage parameter blends each quadrant estimate with the full-sample covariance. This helps when one quadrant has few observations.
 - Correlation overrides are optional. They are useful when history is sparse or when you want to blend empirical estimates with an investment view.
 - Returns can be sampled from either a Gaussian or finite-variance Student-t distribution within each quadrant. Lower Student-t degrees of freedom create heavier tails.
+- Historical and block bootstrap sampling preserve observed regime-specific return shapes and unusual outcomes.
+- A non-zero transition uncertainty setting samples the Markov matrix row-by-row from Dirichlet distributions.
 - Portfolio paths can model periodic rebalancing and transaction costs charged on traded notional. The default `rebalance_frequency=None` preserves the original weighted-log behavior.
+- Macro release lags shift regime labels before calibrating asset moments, reducing same-period look-ahead bias.
+- `pytest` runs automatically through GitHub Actions on supported Python versions.

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import date, timedelta
 import io
+import os
 import re
+import tempfile
+from collections.abc import Mapping
+from datetime import date
 
 import gradio as gr
 import numpy as np
@@ -11,21 +13,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from mc_quadrants.calibration import calibrate_quadrant_model
 from mc_quadrants.data import (
-    fetch_fred_macro,
-    fetch_yahoo_prices,
+    load_market_data,
     prices_to_returns,
-    yoy_change,
 )
 from mc_quadrants.demo import _demo_history
-from mc_quadrants.regimes import REGIME_ORDER, classify_quadrants
-from mc_quadrants.simulation import (
-    simulate_portfolio_paths,
-    simulate_returns,
-    summarize_terminal_wealth,
-)
-
+from mc_quadrants.diagnostics import simulation_regime_summary
+from mc_quadrants.pipeline import compare_distributions, run_scenario
+from mc_quadrants.regimes import REGIME_ORDER
 
 REGIME_NAMES = {
     "high_growth_low_inflation": "High growth / low inflation",
@@ -62,6 +57,8 @@ REGIME_LOOKUP = {REGIME_NAMES[state]: state for state in REGIME_ORDER}
 RETURN_DISTRIBUTIONS = {
     "Normal": "normal",
     "Student-t": "student_t",
+    "Historical bootstrap": "bootstrap",
+    "Block bootstrap": "block_bootstrap",
 }
 REBALANCE_FREQUENCIES = {
     "Weighted log (legacy)": None,
@@ -143,46 +140,6 @@ def default_correlation_pair(tickers: list[str]) -> tuple[str | None, str | None
     remaining = [ticker for ticker in tickers if ticker != asset_a]
     asset_b = "IEF" if "IEF" in remaining else remaining[0]
     return asset_a, asset_b
-
-
-def load_market_data(
-    tickers: list[str],
-    start: str,
-    end: str,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    start_date = pd.Timestamp(start)
-    end_date = pd.Timestamp(end)
-    if end_date <= start_date:
-        raise ValueError("History end must be after history start.")
-
-    prices = normalize_ticker_columns(
-        fetch_yahoo_prices(
-            tickers,
-            start=start_date.strftime("%Y-%m-%d"),
-            end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
-        )
-    )
-    available = [
-        ticker
-        for ticker in tickers
-        if ticker in prices.columns and prices[ticker].notna().sum() >= 2
-    ]
-    if not available:
-        raise ValueError("Yahoo Finance did not return usable price history for these tickers.")
-
-    returns = prices_to_returns(prices.loc[:, available], method="log")
-    returns = returns.resample("ME").sum(min_count=1).dropna(how="all")
-
-    macro_levels = fetch_fred_macro(
-        {"growth": "INDPRO", "inflation": "CPIAUCSL"},
-        start=start_date.strftime("%Y-%m-%d"),
-        end=end_date.strftime("%Y-%m-%d"),
-    ).resample("ME").last()
-    macro = yoy_change(macro_levels).apply(pd.to_numeric, errors="coerce").dropna(how="any")
-    if macro.empty:
-        raise ValueError("Not enough FRED history to calculate year-over-year growth and inflation.")
-
-    return macro, returns, available
 
 
 def macro_column_updates(macro_file) -> tuple[dict, dict]:
@@ -351,6 +308,13 @@ def correlation_matrix_chart(
     return fig
 
 
+def _write_csv_download(data: pd.DataFrame, prefix: str, index: bool = False) -> str:
+    handle = tempfile.NamedTemporaryFile(prefix=prefix, suffix=".csv", delete=False)
+    handle.close()
+    data.to_csv(handle.name, index=index)
+    return handle.name
+
+
 # ---------- Core logic ----------
 
 
@@ -481,8 +445,11 @@ def run_simulation(
     corr_low_growth_low_inflation: float = DEFAULT_CORRELATIONS["low_growth_low_inflation"],
     distribution_label: str = "Normal",
     degrees_of_freedom: float = 5.0,
+    block_size: int = 3,
     rebalance_frequency_label: str = "Weighted log (legacy)",
     transaction_cost_bps: float = 0.0,
+    macro_lag_periods: int = 0,
+    transition_uncertainty: float = 0.0,
 ) -> tuple[go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, str, str, str, str, str]:
     """Run the full calibration + simulation pipeline and return all outputs."""
     try:
@@ -505,8 +472,8 @@ def run_simulation(
             distribution_key,
             distribution_key.lower().replace("-", "_"),
         )
-        if distribution not in {"normal", "student_t"}:
-            raise ValueError("Return distribution must be Normal or Student-t.")
+        if distribution not in {"normal", "student_t", "bootstrap", "block_bootstrap"}:
+            raise ValueError("Unknown return distribution.")
         if rebalance_frequency_label not in REBALANCE_FREQUENCIES:
             raise ValueError(f"Unknown rebalancing frequency: {rebalance_frequency_label}")
         rebalance_frequency = REBALANCE_FREQUENCIES[rebalance_frequency_label]
@@ -549,45 +516,34 @@ def run_simulation(
                 for state, value in correlation_values.items()
             }
 
-        # Calibrate
-        model = calibrate_quadrant_model(
+        scenario = run_scenario(
             returns=returns,
             macro=macro,
+            selected_tickers=selected_tickers,
             growth_col=growth_col,
             inflation_col=inflation_col,
             growth_threshold=growth_thr,
             inflation_threshold=inflation_thr,
-            correlation_overrides=correlation_overrides,
-            override_weight=float(correlation_blend),
-        )
-
-        # Classify regimes for the scatter
-        regimes = classify_quadrants(
-            macro,
-            growth_col=growth_col,
-            inflation_col=inflation_col,
-            growth_threshold=growth_thr,
-            inflation_threshold=inflation_thr,
-        )
-
-        # Simulate
-        result = simulate_returns(
-            model,
             periods=periods,
             paths=paths,
-            start_state=start_state,
             random_seed=int(seed),
+            start_state=start_state,
+            weights=weights,
+            correlation_overrides=correlation_overrides,
+            override_weight=float(correlation_blend),
+            macro_lag_periods=int(macro_lag_periods),
             distribution=distribution,
             degrees_of_freedom=float(degrees_of_freedom),
-        )
-        wealth = simulate_portfolio_paths(
-            result,
-            weights=weights,
-            initial_value=100.0,
+            block_size=int(block_size),
+            transition_uncertainty=float(transition_uncertainty),
             rebalance_frequency=rebalance_frequency,
             transaction_cost_bps=float(transaction_cost_bps),
         )
-        summary = summarize_terminal_wealth(wealth)
+        model = scenario.model
+        regimes = scenario.regimes
+        result = scenario.result
+        wealth = scenario.wealth
+        summary = scenario.summary
 
         # Build charts
         wealth_fig = wealth_percentile_chart(wealth)
@@ -625,12 +581,41 @@ def run_simulation(
             f"**P95:** {summary['p95']:.2f} | "
             f"**Volatility:** {summary['std']:.2f}"
         )
-        distribution_text = "Student-t" if distribution == "student_t" else "Normal"
+        distribution_text = next(
+            label for label, value in RETURN_DISTRIBUTIONS.items() if value == distribution
+        )
         friction_text = (
             f"{rebalance_frequency_label}, {float(transaction_cost_bps):.1f} bps"
             if rebalance_frequency is not None
             else "Weighted log (no rebalancing)"
         )
+        risk_text = (
+            f"**Probability of loss:** {summary['probability_of_loss']:.1%} | "
+            f"**VaR (95%):** {summary['var_95']:.2f} | "
+            f"**Expected shortfall (95%):** {summary['expected_shortfall_95']:.2f} | "
+            f"**Mean max drawdown:** {summary['max_drawdown_mean']:.1%} | "
+            f"**Worst max drawdown:** {summary['max_drawdown_worst']:.1%}"
+        )
+        diagnostics_table = scenario.diagnostics.regime_summary.copy()
+        simulated_diagnostics = simulation_regime_summary(result).rename(
+            columns={
+                "observations": "simulated_observations",
+                "share": "simulated_share",
+            }
+        )
+        diagnostics_table = diagnostics_table.merge(simulated_diagnostics, on="regime", how="left")
+        diagnostics_table["regime"] = diagnostics_table["regime"].map(REGIME_NAMES)
+        warnings_text = ""
+        if scenario.diagnostics.warnings:
+            warnings_text = "**Calibration warnings**\n\n" + "\n".join(
+                f"- {warning}" for warning in scenario.diagnostics.warnings
+            )
+        wealth_export = wealth.copy()
+        wealth_export.insert(0, "period", range(1, len(wealth_export) + 1))
+        summary_export = summary.rename("value").rename_axis("metric").reset_index()
+        wealth_download = _write_csv_download(wealth_export, "mc-wealth-")
+        summary_download = _write_csv_download(summary_export, "mc-summary-")
+        diagnostics_download = _write_csv_download(diagnostics_table, "mc-diagnostics-")
 
         return (
             wealth_fig, terminal_fig, mix_fig,
@@ -640,10 +625,99 @@ def run_simulation(
             f"Simulation complete: {paths} paths x {periods} periods. "
             f"Distribution: {distribution_text}. Portfolio: {friction_text}.",
             f"Selected tickers: {', '.join(selected_tickers)}",
+            risk_text,
+            diagnostics_table,
+            warnings_text,
+            wealth_download,
+            summary_download,
+            diagnostics_download,
         )
 
     except Exception as exc:
         raise gr.Error(f"Simulation failed: {exc}")
+
+
+def compare_scenarios(
+    macro: pd.DataFrame,
+    returns: pd.DataFrame,
+    selected_tickers: list[str],
+    growth_col: str,
+    inflation_col: str,
+    growth_threshold: str | float,
+    inflation_threshold: str | float,
+    periods: int,
+    paths: int,
+    seed: int,
+    start_state_label: str,
+    weights_df: pd.DataFrame,
+    use_correlation_override: bool,
+    correlation_asset_a: str | None,
+    correlation_asset_b: str | None,
+    correlation_blend: float,
+    corr_high_growth_low_inflation: float,
+    corr_high_growth_high_inflation: float,
+    corr_low_growth_high_inflation: float,
+    corr_low_growth_low_inflation: float,
+    rebalance_frequency_label: str,
+    transaction_cost_bps: float,
+    macro_lag_periods: int,
+    transition_uncertainty: float,
+) -> pd.DataFrame:
+    """Compare Gaussian and Student-t outcomes using identical inputs."""
+
+    try:
+        selected_tickers = [str(ticker).strip().upper() for ticker in (selected_tickers or [])]
+        weights = _weights_from_dataframe(weights_df, selected_tickers)
+        growth_thr: str | float = growth_threshold
+        inflation_thr: str | float = inflation_threshold
+        if isinstance(growth_threshold, str) and growth_threshold.startswith("fixed:"):
+            growth_thr = float(growth_threshold.split(":", 1)[1])
+        if isinstance(inflation_threshold, str) and inflation_threshold.startswith("fixed:"):
+            inflation_thr = float(inflation_threshold.split(":", 1)[1])
+
+        start_state = None if start_state_label == "Stationary" else REGIME_LOOKUP[start_state_label]
+        rebalance_frequency = REBALANCE_FREQUENCIES[rebalance_frequency_label]
+        correlation_overrides = None
+        if use_correlation_override:
+            asset_a = str(correlation_asset_a or "").strip().upper()
+            asset_b = str(correlation_asset_b or "").strip().upper()
+            if asset_a == asset_b:
+                raise ValueError("Correlation override tickers must be different.")
+            correlation_values = {
+                REGIME_ORDER[0]: corr_high_growth_low_inflation,
+                REGIME_ORDER[1]: corr_high_growth_high_inflation,
+                REGIME_ORDER[2]: corr_low_growth_high_inflation,
+                REGIME_ORDER[3]: corr_low_growth_low_inflation,
+            }
+            correlation_overrides = {
+                state: {(asset_a, asset_b): float(value)}
+                for state, value in correlation_values.items()
+            }
+
+        return compare_distributions(
+            {"Normal": "normal", "Student-t": "student_t"},
+            returns=returns,
+            macro=macro,
+            selected_tickers=selected_tickers,
+            growth_col=growth_col,
+            inflation_col=inflation_col,
+            growth_threshold=growth_thr,
+            inflation_threshold=inflation_thr,
+            periods=int(periods),
+            paths=int(paths),
+            random_seed=int(seed),
+            start_state=start_state,
+            weights=weights,
+            correlation_overrides=correlation_overrides,
+            override_weight=float(correlation_blend),
+            macro_lag_periods=int(macro_lag_periods),
+            transition_uncertainty=float(transition_uncertainty),
+            degrees_of_freedom=5.0,
+            rebalance_frequency=rebalance_frequency,
+            transaction_cost_bps=float(transaction_cost_bps),
+        )
+    except Exception as exc:
+        raise gr.Error(f"Scenario comparison failed: {exc}")
 
 
 # ---------- Build the Gradio app ----------
@@ -710,6 +784,22 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                 value="median",
                 label="Inflation threshold",
             )
+            macro_lag_periods = gr.Slider(
+                0,
+                3,
+                value=1,
+                step=1,
+                label="Macro release lag (periods)",
+                info="Use prior macro observations to reduce look-ahead bias.",
+            )
+            transition_uncertainty = gr.Slider(
+                0.0,
+                1.0,
+                value=0.0,
+                step=0.05,
+                label="Transition uncertainty",
+                info="0 uses the calibrated matrix; higher values sample more uncertain transitions.",
+            )
 
             gr.Markdown("### Simulation")
             periods = gr.Slider(12, 360, value=120, step=12, label="Periods (months)")
@@ -732,6 +822,15 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                 step=1.0,
                 label="Student-t degrees of freedom",
                 info="Lower values produce heavier tails.",
+                visible=False,
+            )
+            block_size = gr.Slider(
+                2,
+                12,
+                value=3,
+                step=1,
+                label="Bootstrap block size",
+                info="Consecutive observations sampled by block bootstrap.",
                 visible=False,
             )
             rebalance_frequency = gr.Dropdown(
@@ -821,6 +920,16 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
 
             gr.Markdown("### Results")
             summary_text = gr.Markdown()
+            risk_text = gr.Markdown()
+            with gr.Row():
+                wealth_download = gr.File(label="Download wealth paths")
+                summary_download = gr.File(label="Download risk summary")
+                diagnostics_download = gr.File(label="Download diagnostics")
+            compare_btn = gr.Button("Compare Normal vs Student-t")
+            comparison_table = gr.Dataframe(
+                label="Scenario Comparison",
+                interactive=False,
+            )
 
             with gr.Tabs():
                 with gr.Tab("Simulation"):
@@ -838,6 +947,11 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                         with gr.Column():
                             scatter_plot = gr.Plot(label="Macro Quadrants")
                     obs_plot = gr.Plot(label="Observations")
+                    diagnostics_table = gr.Dataframe(
+                        label="Calibration Diagnostics",
+                        interactive=False,
+                    )
+                    warnings_text = gr.Markdown()
                     with gr.Row():
                         transition_text = gr.Textbox(
                             label="Transition Matrix (text)",
@@ -882,12 +996,15 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
     )
 
     def toggle_student_t(value):
-        return gr.update(visible=value == "Student-t")
+        return (
+            gr.update(visible=value == "Student-t"),
+            gr.update(visible=value == "Block bootstrap"),
+        )
 
     return_distribution.change(
         toggle_student_t,
         inputs=[return_distribution],
-        outputs=[degrees_of_freedom],
+        outputs=[degrees_of_freedom, block_size],
     )
 
     def toggle_transaction_cost(value):
@@ -975,14 +1092,18 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
         growth_threshold, inflation_threshold, periods, paths, seed, start_state,
         weights_df, correlation_regime, use_corr_override, correlation_a, correlation_b,
         correlation_weight, corr_hgli, corr_hghi, corr_lghi, corr_lgli,
-        return_distribution, degrees_df, rebalance_label, transaction_cost,
+        return_distribution, degrees_df, block_size_value, rebalance_label, transaction_cost,
+        macro_lag, transition_uncertainty_value,
+        progress=gr.Progress(track_tqdm=True),
     ):
+        progress(0.05, desc="Calibrating model")
         return run_simulation(
             macro, returns, selected_tickers, growth_col, inflation_col,
             growth_threshold, inflation_threshold, periods, paths, seed, start_state,
             weights_df, correlation_regime, use_corr_override, correlation_a, correlation_b,
             correlation_weight, corr_hgli, corr_hghi, corr_lghi, corr_lgli,
-            return_distribution, degrees_df, rebalance_label, transaction_cost,
+            return_distribution, degrees_df, block_size_value, rebalance_label, transaction_cost,
+            macro_lag, transition_uncertainty_value,
         )
 
     run_btn.click(
@@ -997,16 +1118,40 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
             correlation_blend,
             corr_high_growth_low_inflation, corr_high_growth_high_inflation,
             corr_low_growth_high_inflation, corr_low_growth_low_inflation,
-            return_distribution, degrees_of_freedom, rebalance_frequency, transaction_cost_bps,
+            return_distribution, degrees_of_freedom, block_size, rebalance_frequency, transaction_cost_bps,
+            macro_lag_periods, transition_uncertainty,
         ],
         outputs=[
             wealth_plot, terminal_plot, mix_plot,
             transition_plot, scatter_plot, obs_plot, corr_plot,
             transition_text, observations_text, corr_text,
             summary_text, run_msg, selection_msg,
+            risk_text, diagnostics_table, warnings_text,
+            wealth_download, summary_download, diagnostics_download,
         ],
+    )
+
+    compare_btn.click(
+        compare_scenarios,
+        inputs=[
+            macro_state, returns_state, ticker_selector,
+            growth_col_state, inflation_col_state,
+            growth_threshold, inflation_threshold,
+            periods, paths, seed, start_state, weights_table,
+            use_correlation_override, correlation_asset_a, correlation_asset_b,
+            correlation_blend,
+            corr_high_growth_low_inflation, corr_high_growth_high_inflation,
+            corr_low_growth_high_inflation, corr_low_growth_low_inflation,
+            rebalance_frequency, transaction_cost_bps, macro_lag_periods,
+            transition_uncertainty,
+        ],
+        outputs=[comparison_table],
     )
 
 
 if __name__ == "__main__":
-    demo.launch(theme=gr.themes.Soft())
+    demo.launch(
+        theme=gr.themes.Soft(),
+        server_name=os.getenv("GRADIO_SERVER_NAME", "0.0.0.0"),
+        server_port=int(os.getenv("PORT", "7860")),
+    )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import timedelta
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -86,6 +88,62 @@ def fetch_fred_macro(series: Mapping[str, str], start: str, end: str | None = No
         frames.append(raw.rename(columns={fred_code: output_name}))
 
     return pd.concat(frames, axis=1).sort_index()
+
+
+@lru_cache(maxsize=8)
+def _load_market_data_cached(
+    tickers: tuple[str, ...],
+    start: str,
+    end: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
+    start_date = pd.Timestamp(start)
+    end_date = pd.Timestamp(end)
+    if end_date <= start_date:
+        raise ValueError("History end must be after history start.")
+
+    prices = fetch_yahoo_prices(
+        list(tickers),
+        start=start_date.strftime("%Y-%m-%d"),
+        end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+    )
+    prices = prices.copy()
+    prices.columns = [str(column).strip().upper() for column in prices.columns]
+    available = tuple(
+        ticker
+        for ticker in tickers
+        if ticker in prices.columns and prices[ticker].notna().sum() >= 2
+    )
+    if not available:
+        raise ValueError("Yahoo Finance did not return usable price history for these tickers.")
+
+    returns = prices_to_returns(prices.loc[:, list(available)], method="log")
+    returns = returns.resample("ME").sum(min_count=1).dropna(how="all")
+    macro_levels = fetch_fred_macro(
+        {"growth": "INDPRO", "inflation": "CPIAUCSL"},
+        start=start_date.strftime("%Y-%m-%d"),
+        end=end_date.strftime("%Y-%m-%d"),
+    ).resample("ME").last()
+    macro = yoy_change(macro_levels).apply(pd.to_numeric, errors="coerce").dropna(how="any")
+    if macro.empty:
+        raise ValueError("Not enough FRED history to calculate year-over-year growth and inflation.")
+    return macro, returns, available
+
+
+def load_market_data(
+    tickers: Sequence[str],
+    start: str,
+    end: str,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Load cached Yahoo prices and FRED macro inputs for dashboard use."""
+
+    raw_tickers = (tickers,) if isinstance(tickers, str) else tickers
+    normalized_tickers = tuple(dict.fromkeys(str(ticker).strip().upper() for ticker in raw_tickers))
+    macro, returns, available = _load_market_data_cached(
+        normalized_tickers,
+        pd.Timestamp(start).strftime("%Y-%m-%d"),
+        pd.Timestamp(end).strftime("%Y-%m-%d"),
+    )
+    return macro.copy(), returns.copy(), list(available)
 
 
 def yoy_change(data: pd.DataFrame, periods: int = 12, scale: float = 100.0) -> pd.DataFrame:

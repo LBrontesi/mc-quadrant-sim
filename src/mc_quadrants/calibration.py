@@ -12,11 +12,35 @@ from mc_quadrants.types import RegimeMoments, ScenarioModel
 CorrelationOverrides = Mapping[str, Mapping[tuple[str, str], float]]
 
 
-def _align_regimes_to_returns(regimes: pd.Series, returns: pd.DataFrame) -> pd.Series:
-    sorted_regimes = regimes.dropna().sort_index().astype(str)
+def _align_regimes_to_returns(
+    regimes: pd.Series,
+    returns: pd.DataFrame,
+    lag_periods: int = 0,
+) -> pd.Series:
+    if lag_periods < 0:
+        raise ValueError("lag_periods must be non-negative.")
+    sorted_regimes = regimes.dropna().sort_index().astype(str).shift(lag_periods)
+    sorted_regimes = sorted_regimes.dropna()
     sorted_returns = returns.sort_index()
     aligned = sorted_regimes.reindex(sorted_returns.index, method="ffill")
     return aligned.loc[sorted_returns.index]
+
+
+def _clean_aligned_returns(
+    returns: pd.DataFrame,
+    regimes: pd.Series,
+    lag_periods: int = 0,
+) -> tuple[pd.DataFrame, pd.Series]:
+    clean_returns = returns.sort_index().dropna(how="all")
+    aligned_regimes = _align_regimes_to_returns(regimes, clean_returns, lag_periods=lag_periods)
+    clean_returns = clean_returns.dropna(how="any")
+    aligned_regimes = aligned_regimes.loc[clean_returns.index]
+    valid_regime = aligned_regimes.notna()
+    clean_returns = clean_returns.loc[valid_regime]
+    aligned_regimes = aligned_regimes.loc[valid_regime]
+    if clean_returns.empty:
+        raise ValueError("No overlapping return and regime observations after alignment.")
+    return clean_returns, aligned_regimes
 
 
 def _blend_covariance(
@@ -68,6 +92,7 @@ def estimate_regime_moments(
     shrinkage: float = 0.25,
     correlation_overrides: CorrelationOverrides | None = None,
     override_weight: float = 1.0,
+    regime_lag_periods: int = 0,
 ) -> dict[str, RegimeMoments]:
     """Estimate asset mean/covariance/correlation separately for each regime."""
 
@@ -75,15 +100,11 @@ def estimate_regime_moments(
         raise ValueError("returns must not be empty.")
 
     state_list = states or REGIME_ORDER
-    clean_returns = returns.sort_index().dropna(how="all")
-    aligned_regimes = _align_regimes_to_returns(regimes, clean_returns)
-    clean_returns = clean_returns.dropna(how="any")
-    aligned_regimes = aligned_regimes.loc[clean_returns.index]
-    valid_regime = aligned_regimes.notna()
-    clean_returns = clean_returns.loc[valid_regime]
-    aligned_regimes = aligned_regimes.loc[valid_regime]
-    if clean_returns.empty:
-        raise ValueError("No overlapping return and regime observations after alignment.")
+    clean_returns, aligned_regimes = _clean_aligned_returns(
+        returns,
+        regimes,
+        lag_periods=regime_lag_periods,
+    )
 
     global_mean = clean_returns.mean()
     global_covariance = clean_returns.cov()
@@ -139,6 +160,7 @@ def calibrate_quadrant_model(
     shrinkage: float = 0.25,
     correlation_overrides: CorrelationOverrides | None = None,
     override_weight: float = 1.0,
+    macro_lag_periods: int = 0,
     frequency: str = "M",
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
@@ -163,18 +185,34 @@ def calibrate_quadrant_model(
         shrinkage=shrinkage,
         correlation_overrides=correlation_overrides,
         override_weight=override_weight,
+        regime_lag_periods=macro_lag_periods,
     )
+
+    clean_returns, aligned_regimes = _clean_aligned_returns(
+        returns,
+        regimes,
+        lag_periods=macro_lag_periods,
+    )
+    historical_returns = {
+        state: clean_returns.loc[aligned_regimes == state].copy()
+        for state in REGIME_ORDER
+    }
 
     model = ScenarioModel(
         states=REGIME_ORDER.copy(),
         transition_matrix=transition_matrix,
         moments=moments,
         frequency=frequency,
+        historical_returns=historical_returns,
         metadata={
             "growth_col": growth_col,
             "inflation_col": inflation_col,
             "growth_threshold": growth_threshold,
             "inflation_threshold": inflation_threshold,
+            "macro_lag_periods": macro_lag_periods,
+            "min_observations": min_observations,
+            "shrinkage": shrinkage,
+            "transition_smoothing": transition_smoothing,
         },
     )
     model.validate()
