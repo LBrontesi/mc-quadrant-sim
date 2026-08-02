@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 
 from mc_quadrants.calibration import CorrelationOverrides, calibrate_quadrant_model
+from mc_quadrants.data import convert_returns_to_base_currency
 from mc_quadrants.diagnostics import CalibrationDiagnostics, build_calibration_diagnostics
 from mc_quadrants.regimes import classify_quadrants
 from mc_quadrants.simulation import simulate_portfolio_paths, simulate_returns, summarize_wealth_risk
@@ -48,6 +49,10 @@ def run_scenario(
     rebalance_frequency: int | None = None,
     transaction_cost_bps: float = 0.0,
     initial_value: float = 100.0,
+    base_currency: str = "USD",
+    asset_currencies: Mapping[str, str] | None = None,
+    fx_rates: pd.DataFrame | None = None,
+    fx_quote: str = "base_per_foreign",
 ) -> SimulationRun:
     """Calibrate and simulate one fully specified investment scenario."""
 
@@ -71,9 +76,16 @@ def run_scenario(
         available_columns.get(str(asset).strip().upper(), asset): weight
         for asset, weight in weights.items()
     }
+    scenario_returns = convert_returns_to_base_currency(
+        returns.loc[:, selected],
+        asset_currencies=asset_currencies,
+        base_currency=base_currency,
+        fx_rates=fx_rates,
+        fx_quote=fx_quote,
+    )
 
     model = calibrate_quadrant_model(
-        returns=returns.loc[:, selected],
+        returns=scenario_returns,
         macro=macro,
         growth_col=growth_col,
         inflation_col=inflation_col,
@@ -114,7 +126,7 @@ def run_scenario(
     )
     diagnostics = build_calibration_diagnostics(
         model,
-        returns.loc[:, selected],
+        scenario_returns,
         macro,
         growth_col,
         inflation_col,
@@ -126,6 +138,10 @@ def run_scenario(
         diagnostics.warnings.append(
             f"Transition probabilities are sampled with uncertainty {transition_uncertainty:.2f}."
         )
+    model.metadata["base_currency"] = str(base_currency).strip().upper()
+    model.metadata["fx_quote"] = fx_quote
+    if asset_currencies:
+        model.metadata["asset_currencies"] = dict(asset_currencies)
     return SimulationRun(
         model=model,
         regimes=regimes,

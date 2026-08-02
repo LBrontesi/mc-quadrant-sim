@@ -9,12 +9,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from mc_quadrants.data import (
-    load_market_data as load_market_data_shared,
-)
-from mc_quadrants.data import (
-    prices_to_returns,
-)
+from mc_quadrants.data import fetch_yahoo_fx_rates, prices_to_returns
+from mc_quadrants.data import load_market_data as load_market_data_shared
 from mc_quadrants.demo import _demo_history
 from mc_quadrants.diagnostics import simulation_regime_summary
 from mc_quadrants.pipeline import compare_distributions, run_scenario
@@ -162,6 +158,22 @@ def parse_proxy_map(raw_proxies: str) -> dict[str, str]:
     return parsed
 
 
+def parse_currency_map(raw_currencies: str) -> dict[str, str]:
+    """Parse ``ASSET:CURRENCY`` pairs, defaulting unspecified assets to USD."""
+
+    parsed: dict[str, str] = {}
+    for pair in re.split(r"[,;\s]+", raw_currencies.strip().upper()):
+        if not pair:
+            continue
+        if ":" not in pair:
+            raise ValueError(f"Invalid currency '{pair}'. Use ASSET:CURRENCY.")
+        asset, currency = pair.split(":", 1)
+        if not asset or len(currency) != 3:
+            raise ValueError(f"Invalid currency '{pair}'. Use ASSET:CURRENCY.")
+        parsed[asset] = currency
+    return parsed
+
+
 @st.cache_data(ttl=3_600, show_spinner=False)
 def load_market_data(
     tickers: tuple[str, ...],
@@ -181,6 +193,16 @@ def load_market_data(
         synthetic_seed=synthetic_seed,
     )
     return macro, returns, tuple(available)
+
+
+@st.cache_data(ttl=3_600, show_spinner=False)
+def load_fx_rates(
+    currencies: tuple[str, ...],
+    base_currency: str,
+    start: str,
+    end: str,
+) -> pd.DataFrame:
+    return fetch_yahoo_fx_rates(currencies, base_currency, start=start, end=end)
 
 
 def ticker_selector(returns: pd.DataFrame) -> list[str]:
@@ -440,6 +462,43 @@ with st.sidebar:
     macro, returns, growth_col, inflation_col = load_inputs()
     selected_tickers = ticker_selector(returns)
     returns = returns[selected_tickers]
+    base_currency = st.sidebar.text_input(
+        "Portfolio currency (ISO)",
+        value="USD",
+        max_chars=3,
+        help="Any three-letter currency code supported by Yahoo Finance, for example USD, EUR, GBP, JPY, or CHF.",
+    ).strip().upper()
+    currency_text = st.sidebar.text_input(
+        "Asset currencies (optional)",
+        value="",
+        help="Use ASSET:CURRENCY pairs, for example EFA:EUR. Unspecified assets are treated as USD.",
+    )
+    try:
+        asset_currencies = parse_currency_map(currency_text)
+        source_currencies = {
+            asset_currencies.get(
+                ticker,
+                asset_currencies.get(
+                    ticker.removesuffix("_SIM").removesuffix("SIM"),
+                    "USD",
+                ),
+            )
+            for ticker in selected_tickers
+        }
+        foreign_currencies = tuple(sorted(currency for currency in source_currencies if currency != base_currency))
+        fx_rates = None
+        if foreign_currencies:
+            fx_start = pd.Timestamp(returns.index.min()) - pd.DateOffset(months=1)
+            fx_rates = load_fx_rates(
+                foreign_currencies,
+                base_currency,
+                start=fx_start.strftime("%Y-%m-%d"),
+                end=pd.Timestamp(returns.index.max()).strftime("%Y-%m-%d"),
+            )
+    except (ImportError, KeyError, RuntimeError, ValueError) as exc:
+        st.error(f"Could not load historical FX rates: {exc}")
+        st.stop()
+    st.caption(f"Returns and risk metrics are expressed in {base_currency}.")
     growth_threshold = threshold_control("Growth threshold", "growth")
     inflation_threshold = threshold_control("Inflation threshold", "inflation")
     macro_lag_periods = st.sidebar.slider(
@@ -547,6 +606,9 @@ try:
         transition_uncertainty=transition_uncertainty,
         rebalance_frequency=rebalance_frequency,
         transaction_cost_bps=transaction_cost_bps,
+        base_currency=base_currency,
+        asset_currencies=asset_currencies,
+        fx_rates=fx_rates,
     )
 except (KeyError, TypeError, ValueError) as exc:
     st.error(f"Simulation failed: {exc}")
@@ -632,6 +694,9 @@ with tab_simulation:
                 degrees_of_freedom=degrees_of_freedom,
                 rebalance_frequency=rebalance_frequency,
                 transaction_cost_bps=transaction_cost_bps,
+                base_currency=base_currency,
+                asset_currencies=asset_currencies,
+                fx_rates=fx_rates,
             )
         st.subheader("Scenario Comparison")
         st.dataframe(comparison, width="stretch")

@@ -233,6 +233,122 @@ def combine_observed_and_simulated_returns(
     return combined.sort_index()
 
 
+def convert_returns_to_base_currency(
+    returns: pd.DataFrame,
+    asset_currencies: Mapping[str, str] | None = None,
+    base_currency: str = "USD",
+    fx_rates: pd.DataFrame | None = None,
+    fx_quote: str = "base_per_foreign",
+    default_asset_currency: str = "USD",
+    fx_frequency: str = "ME",
+) -> pd.DataFrame:
+    """Convert log returns into a base currency using historical FX levels.
+
+    ``fx_rates`` must contain positive levels quoted as base-currency units per
+    unit of foreign currency, such as ``EURUSD=X`` for EUR assets in a USD
+    portfolio. A static spot quote changes the value level but cannot model FX
+    risk, so historical levels are required whenever a foreign asset is used.
+    """
+
+    if returns.empty:
+        raise ValueError("returns must contain at least one row.")
+    if returns.index.has_duplicates:
+        raise ValueError("returns must not contain duplicate dates.")
+    if fx_quote not in {"base_per_foreign", "foreign_per_base"}:
+        raise ValueError("fx_quote must be 'base_per_foreign' or 'foreign_per_base'.")
+
+    base = str(base_currency).strip().upper()
+    default = str(default_asset_currency).strip().upper()
+    if len(base) != 3 or len(default) != 3:
+        raise ValueError("Currency codes must be three-letter ISO codes.")
+
+    currencies = {str(asset).strip().upper(): str(currency).strip().upper() for asset, currency in (asset_currencies or {}).items()}
+    normalized_returns = returns.sort_index().copy()
+    foreign_assets: dict[str, str] = {}
+    for asset in normalized_returns.columns:
+        asset_name = str(asset).strip().upper()
+        base_asset = asset_name.removesuffix("_SIM").removesuffix("SIM")
+        currency = currencies.get(asset_name, currencies.get(base_asset, default))
+        if len(currency) != 3:
+            raise ValueError(f"Invalid currency for asset {asset}: {currency}")
+        if currency != base:
+            foreign_assets[asset] = currency
+
+    if not foreign_assets:
+        return normalized_returns
+    if fx_rates is None:
+        raise ValueError(
+            f"Historical FX rates are required to convert {base} portfolio returns from: "
+            + ", ".join(sorted(set(foreign_assets.values())))
+        )
+    if not isinstance(fx_rates.index, pd.DatetimeIndex) or fx_rates.index.has_duplicates:
+        raise ValueError("fx_rates must use a unique DatetimeIndex.")
+    try:
+        levels = fx_rates.sort_index().apply(pd.to_numeric, errors="raise")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("fx_rates must contain only numeric values.") from exc
+    levels.columns = [str(column).strip().upper() for column in levels.columns]
+    level_values = levels.to_numpy(dtype=float)
+    invalid = np.isinf(level_values) | (np.isfinite(level_values) & (level_values <= 0))
+    if invalid.any():
+        raise ValueError("fx_rates must contain positive finite levels when present.")
+
+    missing_currencies = sorted(set(foreign_assets.values()).difference(levels.columns))
+    if missing_currencies:
+        raise KeyError(f"FX rates are missing currencies: {', '.join(missing_currencies)}")
+    period_levels = levels.ffill().resample(fx_frequency).last()
+    fx_returns = np.log(period_levels / period_levels.shift(1))
+    aligned_fx_returns = fx_returns.reindex(normalized_returns.index, method="ffill").fillna(0.0)
+
+    converted = normalized_returns.copy()
+    for asset, currency in foreign_assets.items():
+        adjustment = aligned_fx_returns[currency]
+        if fx_quote == "base_per_foreign":
+            converted[asset] = converted[asset] + adjustment
+        else:
+            converted[asset] = converted[asset] - adjustment
+    return converted
+
+
+def fetch_yahoo_fx_rates(
+    currencies: Sequence[str],
+    base_currency: str,
+    start: str,
+    end: str | None = None,
+) -> pd.DataFrame:
+    """Fetch Yahoo FX levels quoted as base currency per foreign currency."""
+
+    base = str(base_currency).strip().upper()
+    requested = list(dict.fromkeys(str(currency).strip().upper() for currency in currencies))
+    requested = [currency for currency in requested if currency and currency != base]
+    if len(base) != 3 or any(len(currency) != 3 for currency in requested):
+        raise ValueError("Currency codes must be three-letter ISO codes.")
+    if not requested:
+        return pd.DataFrame()
+
+    frames: dict[str, pd.Series] = {}
+    missing: list[str] = []
+    for currency in requested:
+        direct_ticker = f"{currency}{base}=X"
+        inverse_ticker = f"{base}{currency}=X"
+        direct = fetch_yahoo_prices([direct_ticker], start=start, end=end)
+        direct_column = direct_ticker.upper()
+        if direct_column in direct.columns and direct[direct_column].notna().sum() >= 2:
+            frames[currency] = direct[direct_column].rename(currency)
+            continue
+
+        inverse = fetch_yahoo_prices([inverse_ticker], start=start, end=end)
+        inverse_column = inverse_ticker.upper()
+        if inverse_column in inverse.columns and inverse[inverse_column].notna().sum() >= 2:
+            frames[currency] = (1.0 / inverse[inverse_column]).rename(currency)
+        else:
+            missing.append(currency)
+
+    if missing:
+        raise ValueError(f"Yahoo Finance returned no usable FX history for: {', '.join(missing)}")
+    return pd.concat(frames.values(), axis=1).sort_index()
+
+
 def fetch_yahoo_prices(
     tickers: Sequence[str] | str,
     start: str,

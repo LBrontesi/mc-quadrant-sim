@@ -2,9 +2,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import mc_quadrants.data as data_module
 from mc_quadrants.data import (
     backfill_prices,
     combine_observed_and_simulated_returns,
+    convert_returns_to_base_currency,
     prices_to_returns,
     simulate_pre_inception_returns,
 )
@@ -73,3 +75,35 @@ def test_simulated_source_is_separate_from_stitched_series():
     assert combined.loc[: "2020-01-31", "IEF_SIM"].notna().any()
     assert combined.loc["2020-02-29":, "IEF_SIM"].isna().all()
     assert combined.loc[:, "IEFSIM"].notna().all()
+
+
+def test_currency_conversion_adds_historical_fx_return():
+    dates = pd.date_range("2020-01-31", periods=3, freq="ME")
+    local_returns = pd.DataFrame({"EFA": [0.01, 0.02, -0.01]}, index=dates)
+    fx_rates = pd.DataFrame({"EUR": [1.10, 1.20, 1.10]}, index=dates)
+
+    converted = convert_returns_to_base_currency(
+        local_returns,
+        asset_currencies={"EFA": "EUR"},
+        base_currency="USD",
+        fx_rates=fx_rates,
+    )
+
+    assert converted.loc[dates[0], "EFA"] == pytest.approx(0.01)
+    assert converted.loc[dates[1], "EFA"] == pytest.approx(0.02 + np.log(1.20 / 1.10))
+    assert converted.loc[dates[2], "EFA"] == pytest.approx(-0.01 + np.log(1.10 / 1.20))
+
+
+def test_fetch_yahoo_fx_rates_normalizes_direct_pair(monkeypatch):
+    dates = pd.date_range("2020-01-01", periods=2, freq="D")
+
+    def fake_fetch(tickers, start, end):
+        assert tickers == ["EURUSD=X"]
+        return pd.DataFrame({"EURUSD=X": [1.10, 1.20]}, index=dates)
+
+    monkeypatch.setattr(data_module, "fetch_yahoo_prices", fake_fetch)
+
+    rates = data_module.fetch_yahoo_fx_rates(["eur"], "usd", "2020-01-01", "2020-01-03")
+
+    assert rates.columns.tolist() == ["EUR"]
+    assert rates["EUR"].tolist() == [1.10, 1.20]

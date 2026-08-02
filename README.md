@@ -42,6 +42,12 @@ creates `IEFSIM` and `DBMFSIM` as stitched series for calibration. The generated
 segment is reproducible from its seed and calibrated from observed monthly
 returns; it is not an official index history.
 
+Portfolio currency conversion uses historical FX levels aligned to the return
+frequency. For an asset in EUR and a USD portfolio, the EUR local-currency log
+return is combined with the USD-per-EUR log FX return. A current spot quote is
+appropriate for converting a displayed value, but not for simulating future FX
+risk, so the simulator requires historical FX data for foreign assets.
+
 Macro observations are classified before they are joined to asset returns. The
 dashboard defaults to a one-period macro release lag: a macro regime observed
 at period `t` is used for asset returns beginning at `t + 1`. Remaining dates
@@ -181,7 +187,8 @@ sidebar, then enter weights only for those selected tickers before running the
 simulation. Yahoo Finance mode starts at 1990 by default and accepts optional
 proxy pairs such as `SPY:^GSPC, GLD:GC=F`. The synthetic asset field accepts
 values such as `IEF, DBMF`; select the resulting `IEFSIM` or `DBMFSIM` series
-for a backtest.
+for a backtest. Select a portfolio currency such as `EUR` and optionally map
+assets with values such as `EFA:EUR`; Yahoo FX pairs are loaded automatically.
 
 ## Run The Gradio App
 
@@ -194,8 +201,8 @@ The Gradio app supports the offline demo, Yahoo Finance/FRED downloads, and
 uploaded asset and macro CSVs. Uploading a macro CSV populates the growth and
 inflation column selectors from its headers. It also exposes release-lag
 handling, Gaussian/Student-t/bootstrap sampling, transition uncertainty,
-rebalancing costs, proxy backfills, risk metrics, diagnostics, scenario
-comparison, and CSV downloads.
+rebalancing costs, proxy backfills, currency conversion, risk metrics,
+diagnostics, scenario comparison, and CSV downloads.
 
 ## Run With Docker
 

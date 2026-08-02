@@ -4,6 +4,8 @@ from mc_quadrants.calibration import calibrate_quadrant_model, estimate_regime_m
 from mc_quadrants.data import (
     backfill_prices,
     combine_observed_and_simulated_returns,
+    convert_returns_to_base_currency,
+    fetch_yahoo_fx_rates,
     simulate_pre_inception_returns,
 )
 from mc_quadrants.diagnostics import CalibrationDiagnostics, build_calibration_diagnostics
@@ -24,10 +26,12 @@ __all__ = [
     "build_calibration_diagnostics",
     "backfill_prices",
     "combine_observed_and_simulated_returns",
+    "convert_returns_to_base_currency",
     "calibrate_quadrant_model",
     "classify_quadrants",
     "estimate_regime_moments",
     "estimate_transition_matrix",
+    "fetch_yahoo_fx_rates",
     "simulate_portfolio_paths",
     "simulate_returns",
     "simulate_pre_inception_returns",

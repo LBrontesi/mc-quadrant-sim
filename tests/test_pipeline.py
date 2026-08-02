@@ -20,6 +20,7 @@ def test_pipeline_applies_macro_lag_and_normalizes_asset_names():
         },
         index=dates,
     )
+    fx_rates = pd.DataFrame({"EUR": np.linspace(1.05, 1.15, len(dates))}, index=dates)
 
     scenario = run_scenario(
         returns=returns,
@@ -40,12 +41,16 @@ def test_pipeline_applies_macro_lag_and_normalizes_asset_names():
         degrees_of_freedom=5,
         rebalance_frequency=1,
         transaction_cost_bps=10,
+        base_currency="USD",
+        asset_currencies={"Stocks": "EUR"},
+        fx_rates=fx_rates,
     )
 
     assert scenario.result.assets == ["Stocks", "Bonds"]
     assert scenario.result.returns.shape == (4, 8, 2)
     assert scenario.model.metadata["macro_lag_periods"] == 1
     assert scenario.result.transition_concentration is not None
+    assert scenario.model.metadata["base_currency"] == "USD"
     assert any("lagged" in warning for warning in scenario.diagnostics.warnings)
 
     comparison = compare_distributions(

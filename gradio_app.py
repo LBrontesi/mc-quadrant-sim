@@ -14,6 +14,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from mc_quadrants.data import (
+    fetch_yahoo_fx_rates,
     load_market_data,
     prices_to_returns,
 )
@@ -133,6 +134,59 @@ def parse_proxy_map(raw_proxies: str) -> dict[str, str]:
             raise ValueError(f"Invalid proxy '{pair}'. Use ASSET:PROXY.")
         parsed[asset] = proxy
     return parsed
+
+
+def parse_currency_map(raw_currencies: str) -> dict[str, str]:
+    """Parse ``ASSET:CURRENCY`` pairs, defaulting unspecified assets to USD."""
+
+    parsed: dict[str, str] = {}
+    for pair in re.split(r"[,;\s]+", raw_currencies.strip().upper()):
+        if not pair:
+            continue
+        if ":" not in pair:
+            raise ValueError(f"Invalid currency '{pair}'. Use ASSET:CURRENCY.")
+        asset, currency = pair.split(":", 1)
+        if not asset or len(currency) != 3:
+            raise ValueError(f"Invalid currency '{pair}'. Use ASSET:CURRENCY.")
+        parsed[asset] = currency
+    return parsed
+
+
+def _currency_for_asset(asset: str, asset_currencies: Mapping[str, str]) -> str:
+    normalized = str(asset).strip().upper()
+    base_asset = normalized.removesuffix("_SIM").removesuffix("SIM")
+    return asset_currencies.get(normalized, asset_currencies.get(base_asset, "USD"))
+
+
+def prepare_fx_rates(
+    returns: pd.DataFrame,
+    selected_tickers: list[str],
+    base_currency: str,
+    currency_text: str,
+) -> tuple[dict[str, str], pd.DataFrame | None]:
+    """Load historical FX levels needed to express selected returns in base currency."""
+
+    base_currency = str(base_currency).strip().upper()
+    if len(base_currency) != 3:
+        raise ValueError("Portfolio currency must be a three-letter ISO code.")
+    asset_currencies = parse_currency_map(currency_text)
+    source_currencies = {
+        _currency_for_asset(ticker, asset_currencies)
+        for ticker in selected_tickers
+    }
+    foreign_currencies = tuple(sorted(currency for currency in source_currencies if currency != base_currency))
+    if not foreign_currencies:
+        return asset_currencies, None
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        raise ValueError("Historical FX conversion requires datetime-indexed returns.")
+    fx_start = pd.Timestamp(returns.index.min()) - pd.DateOffset(months=1)
+    fx_rates = fetch_yahoo_fx_rates(
+        foreign_currencies,
+        base_currency,
+        start=fx_start.strftime("%Y-%m-%d"),
+        end=pd.Timestamp(returns.index.max()).strftime("%Y-%m-%d"),
+    )
+    return asset_currencies, fx_rates
 
 
 def default_weight(asset: str, assets: list[str]) -> float:
@@ -500,6 +554,8 @@ def run_simulation(
     transaction_cost_bps: float = 0.0,
     macro_lag_periods: int = 0,
     transition_uncertainty: float = 0.0,
+    base_currency: str = "USD",
+    currency_text: str = "",
 ) -> tuple[go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, go.Figure, str, str, str, str, str]:
     """Run the full calibration + simulation pipeline and return all outputs."""
     try:
@@ -511,6 +567,13 @@ def run_simulation(
             raise ValueError(f"Selected tickers are missing from the loaded returns: {', '.join(missing_tickers)}")
 
         returns = returns.loc[:, selected_tickers]
+        base_currency = str(base_currency).strip().upper()
+        asset_currencies, fx_rates = prepare_fx_rates(
+            returns,
+            selected_tickers,
+            base_currency,
+            currency_text,
+        )
 
         periods = int(periods)
         paths = int(paths)
@@ -588,6 +651,9 @@ def run_simulation(
             transition_uncertainty=float(transition_uncertainty),
             rebalance_frequency=rebalance_frequency,
             transaction_cost_bps=float(transaction_cost_bps),
+            base_currency=base_currency,
+            asset_currencies=asset_currencies,
+            fx_rates=fx_rates,
         )
         model = scenario.model
         regimes = scenario.regimes
@@ -625,6 +691,7 @@ def run_simulation(
         corr_text = selected_correlation.round(3).to_string()
 
         summary_text = (
+            f"**Currency:** {base_currency} | "
             f"**Mean:** {summary['mean']:.2f} | "
             f"**P05:** {summary['p05']:.2f} | "
             f"**Median:** {summary['p50']:.2f} | "
@@ -712,12 +779,21 @@ def compare_scenarios(
     transaction_cost_bps: float,
     macro_lag_periods: int,
     transition_uncertainty: float,
+    base_currency: str,
+    currency_text: str,
 ) -> pd.DataFrame:
     """Compare Gaussian and Student-t outcomes using identical inputs."""
 
     try:
         selected_tickers = [str(ticker).strip().upper() for ticker in (selected_tickers or [])]
         weights = _weights_from_dataframe(weights_df, selected_tickers)
+        base_currency = str(base_currency).strip().upper()
+        asset_currencies, fx_rates = prepare_fx_rates(
+            returns.loc[:, selected_tickers],
+            selected_tickers,
+            base_currency,
+            currency_text,
+        )
         growth_thr: str | float = growth_threshold
         inflation_thr: str | float = inflation_threshold
         if isinstance(growth_threshold, str) and growth_threshold.startswith("fixed:"):
@@ -765,6 +841,9 @@ def compare_scenarios(
             degrees_of_freedom=5.0,
             rebalance_frequency=rebalance_frequency,
             transaction_cost_bps=float(transaction_cost_bps),
+            base_currency=base_currency,
+            asset_currencies=asset_currencies,
+            fx_rates=fx_rates,
         )
     except Exception as exc:
         raise gr.Error(f"Scenario comparison failed: {exc}")
@@ -833,6 +912,18 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
 
             load_btn = gr.Button("Load Data", variant="primary")
             load_msg = gr.Markdown()
+
+            gr.Markdown("### Currency")
+            base_currency = gr.Textbox(
+                value="USD",
+                label="Portfolio currency",
+                info="Any three-letter ISO code supported by Yahoo Finance, for example USD, EUR, GBP, JPY, or CHF.",
+            )
+            asset_currency_text = gr.Textbox(
+                value="",
+                label="Asset currencies (optional)",
+                info="Use ASSET:CURRENCY pairs, for example EFA:EUR. Unspecified assets are treated as USD.",
+            )
 
             gr.Markdown("### Calibration")
             growth_threshold = gr.Dropdown(
@@ -1155,6 +1246,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
         correlation_weight, corr_hgli, corr_hghi, corr_lghi, corr_lgli,
         return_distribution, degrees_df, block_size_value, rebalance_label, transaction_cost,
         macro_lag, transition_uncertainty_value,
+        base_currency_value, asset_currency_text_value,
         progress=gr.Progress(track_tqdm=True),
     ):
         progress(0.05, desc="Calibrating model")
@@ -1165,6 +1257,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
             correlation_weight, corr_hgli, corr_hghi, corr_lghi, corr_lgli,
             return_distribution, degrees_df, block_size_value, rebalance_label, transaction_cost,
             macro_lag, transition_uncertainty_value,
+            base_currency_value, asset_currency_text_value,
         )
 
     run_btn.click(
@@ -1181,6 +1274,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
             corr_low_growth_high_inflation, corr_low_growth_low_inflation,
             return_distribution, degrees_of_freedom, block_size, rebalance_frequency, transaction_cost_bps,
             macro_lag_periods, transition_uncertainty,
+            base_currency, asset_currency_text,
         ],
         outputs=[
             wealth_plot, terminal_plot, mix_plot,
@@ -1205,6 +1299,7 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
             corr_low_growth_high_inflation, corr_low_growth_low_inflation,
             rebalance_frequency, transaction_cost_bps, macro_lag_periods,
             transition_uncertainty,
+            base_currency, asset_currency_text,
         ],
         outputs=[comparison_table],
     )
