@@ -49,6 +49,7 @@ DEMO_TICKERS = {
 }
 
 DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
+SYNTHETIC_TICKER_OPTIONS = DEFAULT_TICKER_ORDER + ["DBMF", "KMLM", "TLT", "QQQ"]
 
 
 st.set_page_config(
@@ -104,6 +105,8 @@ def default_weight(asset: str, assets: list[str]) -> float:
         "VNQ": 5.0,
         "TIP": 3.0,
         "SHY": 2.0,
+        "DBMF": 5.0,
+        "KMLM": 5.0,
     }
     return defaults.get(base_asset, round(100.0 / max(len(assets), 1), 2))
 
@@ -121,7 +124,15 @@ def default_selected_tickers(tickers: list[str]) -> list[str]:
         if ticker in tickers or f"{ticker}SIM" in tickers
     ]
     if preferred:
+        preferred.extend(
+            ticker
+            for ticker in tickers
+            if ticker.endswith("SIM") and not ticker.endswith("_SIM") and ticker not in preferred
+        )
         return preferred
+    stitched = [ticker for ticker in tickers if ticker.endswith("SIM") and not ticker.endswith("_SIM")]
+    if stitched:
+        return stitched
     return tickers[: min(4, len(tickers))]
 
 
@@ -329,19 +340,21 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
             value="",
             help="Use ASSET:PROXY pairs, for example SPY:^GSPC, GLD:GC=F. Proxy levels are scaled to the asset during the overlap.",
         )
-        synthetic_text = st.sidebar.text_input(
+        synthetic_assets = st.sidebar.multiselect(
             "Synthetic backfill assets (optional)",
-            value="",
-            help="Enter observed tickers such as IEF, SHY, or DBMF; each must also be in Market tickers. The loader creates *_SIM and *SIM columns using reproducible Student-t draws.",
+            options=SYNTHETIC_TICKER_OPTIONS,
+            default=[],
+            help="Select an asset to create observed, *_SIM, and *SIM source columns. The live ticker is added automatically.",
         )
         synthetic_seed = st.sidebar.number_input(
             "Synthetic history seed",
             value=42,
             min_value=1,
             step=1,
-            disabled=not synthetic_text.strip(),
+            disabled=not synthetic_assets,
         )
         tickers = parse_tickers(ticker_text)
+        tickers.extend(asset for asset in synthetic_assets if asset not in tickers)
         if not tickers:
             st.error("Enter at least one Yahoo Finance ticker.")
             st.stop()
@@ -354,7 +367,6 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, str, str]:
 
         try:
             historical_proxies = parse_proxy_map(proxy_text)
-            synthetic_assets = parse_tickers(synthetic_text)
             with st.spinner("Downloading prices and macro data..."):
                 macro, returns, available = load_market_data(
                     tuple(tickers),

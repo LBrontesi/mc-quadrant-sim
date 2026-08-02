@@ -4,7 +4,7 @@ import io
 import os
 import re
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date
 
 import gradio as gr
@@ -56,6 +56,7 @@ DEMO_TICKERS = {
 }
 
 DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
+SYNTHETIC_TICKER_OPTIONS = DEFAULT_TICKER_ORDER + ["DBMF", "KMLM", "TLT", "QQQ"]
 
 REGIME_LABELS = [REGIME_NAMES[state] for state in REGIME_ORDER]
 REGIME_LOOKUP = {REGIME_NAMES[state]: state for state in REGIME_ORDER}
@@ -112,9 +113,14 @@ def normalize_ticker_columns(data: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def parse_tickers(raw_tickers: str) -> list[str]:
+def parse_tickers(raw_tickers: str | Sequence[str]) -> list[str]:
     parsed: list[str] = []
-    for ticker in re.split(r"[,;\s]+", raw_tickers.strip().upper()):
+    raw_values = (
+        re.split(r"[,;\s]+", raw_tickers.strip().upper())
+        if isinstance(raw_tickers, str)
+        else [str(ticker).strip().upper() for ticker in raw_tickers]
+    )
+    for ticker in raw_values:
         if ticker and ticker not in parsed:
             parsed.append(ticker)
     return parsed
@@ -200,6 +206,8 @@ def default_weight(asset: str, assets: list[str]) -> float:
         "VNQ": 5.0,
         "TIP": 3.0,
         "SHY": 2.0,
+        "DBMF": 5.0,
+        "KMLM": 5.0,
     }
     return defaults.get(base_asset, round(100.0 / max(len(assets), 1), 2))
 
@@ -211,7 +219,15 @@ def default_selected_tickers(tickers: list[str]) -> list[str]:
         if ticker in tickers or f"{ticker}SIM" in tickers
     ]
     if preferred:
+        preferred.extend(
+            ticker
+            for ticker in tickers
+            if ticker.endswith("SIM") and not ticker.endswith("_SIM") and ticker not in preferred
+        )
         return preferred
+    stitched = [ticker for ticker in tickers if ticker.endswith("SIM") and not ticker.endswith("_SIM")]
+    if stitched:
+        return stitched
     return tickers[: min(4, len(tickers))]
 
 
@@ -444,7 +460,7 @@ def load_data(
     demo_seed: int,
     ticker_text: str,
     proxy_text: str,
-    synthetic_text: str,
+    synthetic_text: str | Sequence[str],
     synthetic_seed: int,
     start_date: str,
     end_date: str,
@@ -465,10 +481,11 @@ def load_data(
 
         if source == "Yahoo Finance":
             tickers = parse_tickers(ticker_text)
-            if not tickers:
-                raise ValueError("Enter at least one Yahoo Finance ticker.")
             historical_proxies = parse_proxy_map(proxy_text)
             synthetic_assets = parse_tickers(synthetic_text)
+            tickers.extend(asset for asset in synthetic_assets if asset not in tickers)
+            if not tickers:
+                raise ValueError("Enter at least one Yahoo Finance ticker.")
             macro, returns, available = load_market_data(
                 tickers,
                 start_date,
@@ -893,10 +910,12 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                     label="Historical proxies (optional)",
                     info="ASSET:PROXY pairs, for example SPY:^GSPC, GLD:GC=F. Proxy levels are scaled during the overlap.",
                 )
-                synthetic_text = gr.Textbox(
-                    value="",
+                synthetic_text = gr.Dropdown(
+                    choices=SYNTHETIC_TICKER_OPTIONS,
+                    value=[],
+                    multiselect=True,
                     label="Synthetic backfill assets (optional)",
-                    info="Add each asset to Market tickers first. IEF, SHY, or DBMF become IEF_SIM/IEFSIM-style source pairs.",
+                    info="Selecting an asset automatically adds its live ticker. IEF, SHY, or DBMF become IEF_SIM/IEFSIM-style source pairs.",
                 )
                 synthetic_seed = gr.Number(value=42, label="Synthetic history seed", precision=0, minimum=1)
                 start_date = gr.Textbox(value="1990-01-01", label="History start (YYYY-MM-DD)")
@@ -912,6 +931,10 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
 
             load_btn = gr.Button("Load Data", variant="primary")
             load_msg = gr.Markdown()
+            gr.Markdown(
+                "**Simulated assets:** choose a live ticker above, then click **Load Data**. "
+                "The portfolio list will show observed and `SIM` versions after loading."
+            )
 
             gr.Markdown("### Currency")
             base_currency = gr.Textbox(

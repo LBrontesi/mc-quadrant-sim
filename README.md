@@ -185,8 +185,8 @@ The dashboard starts with the same offline demo data and can also calibrate from
 uploaded CSV files. Asset selection is ticker-based: choose the tickers in the
 sidebar, then enter weights only for those selected tickers before running the
 simulation. Yahoo Finance mode starts at 1990 by default and accepts optional
-proxy pairs such as `SPY:^GSPC, GLD:GC=F`. The synthetic asset field accepts
-values such as `IEF, DBMF`; select the resulting `IEFSIM` or `DBMFSIM` series
+proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or `DBMF` in the
+synthetic asset picker, then choose the resulting `IEFSIM` or `DBMFSIM` series
 for a backtest. Select a portfolio currency such as `EUR` and optionally map
 assets with values such as `EFA:EUR`; Yahoo FX pairs are loaded automatically.
 
