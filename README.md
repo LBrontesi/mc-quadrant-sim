@@ -162,7 +162,7 @@ python -m pip install -e ".[data]"
 With `uv`, the checked-in lockfile provides a reproducible environment:
 
 ```bash
-uv sync --extra dev --extra gradio --extra data
+uv sync --extra dev --extra data
 ```
 
 Then you can adapt:
@@ -181,35 +181,29 @@ The demo uses synthetic history so it runs offline, but it exercises the same
 calibration and simulation pipeline used for real data. It includes eight asset
 classes and 420 monthly observations from January 1990 through December 2024.
 
-## Run The Streamlit Dashboard
+## Run The Web UI
+
+The UI is written in plain HTML, CSS, and JavaScript (no frontend framework,
+no CDN dependencies) and is served by a small Python backend that wraps the
+same simulation core:
 
 ```bash
-python -m pip install -e ".[app]"
-streamlit run streamlit_app.py
+python web_app.py
 ```
 
-The dashboard starts with the same offline demo data and can also calibrate from
-uploaded CSV files. Asset selection is ticker-based: choose the tickers in the
-sidebar, then enter weights only for those selected tickers before running the
-simulation. Yahoo Finance mode starts at 1990 by default and accepts optional
-proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or `DBMF` in the
-synthetic asset picker, then choose the resulting `IEFSIM` or `DBMFSIM` series
-for a backtest. Select a portfolio currency such as `EUR` and optionally map
-assets with values such as `EFA:EUR`; Yahoo FX pairs are loaded automatically.
+Open `http://127.0.0.1:7860` after the server starts. Set `PORT` to use a
+different port. The optional data helpers need `.[data]`.
 
-## Run The Gradio App
-
-```bash
-python -m pip install -e ".[gradio,data]"
-python gradio_app.py
-```
-
-The Gradio app supports the offline demo, Yahoo Finance/FRED downloads, and
-uploaded asset and macro CSVs. Uploading a macro CSV populates the growth and
-inflation column selectors from its headers. It also exposes release-lag
-handling, Gaussian/Student-t/bootstrap sampling, transition uncertainty,
-rebalancing costs, proxy backfills, currency conversion, risk metrics,
-diagnostics, scenario comparison, and CSV downloads.
+The web UI supports the offline demo, Yahoo Finance/FRED downloads, and
+uploaded asset and macro CSVs. Yahoo mode starts at 1990 by default and
+accepts optional proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or
+`DBMF` in the synthetic asset picker, then choose the resulting `IEFSIM` or
+`DBMFSIM` series for a backtest. Select a portfolio currency such as `EUR`
+and optionally map assets with values such as `EFA:EUR`; Yahoo FX pairs are
+loaded automatically. Results include metric cards, wealth percentile curves,
+terminal wealth histograms, regime mix, transition and correlation heatmaps,
+macro scatter, calibration diagnostics, scenario comparison, and CSV
+downloads. Charts are rendered client-side as SVG.
 
 ## Run With Docker
 

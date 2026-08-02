@@ -4,13 +4,14 @@ WORKDIR /app
 
 COPY pyproject.toml README.md uv.lock ./
 COPY src ./src
-COPY gradio_app.py streamlit_app.py ./
+COPY web ./web
+COPY web_app.py ./
 
 RUN python -m pip install --no-cache-dir uv \
-    && uv sync --frozen --all-extras
+    && uv sync --frozen --extra data
 
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 7860
 
-CMD ["python", "gradio_app.py"]
+CMD ["python", "web_app.py"]

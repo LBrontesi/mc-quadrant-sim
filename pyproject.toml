@@ -14,14 +14,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-app = [
-  "altair>=5.0",
-  "streamlit>=1.36",
-]
-gradio = [
-  "gradio>=4.0",
-  "plotly>=5.0",
-]
 data = [
   "pandas-datareader>=0.10",
   "yfinance>=0.2",

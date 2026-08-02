@@ -3,9 +3,7 @@ title: Four-Quadrant Monte Carlo Simulator
 emoji: 📈
 colorFrom: blue
 colorTo: green
-sdk: gradio
-sdk_version: 6.22.0
-app_file: gradio_app.py
+sdk: static
 pinned: false
 ---
 
@@ -35,17 +33,24 @@ A Monte Carlo simulator built around the classic four macro quadrants:
 - **Portfolio analysis** - wealth percentiles, downside risk, drawdown, regime mix, and costs
 - **Diagnostics and exports** - calibration warnings, scenario comparisons, and CSV downloads
 
-## How to use
+## Deployment
 
-1. Choose a data source (Demo, Yahoo Finance, or CSV upload)
-2. Select portfolio tickers and set weights
-3. Configure calibration thresholds and simulation parameters
-4. Click **Run Simulation** to see results
-5. Use the download controls to export wealth paths, risk summaries, and diagnostics
+The UI is a static HTML/CSS/JavaScript frontend (`web/`) served by a Python
+backend (`web_app.py`) that exposes the simulation API. The backend requires a
+runtime for the Python engine, so deploy the Docker image instead of a static
+Space:
+
+```bash
+docker build -t mc-quadrant-sim .
+docker run --rm -p 7860:7860 mc-quadrant-sim
+```
+
+Open `http://127.0.0.1:7860` after the container starts.
 
 ## Local development
 
 ```bash
 cd mc-quadrant-sim
-python -m pip install -e ".[gradio,data]"
-python gradio_app.py
+python -m pip install -e ".[data]"
+python web_app.py
+```
