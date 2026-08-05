@@ -622,6 +622,8 @@ function gatherScenario() {
     block_size: Number($("block-size").value),
     rebalance: $("rebalance").value,
     cost_bps: Number($("cost-bps").value),
+    contribution: Number($("contribution").value),
+    withdrawal: Number($("withdrawal").value),
     risk_free_rate: Number($("risk-free").value) / 100,
     annual_inflation: Number($("annual-inflation").value) / 100,
     base_currency: $("base-currency").value,
@@ -788,6 +790,8 @@ function renderScenarioChips(payload, data) {
     if (Number(weight) > 0) chips.push(`${ticker} ${Number(weight).toFixed(0)}%`);
   });
   chips.push(`${payload.periods} periods x ${payload.paths} paths`);
+  if (Number(payload.contribution) > 0) chips.push(`+${fmt(payload.contribution, 0)}/period`);
+  if (Number(payload.withdrawal) > 0) chips.push(`−${fmt(payload.withdrawal, 0)}/period`);
   chips.push(data.terms === "real" ? "Real terms" : "Nominal");
   chips.push(data.currency);
   chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
@@ -1029,7 +1033,8 @@ const CONTROL_IDS = [
   "csv-growth", "csv-inflation", "base-currency", "currency-map", "corr-blend",
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
   "macro-lag", "transition-uncertainty", "periods", "paths", "seed", "distribution",
-  "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "risk-free", "annual-inflation",
+  "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "contribution", "withdrawal",
+  "risk-free", "annual-inflation",
 ];
 
 function saveControls() {

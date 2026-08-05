@@ -232,12 +232,21 @@ def simulate_portfolio_paths(
     return_kind: str = "log",
     rebalance_frequency: int | None = None,
     transaction_cost_bps: float = 0.0,
+    contribution: float = 0.0,
+    withdrawal: float = 0.0,
 ) -> pd.DataFrame:
     """Convert simulated asset returns into portfolio wealth paths.
 
     With ``rebalance_frequency=None`` the original weighted-return behavior is
     retained. Set a positive frequency to model holdings, periodic rebalancing,
     and transaction costs in basis points charged on traded notional.
+
+    ``contribution`` and ``withdrawal`` are periodic cash flows in the same
+    currency as ``initial_value``. A contribution is invested at the target
+    allocation at the start of every period (dollar-cost averaging); a
+    withdrawal is funded by selling a pro-rata slice of current holdings at
+    the end of every period. Wealth is floored at zero, so a path cannot be
+    driven negative by withdrawals.
     """
 
     if not np.isfinite(initial_value) or initial_value <= 0:
@@ -246,6 +255,10 @@ def simulate_portfolio_paths(
         raise ValueError("result.returns must have shape (periods, paths, assets).")
     if not np.isfinite(result.returns).all():
         raise ValueError("Simulated returns must contain only finite values.")
+    if not np.isfinite(contribution) or contribution < 0:
+        raise ValueError("contribution must be a finite, non-negative number.")
+    if not np.isfinite(withdrawal) or withdrawal < 0:
+        raise ValueError("withdrawal must be a finite, non-negative number.")
 
     provided_weights = pd.Series(weights, dtype=float)
     weight_vector = provided_weights.reindex(result.assets)
@@ -274,11 +287,20 @@ def simulate_portfolio_paths(
     if rebalance_frequency is None:
         portfolio_returns = result.returns @ weight_vector.to_numpy(dtype=float)
         if return_kind == "log":
+            growth = np.exp(portfolio_returns)
             wealth = initial_value * np.exp(np.cumsum(portfolio_returns, axis=0))
         else:
             if (1.0 + portfolio_returns <= 0).any():
                 raise ValueError("Simple returns must be greater than -100% for positive wealth.")
+            growth = 1.0 + portfolio_returns
             wealth = initial_value * np.cumprod(1.0 + portfolio_returns, axis=0)
+        if contribution or withdrawal:
+            periods, paths = result.returns.shape[:2]
+            value = np.full(paths, initial_value, dtype=float)
+            wealth = np.empty((periods, paths), dtype=float)
+            for period in range(periods):
+                value = np.maximum((value + contribution) * growth[period] - withdrawal, 0.0)
+                wealth[period] = value
         if not np.isfinite(wealth).all():
             raise ValueError("Portfolio wealth contains non-finite values.")
         return pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(result.returns.shape[1])])
@@ -293,22 +315,29 @@ def simulate_portfolio_paths(
         raise ValueError("Asset growth contains non-finite values.")
 
     periods, paths, assets = result.returns.shape
+    target_weights = weight_vector.to_numpy(dtype=float)
     holdings = np.broadcast_to(
-        initial_value * weight_vector.to_numpy(dtype=float),
+        initial_value * target_weights,
         (paths, assets),
     ).copy()
     wealth = np.empty((periods, paths), dtype=float)
     cost_rate = float(transaction_cost_bps) / 10_000.0
 
     for period in range(periods):
+        if contribution:
+            holdings += contribution * target_weights
         holdings *= asset_growth[period]
+        if withdrawal:
+            fraction = withdrawal / np.maximum(holdings.sum(axis=1), 1e-300)
+            holdings -= holdings * fraction[:, None]
+            holdings = np.maximum(holdings, 0.0)
         value_before_rebalance = holdings.sum(axis=1)
         if (period + 1) % rebalance_frequency == 0:
-            target_holdings = value_before_rebalance[:, None] * weight_vector.to_numpy(dtype=float)
+            target_holdings = value_before_rebalance[:, None] * target_weights
             turnover = np.abs(target_holdings - holdings).sum(axis=1)
             costs = turnover * cost_rate
             value_after_costs = value_before_rebalance - costs
-            holdings = value_after_costs[:, None] * weight_vector.to_numpy(dtype=float)
+            holdings = value_after_costs[:, None] * target_weights
             wealth[period] = value_after_costs
         else:
             wealth[period] = value_before_rebalance

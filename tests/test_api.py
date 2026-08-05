@@ -110,6 +110,23 @@ def test_scenario_kwargs_include_long_term_fields():
     assert kwargs["annual_inflation"] == pytest.approx(0.03)
 
 
+def test_scenario_kwargs_include_periodic_cash_flows():
+    kwargs = api.scenario_kwargs({"weights": {"SPY": 100}, "contribution": 25.0, "withdrawal": 10.0})
+    assert kwargs["contribution"] == pytest.approx(25.0)
+    assert kwargs["withdrawal"] == pytest.approx(10.0)
+
+
+def test_simulate_reports_cash_flow_summary():
+    payload = dict(DEMO_PAYLOAD)
+    payload["contribution"] = 20.0
+    payload["withdrawal"] = 5.0
+    response = api.build_simulate_response(payload)
+    assert response["ok"] is True
+    assert response["summary"]["periodic_contribution"] == pytest.approx(20.0)
+    assert response["summary"]["periodic_withdrawal"] == pytest.approx(5.0)
+    assert response["summary"]["total_contributed"] == pytest.approx(20.0 * 12)
+
+
 def test_simulate_demo_returns_full_result():
     response = api.build_simulate_response(dict(DEMO_PAYLOAD))
     assert response["ok"] is True

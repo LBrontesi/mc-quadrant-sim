@@ -122,6 +122,70 @@ def test_rebalancing_transaction_costs_reduce_wealth():
     assert with_costs.iloc[-1, 0] < without_costs.iloc[-1, 0]
 
 
+def _two_period_result() -> SimulationResult:
+    return SimulationResult(
+        returns=np.array(
+            [
+                [[0.10, 0.00]],
+                [[0.10, 0.00]],
+            ]
+        ),
+        regimes=np.empty((2, 1), dtype=object),
+        assets=["Stocks", "Bonds"],
+        states=[],
+        frequency="M",
+    )
+
+
+def test_periodic_contributions_increase_wealth():
+    result = _two_period_result()
+    plain = simulate_portfolio_paths(result, {"Stocks": 1.0})
+    with_dca = simulate_portfolio_paths(result, {"Stocks": 1.0}, contribution=10.0)
+    assert with_dca.iloc[-1, 0] > plain.iloc[-1, 0]
+    assert with_dca.iloc[-1, 0] == pytest.approx(
+        ((100.0 + 10.0) * np.exp(0.10) + 10.0) * np.exp(0.10)
+    )
+
+
+def test_withdrawals_reduce_wealth_and_floor_at_zero():
+    result = _two_period_result()
+    plain = simulate_portfolio_paths(result, {"Stocks": 1.0})
+    with_small = simulate_portfolio_paths(result, {"Stocks": 1.0}, withdrawal=20.0)
+    assert with_small.iloc[-1, 0] < plain.iloc[-1, 0]
+    exhausted = simulate_portfolio_paths(result, {"Stocks": 1.0}, withdrawal=500.0)
+    assert exhausted.iloc[-1, 0] == 0.0
+    assert (exhausted.to_numpy() >= 0).all()
+
+
+def test_cash_flows_work_in_rebalancing_mode():
+    result = _two_period_result()
+    with_flows = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        rebalance_frequency=1,
+        contribution=10.0,
+        withdrawal=5.0,
+        transaction_cost_bps=10,
+    )
+    without_flows = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        rebalance_frequency=1,
+        transaction_cost_bps=10,
+    )
+    assert with_flows.iloc[-1, 0] > without_flows.iloc[-1, 0]
+    assert np.isfinite(with_flows.to_numpy()).all()
+    assert (with_flows.to_numpy() >= 0).all()
+
+
+def test_cash_flows_validate_inputs():
+    result = _two_period_result()
+    with pytest.raises(ValueError, match="contribution"):
+        simulate_portfolio_paths(result, {"Stocks": 1.0}, contribution=-1.0)
+    with pytest.raises(ValueError, match="withdrawal"):
+        simulate_portfolio_paths(result, {"Stocks": 1.0}, withdrawal=-1.0)
+
+
 def test_wealth_risk_summary_includes_downside_metrics():
     wealth = pd.DataFrame(
         {
