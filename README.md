@@ -248,6 +248,25 @@ The demo uses synthetic history so it runs offline, but it exercises the same
 calibration and simulation pipeline used for real data. It includes eight asset
 classes and 420 monthly observations from January 1990 through December 2024.
 
+## Frontends And Shared Methodology
+
+The simulation methodology lives in `src/mc_quadrants/` and is identical across
+every frontend. The UI-agnostic orchestration layer `src/mc_quadrants/api.py`
+handles data loading, scenario building, and result shaping; frontends only
+call it and render the returned structures. Each frontend ships on its own
+branch with the same core:
+
+| Branch | Frontend | Run |
+| --- | --- | --- |
+| `web-ui` | HTML/CSS/JS served by a small Python HTTP backend | `python web_app.py` (port 7860) |
+| `ui-streamlit` | Streamlit + Altair | `streamlit run streamlit_app.py` (port 8501) |
+| `ui-gradio` | Gradio + Plotly | `python gradio_app.py` (port 7860) |
+
+All three support the same workflow: demo/Yahoo/CSV data sources, historical
+proxies, synthetic backfills, FX conversion, correlation overrides, portfolio
+presets, the full metric set, calibration diagnostics, Normal-vs-Student-t
+comparison, and CSV/JSON exports.
+
 ## Run The Web UI
 
 The UI is written in plain HTML, CSS, and JavaScript (no frontend framework,
@@ -333,7 +352,9 @@ print(summarize_terminal_wealth(wealth))
 
 For a reusable application workflow, `mc_quadrants.pipeline.run_scenario()`
 returns the calibrated model, simulated paths, wealth, risk summary, and
-calibration diagnostics together.
+calibration diagnostics together. Frontends use `mc_quadrants.api` instead,
+which wraps that workflow behind the payload contract shared by the web,
+Streamlit, and Gradio UIs.
 
 ## Suggested Real Data Inputs
 
