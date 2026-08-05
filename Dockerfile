@@ -19,4 +19,4 @@ ENV PATH="$HOME/app/.venv/bin:$HOME/.local/bin:$PATH"
 
 EXPOSE 7860
 
-CMD ["python", "web_app.py"]
+CMD ["python", "gradio_app.py"]

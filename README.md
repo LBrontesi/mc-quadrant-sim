@@ -248,20 +248,20 @@ The demo uses synthetic history so it runs offline, but it exercises the same
 calibration and simulation pipeline used for real data. It includes eight asset
 classes and 420 monthly observations from January 1990 through December 2024.
 
-## Run The Web UI
+## Run The Gradio UI
 
-The UI is written in plain HTML, CSS, and JavaScript (no frontend framework,
-no CDN dependencies) and is served by a small Python backend that wraps the
-same simulation core:
+This branch ships the Gradio frontend. All data loading, scenario building,
+and result shaping is handled by the shared `mc_quadrants.api` layer, so the
+simulation methodology is identical to the web and Streamlit branches:
 
 ```bash
-python web_app.py
+python gradio_app.py
 ```
 
 Open `http://127.0.0.1:7860` after the server starts. Set `PORT` to use a
 different port. The optional data helpers need `.[data]`.
 
-The web UI supports the offline demo, Yahoo Finance/FRED downloads, and
+The Gradio UI supports the offline demo, Yahoo Finance/FRED downloads, and
 uploaded asset and macro CSVs. Yahoo mode starts at 1990 by default and
 accepts optional proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or
 `DBMF` in the synthetic asset picker, then choose the resulting `IEFSIM` or
@@ -275,7 +275,7 @@ inflation/risk-free inputs report real terms and a proper Sharpe ratio.
 Results include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, macro scatter, calibration diagnostics, scenario
-comparison, and CSV downloads. Charts are rendered client-side as SVG.
+comparison, and CSV downloads. Charts are rendered with Plotly.
 
 ## Run With Docker
 
