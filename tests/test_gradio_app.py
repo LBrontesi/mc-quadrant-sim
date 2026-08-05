@@ -19,6 +19,8 @@ BASE_ARGS = dict(
     block_size=3,
     rebalance="monthly",
     cost_bps=10,
+    contribution=0.0,
+    withdrawal=0.0,
     risk_free_rate=0.0,
     annual_inflation=0.0,
     base_currency="USD",
@@ -64,6 +66,15 @@ def test_gradio_app_full_simulation_flow():
     assert len(figures) == 6
     assert diagnostics.value and diagnostics.headers
     assert results["selected_tickers"] == ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
+
+
+def test_gradio_app_cash_flows_are_forwarded():
+    args = _loaded_args()
+    args["contribution"] = 20.0
+    args["withdrawal"] = 5.0
+    results = app.on_run(**args)[-1]
+    assert results["summary"]["periodic_contribution"] == pytest.approx(20.0)
+    assert results["summary"]["periodic_withdrawal"] == pytest.approx(5.0)
 
 
 def test_gradio_app_compare_and_downloads():

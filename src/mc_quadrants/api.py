@@ -368,6 +368,8 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "transition_uncertainty": float(payload.get("transition_uncertainty", 0.0)),
         "rebalance_frequency": REBALANCE_KEYS[rebalance_label],
         "transaction_cost_bps": float(payload.get("cost_bps", 10.0)),
+        "contribution": float(payload.get("contribution", 0.0)),
+        "withdrawal": float(payload.get("withdrawal", 0.0)),
         "base_currency": base_currency,
         "risk_free_rate": float(payload.get("risk_free_rate", 0.0)) / 100.0,
         "annual_inflation": float(payload.get("annual_inflation", 0.0)) / 100.0,
@@ -480,9 +482,17 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     diagnostics = diagnostics.merge(simulated_diagnostics, on="regime", how="left")
     diagnostics["regime"] = diagnostics["regime"].map(REGIME_NAMES)
 
+    summary_values = {str(key): _json_value(value) for key, value in summary.items()}
+    contribution = float(payload.get("contribution", 0.0))
+    withdrawal = float(payload.get("withdrawal", 0.0))
+    if contribution or withdrawal:
+        summary_values["periodic_contribution"] = contribution
+        summary_values["periodic_withdrawal"] = withdrawal
+        summary_values["total_contributed"] = contribution * len(wealth)
+
     return {
         "ok": True,
-        "summary": {str(key): _json_value(value) for key, value in summary.items()},
+        "summary": summary_values,
         "currency": scenario.model.metadata.get("base_currency", "USD"),
         "terms": "real" if scenario_kwargs(payload)["annual_inflation"] > 0 else "nominal",
         "warnings": list(scenario.diagnostics.warnings),

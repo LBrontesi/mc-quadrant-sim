@@ -107,6 +107,8 @@ def scenario_payload(
     block_size: int,
     rebalance: str,
     cost_bps: int,
+    contribution: float,
+    withdrawal: float,
     risk_free_rate: float,
     annual_inflation: float,
     base_currency: str,
@@ -133,6 +135,8 @@ def scenario_payload(
         "block_size": int(block_size),
         "rebalance": rebalance,
         "cost_bps": int(cost_bps),
+        "contribution": float(contribution),
+        "withdrawal": float(withdrawal),
         "risk_free_rate": float(risk_free_rate) / 100.0,
         "annual_inflation": float(annual_inflation) / 100.0,
         "base_currency": base_currency.strip().upper(),
@@ -156,6 +160,8 @@ def sim_payload(
     block_size: int,
     rebalance: str,
     cost_bps: int,
+    contribution: float,
+    withdrawal: float,
     risk_free_rate: float,
     annual_inflation: float,
     base_currency: str,
@@ -187,9 +193,9 @@ def sim_payload(
     payload.update(
         scenario_payload(
             periods, paths, seed, start_state, distribution, degrees_of_freedom, block_size,
-            rebalance, cost_bps, risk_free_rate, annual_inflation, base_currency, currency_map,
-            use_corr_override, corr_blend, corr_targets, growth_threshold, inflation_threshold,
-            macro_lag, transition_uncertainty,
+            rebalance, cost_bps, contribution, withdrawal, risk_free_rate, annual_inflation,
+            base_currency, currency_map, use_corr_override, corr_blend, corr_targets,
+            growth_threshold, inflation_threshold, macro_lag, transition_uncertainty,
         )
     )
     payload["selected_tickers"] = selected_tickers
@@ -347,6 +353,8 @@ def on_run(
     block_size: int,
     rebalance: str,
     cost_bps: int,
+    contribution: float,
+    withdrawal: float,
     risk_free_rate: float,
     annual_inflation: float,
     base_currency: str,
@@ -377,9 +385,10 @@ def on_run(
     }
     payload = sim_payload(
         state, selected, weights, periods, paths, seed, start_state, distribution,
-        degrees_of_freedom, block_size, rebalance, cost_bps, risk_free_rate,
-        annual_inflation, base_currency, currency_map, use_corr_override, corr_blend,
-        corr_targets, growth_threshold, inflation_threshold, macro_lag, transition_uncertainty,
+        degrees_of_freedom, block_size, rebalance, cost_bps, contribution, withdrawal,
+        risk_free_rate, annual_inflation, base_currency, currency_map, use_corr_override,
+        corr_blend, corr_targets, growth_threshold, inflation_threshold, macro_lag,
+        transition_uncertainty,
     )
     try:
         results = api.build_simulate_response(payload)
@@ -439,6 +448,8 @@ def on_compare(
     block_size: int,
     rebalance: str,
     cost_bps: int,
+    contribution: float,
+    withdrawal: float,
     risk_free_rate: float,
     annual_inflation: float,
     base_currency: str,
@@ -467,9 +478,10 @@ def on_compare(
     }
     payload = sim_payload(
         state, selected, weights, periods, paths, seed, start_state, distribution,
-        degrees_of_freedom, block_size, rebalance, cost_bps, risk_free_rate,
-        annual_inflation, base_currency, currency_map, use_corr_override, corr_blend,
-        corr_targets, growth_threshold, inflation_threshold, macro_lag, transition_uncertainty,
+        degrees_of_freedom, block_size, rebalance, cost_bps, contribution, withdrawal,
+        risk_free_rate, annual_inflation, base_currency, currency_map, use_corr_override,
+        corr_blend, corr_targets, growth_threshold, inflation_threshold, macro_lag,
+        transition_uncertainty,
     )
     try:
         comparison = api.build_compare_response(payload)
@@ -491,6 +503,8 @@ def download_wealth_paths(
     block_size: int,
     rebalance: str,
     cost_bps: int,
+    contribution: float,
+    withdrawal: float,
     risk_free_rate: float,
     annual_inflation: float,
     base_currency: str,
@@ -517,9 +531,10 @@ def download_wealth_paths(
     }
     payload = sim_payload(
         state, list(tickers) if tickers else [], weights, periods, paths, seed, start_state,
-        distribution, degrees_of_freedom, block_size, rebalance, cost_bps, risk_free_rate,
-        annual_inflation, base_currency, currency_map, use_corr_override, corr_blend,
-        corr_targets, growth_threshold, inflation_threshold, macro_lag, transition_uncertainty,
+        distribution, degrees_of_freedom, block_size, rebalance, cost_bps, contribution,
+        withdrawal, risk_free_rate, annual_inflation, base_currency, currency_map,
+        use_corr_override, corr_blend, corr_targets, growth_threshold, inflation_threshold,
+        macro_lag, transition_uncertainty,
     )
     csv = api.build_wealth_csv(payload)["csv"]
     path = os.path.join(TEMP_DIR, "wealth_paths.csv")
@@ -613,6 +628,11 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
                 cost_bps = gr.Number(value=10, label="Cost (bps)", minimum=0, maximum=100, precision=0)
                 risk_free_rate = gr.Number(value=0.0, label="Risk-free rate (annual %)")
             with gr.Row():
+                contribution = gr.Number(value=0.0, label="Contribution / period", minimum=0,
+                    info="Currency units invested at the target allocation each period (DCA).")
+                withdrawal = gr.Number(value=0.0, label="Withdrawal / period", minimum=0,
+                    info="Currency units funded pro-rata from holdings each period.")
+            with gr.Row():
                 annual_inflation = gr.Number(value=0.0, label="Inflation assumption (annual %)")
                 base_currency = gr.Textbox(value="USD", label="Portfolio currency", max_length=3)
             currency_map = gr.Textbox(label="Asset currencies (ASSET:CURRENCY)", placeholder="EFA:EUR")
@@ -690,10 +710,10 @@ with gr.Blocks(title="Four-Quadrant Monte Carlo Simulator") as demo:
 
     run_inputs = [
         state, tickers, weights_table, periods, paths, seed, start_state, distribution,
-        degrees_of_freedom, block_size, rebalance, cost_bps, risk_free_rate, annual_inflation,
-        base_currency, currency_map, use_corr_override, corr_blend, corr_growth_low,
-        corr_growth_high, corr_stagflation, corr_recession, growth_threshold,
-        inflation_threshold, macro_lag, transition_uncertainty,
+        degrees_of_freedom, block_size, rebalance, cost_bps, contribution, withdrawal,
+        risk_free_rate, annual_inflation, base_currency, currency_map, use_corr_override,
+        corr_blend, corr_growth_low, corr_growth_high, corr_stagflation, corr_recession,
+        growth_threshold, inflation_threshold, macro_lag, transition_uncertainty,
     ]
     run_outputs = [
         run_status, metrics, wealth_plot, terminal_plot, drawdown_plot, regime_mix_plot,
