@@ -19,4 +19,4 @@ ENV PATH="$HOME/app/.venv/bin:$HOME/.local/bin:$PATH"
 
 EXPOSE 7860
 
-CMD ["python", "web_app.py"]
+CMD ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=7860", "--server.headless=true"]
