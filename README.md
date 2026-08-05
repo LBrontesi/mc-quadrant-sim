@@ -1,3 +1,13 @@
+---
+title: Four-Quadrant Monte Carlo Simulator
+emoji: 📈
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # MC Quadrant Simulator
 
 A starter Python project for a Monte Carlo simulator built around the classic
