@@ -58,8 +58,8 @@ def test_correlation_overrides_helper():
     assert overrides["high_growth_low_inflation"] == {("SPY", "IEF"): -0.2}
     assert overrides["low_growth_low_inflation"] == {("SPY", "IEF"): -0.40}
 
-    with pytest.raises(ValueError, match="at least two"):
-        web_app.correlation_overrides(payload, ["SPY"])
+    overrides, blend = web_app.correlation_overrides(payload, ["SPY"])
+    assert overrides is None and blend == 1.0
     with pytest.raises(ValueError, match="between -1 and 1"):
         web_app.correlation_overrides({"use_correlation_override": True, "correlation_override_targets": {"high_growth_low_inflation": 2.0}}, ["SPY", "IEF"])
 

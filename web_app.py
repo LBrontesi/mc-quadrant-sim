@@ -185,7 +185,7 @@ def correlation_overrides(
     if not bool(payload.get("use_correlation_override", False)):
         return None, 1.0
     if len(selected_tickers) < 2:
-        raise ValueError("Correlation overrides require at least two selected tickers.")
+        return None, 1.0
     blend = float(payload.get("correlation_blend", 0.40))
     if not 0 <= blend <= 1:
         raise ValueError("Correlation blend must be between 0 and 1.")
