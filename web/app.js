@@ -117,6 +117,10 @@ function notify(message, type = "info") {
 }
 
 function animateNumber(el, target, digits) {
+  if (!Number.isFinite(Number(target))) {
+    el.textContent = "-";
+    return;
+  }
   const start = performance.now();
   const duration = 750;
   function frame(now) {
@@ -134,7 +138,11 @@ function defaultWeight(ticker) {
 }
 
 function downloadCSV(filename, text) {
-  const blob = new Blob([text], { type: "text/csv;charset=utf-8" });
+  downloadFile(filename, text, "text/csv;charset=utf-8");
+}
+
+function downloadFile(filename, text, mime) {
+  const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -200,7 +208,7 @@ function drawAxes(svg, width, height, xTicks, yTicks, xLabel, yLabel) {
     const line = document.createElementNS(SVG_NS, "line");
     line.setAttribute("x1", x); line.setAttribute("y1", 0);
     line.setAttribute("x2", x); line.setAttribute("y2", height);
-    line.setAttribute("stroke", "#22345a"); line.setAttribute("stroke-width", "1");
+    line.setAttribute("stroke", "var(--grid)"); line.setAttribute("stroke-width", "1");
     grid.appendChild(line);
     svgText(grid, x, height + 14, label, "chart-title");
   });
@@ -208,7 +216,7 @@ function drawAxes(svg, width, height, xTicks, yTicks, xLabel, yLabel) {
     const line = document.createElementNS(SVG_NS, "line");
     line.setAttribute("x1", 0); line.setAttribute("y1", y);
     line.setAttribute("x2", width); line.setAttribute("y2", y);
-    line.setAttribute("stroke", "#22345a"); line.setAttribute("stroke-width", "1");
+    line.setAttribute("stroke", "var(--grid)"); line.setAttribute("stroke-width", "1");
     grid.appendChild(line);
     svgText(grid, -6, y + 4, label, "chart-title", "end");
   });
@@ -247,7 +255,7 @@ function lineChart(container, labels, series) {
   const crosshair = document.createElementNS(SVG_NS, "line");
   crosshair.setAttribute("y1", 0);
   crosshair.setAttribute("y2", plotH);
-  crosshair.setAttribute("stroke", "#5b7bb0");
+  crosshair.setAttribute("stroke", "var(--crosshair)");
   crosshair.setAttribute("stroke-dasharray", "4 4");
   crosshair.setAttribute("opacity", "0.5");
   crosshair.setAttribute("x1", 0);
@@ -273,15 +281,25 @@ function lineChart(container, labels, series) {
   });
   container.appendChild(legend);
   const tooltip = attachTooltip(container);
+  const pointerPosition = (e) => {
+    const rect = svg.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (width / rect.width),
+      y: (e.clientY - rect.top) * (height / rect.height),
+      px: e.clientX - rect.left,
+      py: e.clientY - rect.top,
+    };
+  };
   svg.addEventListener("mousemove", (e) => {
-    const ratio = (e.offsetX - MARGIN.left) / plotW;
+    const { x, px, py } = pointerPosition(e);
+    const ratio = (x - MARGIN.left) / plotW;
     const index = Math.max(0, Math.min(labels.length - 1, Math.round(ratio * (labels.length - 1))));
     crosshair.setAttribute("x1", xScale(index));
     crosshair.setAttribute("x2", xScale(index));
     crosshair.setAttribute("opacity", "1");
     const lines = [`<b>Period ${labels[index]}</b>`];
     series.forEach((s) => lines.push(`<span style="color:${s.color}">${s.name}:</span> ${fmt(s.values[index])}`));
-    tooltip.show(e.offsetX, e.offsetY, lines.join("<br>"));
+    tooltip.show(px, py, lines.join("<br>"));
   });
   svg.addEventListener("mouseleave", () => { crosshair.setAttribute("opacity", "0"); tooltip.hide(); });
 }
@@ -506,6 +524,7 @@ function donutChart(container, items) {
   const total = items.reduce((sum, item) => sum + item.value, 0) || 1;
   const svg = createSvg(size, size);
   const palette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#14b8a6", "#a78bfa", "#22c55e"];
+  const tooltip = attachTooltip(container);
   let angle = -Math.PI / 2;
   items.forEach((item, index) => {
     const frac = item.value / total;
@@ -522,7 +541,6 @@ function donutChart(container, items) {
     path.setAttribute("fill", "none");
     path.setAttribute("stroke", palette[index % palette.length]);
     path.setAttribute("stroke-width", stroke);
-    const tooltip = attachTooltip(container);
     path.addEventListener("mouseenter", () => {
       tooltip.show(cx, cy, `<b>${escapeHtml(item.label)}</b><br>${item.value.toFixed(1)}%`);
     });
@@ -544,6 +562,14 @@ function toggleSourceGroups() {
   $("demo-group").classList.toggle("hidden", source !== "demo");
   $("yahoo-group").classList.toggle("hidden", source !== "yahoo");
   $("csv-group").classList.toggle("hidden", source !== "csv");
+  if (state.loadResult) {
+    state.loadResult = null;
+    state.results = null;
+    $("ticker-list").innerHTML = "";
+    renderWeightEditor();
+    $("preset-apply").disabled = true;
+    $("portfolio-status").textContent = "Data source changed — click Load Data to refresh tickers.";
+  }
 }
 
 function thresholdPayload(selectId, fixedId) {
@@ -650,7 +676,9 @@ function renderWeightEditor() {
     input.min = "0";
     input.max = "100";
     input.step = "1";
-    input.value = state.weights[ticker] ?? defaultWeight(ticker);
+    const weight = state.weights[ticker] ?? defaultWeight(ticker);
+    state.weights[ticker] = weight;
+    input.value = weight;
     input.addEventListener("input", () => { state.weights[ticker] = Number(input.value); updateWeightTotal(); });
     row.appendChild(label);
     row.appendChild(input);
@@ -958,7 +986,10 @@ async function onCompare() {
 }
 
 function onDownloadSummary() {
-  if (!state.results) return;
+  if (!state.results) {
+    notify("Run a simulation first.", "error");
+    return;
+  }
   const summary = state.results.summary;
   const rows = Object.entries(summary).map(([key, value]) => [key, value]);
   downloadCSV("risk_summary.csv", toCSV(["metric", "value"], rows));
@@ -966,7 +997,10 @@ function onDownloadSummary() {
 }
 
 function onDownloadDiagnostics() {
-  if (!state.diagnostics) return;
+  if (!state.diagnostics) {
+    notify("Run a simulation first.", "error");
+    return;
+  }
   downloadCSV("calibration_diagnostics.csv", toCSV(state.diagnostics.columns, state.diagnostics.rows));
   notify("Diagnostics downloaded", "success");
 }
@@ -1005,6 +1039,7 @@ function saveControls() {
     if (el) data[id] = el.value;
   });
   data.synthetic = Array.from(document.querySelectorAll('#synthetic-options input[type="checkbox"]:checked')).map((el) => el.value);
+  data.csvMonthly = $("csv-monthly").checked;
   data.useCorr = $("use-corr-override").checked;
   data.corrTargets = gatherCorrelationTargets();
   localStorage.setItem("mcq-controls", JSON.stringify(data));
@@ -1024,6 +1059,7 @@ function restoreControls() {
     document.querySelectorAll("#synthetic-options input[type='checkbox']").forEach((checkbox) => {
       checkbox.checked = (data.synthetic || []).includes(checkbox.value);
     });
+    if (data.csvMonthly !== undefined) $("csv-monthly").checked = data.csvMonthly;
     if (data.useCorr !== undefined) $("use-corr-override").checked = data.useCorr;
     document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
       if (data.corrTargets && data.corrTargets[slider.dataset.state] !== undefined) slider.value = data.corrTargets[slider.dataset.state];
@@ -1031,6 +1067,51 @@ function restoreControls() {
   } catch (error) {
     // ignore corrupted saved settings
   }
+}
+
+/* ---------- Theme ---------- */
+
+function applyTheme(theme) {
+  document.body.classList.toggle("light", theme === "light");
+  $("theme-toggle").textContent = theme === "light" ? "Dark theme" : "Light theme";
+  localStorage.setItem("mcq-theme", theme);
+}
+
+function toggleTheme() {
+  const next = document.body.classList.contains("light") ? "dark" : "light";
+  applyTheme(next);
+}
+
+/* ---------- Convenience actions ---------- */
+
+function equalizeWeights() {
+  const selected = selectedTickers();
+  if (!selected.length) {
+    notify("Select at least one ticker first.", "error");
+    return;
+  }
+  const weight = 100 / selected.length;
+  selected.forEach((ticker) => { state.weights[ticker] = weight; });
+  renderWeightEditor();
+  notify("Weights equalized", "success");
+}
+
+function resetControls() {
+  localStorage.removeItem("mcq-controls");
+  location.reload();
+}
+
+function setSectionsOpen(open) {
+  document.querySelectorAll("#controls details").forEach((details) => { details.open = open; });
+}
+
+function onDownloadJson() {
+  if (!state.results) {
+    notify("Run a simulation first.", "error");
+    return;
+  }
+  downloadFile("results.json", JSON.stringify(state.results, null, 2), "application/json;charset=utf-8");
+  notify("Results downloaded", "success");
 }
 
 /* ---------- Init ---------- */
@@ -1081,7 +1162,6 @@ function init() {
   });
 
   document.querySelectorAll('input[name="source"]').forEach((radio) => radio.addEventListener("change", toggleSourceGroups));
-  toggleSourceGroups();
 
   document.querySelectorAll(".tab-btn").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 
@@ -1091,7 +1171,13 @@ function init() {
   $("download-summary").addEventListener("click", onDownloadSummary);
   $("download-diagnostics").addEventListener("click", onDownloadDiagnostics);
   $("download-wealth").addEventListener("click", onDownloadWealth);
+  $("download-json").addEventListener("click", onDownloadJson);
   $("preset-apply").addEventListener("click", applyPreset);
+  $("theme-toggle").addEventListener("click", toggleTheme);
+  $("equalize-btn").addEventListener("click", equalizeWeights);
+  $("reset-btn").addEventListener("click", resetControls);
+  $("expand-all").addEventListener("click", () => setSectionsOpen(true));
+  $("collapse-all").addEventListener("click", () => setSectionsOpen(false));
 
   document.addEventListener("input", saveControls);
   document.addEventListener("change", saveControls);
@@ -1104,6 +1190,7 @@ function init() {
 
   restoreControls();
   toggleSourceGroups();
+  applyTheme(localStorage.getItem("mcq-theme") || "dark");
 
   fetch("/api/health")
     .then((response) => response.json())

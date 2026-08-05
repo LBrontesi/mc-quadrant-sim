@@ -18,11 +18,18 @@
         <p class="subtitle">Goldilocks · Overheating · Stagflation · Recession — regime-based portfolio simulation</p>
       </div>
     </div>
-    <div id="connection" class="badge badge-muted">connecting...</div>
+    <div class="header-actions">
+      <button id="theme-toggle" class="btn btn-ghost">Light theme</button>
+      <div id="connection" class="badge badge-muted">connecting...</div>
+    </div>
   </header>
 
   <div class="layout">
     <aside class="panel panel-side" id="controls">
+      <div class="row-actions">
+        <button id="expand-all" class="btn btn-ghost">Expand all</button>
+        <button id="collapse-all" class="btn btn-ghost">Collapse all</button>
+      </div>
       <section class="control-group">
         <details open>
           <summary>Data source</summary>
@@ -195,6 +202,10 @@
             <div id="weight-editor"></div>
             <div id="donut" class="donut"></div>
           </div>
+          <div class="row-actions">
+            <button id="equalize-btn" class="btn btn-ghost">Equalize</button>
+            <button id="reset-btn" class="btn btn-ghost">Reset all</button>
+          </div>
           <p id="weight-total" class="status"></p>
           <div class="two-col">
             <label>Portfolio preset
@@ -285,6 +296,7 @@
             <button id="download-summary" class="btn">Download risk summary</button>
             <button id="download-diagnostics" class="btn">Download diagnostics</button>
             <button id="download-wealth" class="btn">Download wealth paths</button>
+            <button id="download-json" class="btn">Download results (JSON)</button>
           </section>
         </div>
       </div>

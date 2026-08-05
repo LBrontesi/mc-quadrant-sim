@@ -12,11 +12,39 @@
   --grad: linear-gradient(135deg, #3b82f6, #10b981);
   --warn: #f59e0b;
   --danger: #ef4444;
+  --grid: #22345a;
+  --crosshair: #5b7bb0;
   --radius: 14px;
   --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
 }
 
 * { box-sizing: border-box; }
+
+body.light {
+  --bg: #eef3fb;
+  --bg-2: #e2eaf7;
+  --panel: rgba(255, 255, 255, 0.82);
+  --panel-solid: #ffffff;
+  --panel-2: #f0f4fb;
+  --border: #c9d5e6;
+  --text: #14213d;
+  --muted: #5c6d87;
+  --grid: #c9d5e6;
+  --crosshair: #64748b;
+  --shadow: 0 8px 22px rgba(15, 23, 42, 0.09);
+}
+body.light { background: radial-gradient(1200px 800px at 80% -10%, #d7e4fb 0%, var(--bg) 55%); }
+body.light .bg-glow { opacity: 0.14; }
+body.light { scrollbar-color: #a9b7cc #e2eaf7; }
+body.light input,
+body.light select,
+body.light textarea { background: #ffffff; }
+body.light .app-header { background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(240, 244, 251, 0.7)); }
+body.light .tooltip { background: rgba(20, 33, 61, 0.94); color: #e8eef7; }
+body.light th { background: #f0f4fb; }
+body.light tr:hover td { background: rgba(59, 130, 246, 0.10); }
+body.light .check-list label:has(input:checked) { color: #1d4ed8; }
+body.light .chip { color: #1d4ed8; }
 
 html { scrollbar-color: #334a6b #0b1220; }
 
@@ -58,6 +86,11 @@ body {
 }
 .app-header h1 { font-size: 19px; margin: 0; letter-spacing: 0.2px; }
 .subtitle { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
+
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.btn-ghost { background: transparent; border-color: var(--border); color: var(--muted); padding: 7px 12px; font-size: 12px; }
+.btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--accent); transform: none; box-shadow: none; }
+.row-actions { display: flex; gap: 8px; margin: 4px 0 10px; flex-wrap: wrap; }
 
 .badge { padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
 .badge-ok { background: rgba(16, 185, 129, 0.15); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.4); }
