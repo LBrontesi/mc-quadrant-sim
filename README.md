@@ -132,6 +132,19 @@ cost = transaction_cost_bps / 10,000 * sum(abs(target_holdings - current_holding
 The dashboard defaults to monthly rebalancing with a 10 basis-point cost; the
 core API retains the legacy mode unless a rebalancing frequency is supplied.
 
+Periodic cash flows are supported in both accounting modes. A **contribution**
+is invested at the target allocation at the start of every period, which is
+dollar-cost averaging: new money buys the same diversified weights regardless
+of recent performance. A **withdrawal** is funded at the end of every period by
+selling a pro-rata slice of current holdings, so funding never concentrates in
+one asset class between rebalances. In legacy mode the same schedule is applied
+to the blended portfolio return. Wealth paths are floored at zero, so a
+withdrawal larger than the remaining balance simply exhausts the portfolio.
+Cash-flow scenarios suit retirement-style analysis: accumulation phases use a
+positive contribution, drawdown phases a positive withdrawal, and the
+difference between terminal wealth and total contributed shows how much of the
+outcome came from returns rather than savings.
+
 ### 7. Reported Risk Metrics
 
 Terminal wealth includes the mean, standard deviation, 5th/50th/95th
@@ -196,6 +209,10 @@ in practice:
 
 **Long-term analysis features**
 
+- Set **Contribution / period** to model dollar-cost averaging into the
+  portfolio, and **Withdrawal / period** to model retirement-style drawdowns.
+  Cash flows are invested at (or funded pro-rata from) the target allocation
+  every period and cannot drive wealth below zero.
 - Set **Inflation assumption** above zero to report inflation-adjusted
   (purchasing power) wealth, VaR, drawdowns, and annualized metrics.
 - Set **Risk-free rate** to compute a proper Sharpe ratio instead of a zero
@@ -208,10 +225,10 @@ in practice:
 
 **Future directions**
 
-- Periodic contributions (dollar-cost averaging) and withdrawals for
-  retirement-style analysis.
 - GARCH-style volatility clustering or regime-dependent t distributions.
 - Bond duration and yield-curve simulation instead of price-only histories.
+- Inflation-indexed cash flows, where contributions and withdrawals grow with
+  the inflation assumption.
 
 ## Install
 
@@ -272,7 +289,8 @@ targets for the first two selected tickers. Portfolio presets (60/40,
 Three-Fund, Permanent, Golden Butterfly, All Seasons, Core Four, Risk Parity)
 apply PortfolioCharts-style allocations to the loaded tickers, and the
 inflation/risk-free inputs report real terms and a proper Sharpe ratio.
-Results include metric cards,
+Periodic contributions and withdrawals model dollar-cost averaging and
+retirement drawdowns. Results include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, macro scatter, calibration diagnostics, scenario
 comparison, and CSV downloads. Charts are rendered with Plotly.
@@ -326,6 +344,8 @@ wealth = simulate_portfolio_paths(
     weights={"SPY": 0.55, "IEF": 0.30, "GLD": 0.10, "DBC": 0.05},
     rebalance_frequency=1,
     transaction_cost_bps=10,
+    contribution=100.0,
+    withdrawal=0.0,
     initial_value=100.0,
 )
 print(summarize_terminal_wealth(wealth))
