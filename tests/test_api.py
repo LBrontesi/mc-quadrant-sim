@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 
-import web_app
+import mc_quadrants.api as api
 
 DEMO_PAYLOAD = {
     "source": "demo",
@@ -29,23 +29,23 @@ DEMO_PAYLOAD = {
 
 
 def test_parse_tickers_handles_strings_and_lists():
-    assert web_app.parse_tickers("spy, IEF, GLD, GLD") == ["SPY", "IEF", "GLD"]
-    assert web_app.parse_tickers(["spy", "IEF"]) == ["SPY", "IEF"]
+    assert api.parse_tickers("spy, IEF, GLD, GLD") == ["SPY", "IEF", "GLD"]
+    assert api.parse_tickers(["spy", "IEF"]) == ["SPY", "IEF"]
 
 
 def test_parse_pair_map_rejects_invalid_pairs():
-    assert web_app.parse_pair_map("efa:euro, GLD:USD", "currency") == {"EFA": "EURO", "GLD": "USD"}
+    assert api.parse_pair_map("efa:euro, GLD:USD", "currency") == {"EFA": "EURO", "GLD": "USD"}
     with pytest.raises(ValueError, match="Invalid currency"):
-        web_app.parse_pair_map("EFA", "currency")
+        api.parse_pair_map("EFA", "currency")
 
 
 def test_default_selected_tickers_prefers_stitched_series():
-    assert web_app.default_selected_tickers(["IEF", "IEF_SIM", "IEFSIM"]) == ["IEFSIM"]
-    assert web_app.default_selected_tickers(["SPY", "IEF"]) == ["SPY", "IEF"]
+    assert api.default_selected_tickers(["IEF", "IEF_SIM", "IEFSIM"]) == ["IEFSIM"]
+    assert api.default_selected_tickers(["SPY", "IEF"]) == ["SPY", "IEF"]
 
 
 def test_correlation_overrides_helper():
-    overrides, blend = web_app.correlation_overrides({}, ["SPY", "IEF"])
+    overrides, blend = api.correlation_overrides({}, ["SPY", "IEF"])
     assert overrides is None and blend == 1.0
 
     payload = {
@@ -53,19 +53,19 @@ def test_correlation_overrides_helper():
         "correlation_blend": 0.4,
         "correlation_override_targets": {"high_growth_low_inflation": -0.2},
     }
-    overrides, blend = web_app.correlation_overrides(payload, ["SPY", "IEF"])
+    overrides, blend = api.correlation_overrides(payload, ["SPY", "IEF"])
     assert blend == 0.4
     assert overrides["high_growth_low_inflation"] == {("SPY", "IEF"): -0.2}
     assert overrides["low_growth_low_inflation"] == {("SPY", "IEF"): -0.40}
 
-    overrides, blend = web_app.correlation_overrides(payload, ["SPY"])
+    overrides, blend = api.correlation_overrides(payload, ["SPY"])
     assert overrides is None and blend == 1.0
     with pytest.raises(ValueError, match="between -1 and 1"):
-        web_app.correlation_overrides({"use_correlation_override": True, "correlation_override_targets": {"high_growth_low_inflation": 2.0}}, ["SPY", "IEF"])
+        api.correlation_overrides({"use_correlation_override": True, "correlation_override_targets": {"high_growth_low_inflation": 2.0}}, ["SPY", "IEF"])
 
 
 def test_load_demo_source():
-    macro, returns, tickers, growth_col, inflation_col, message = web_app.load_data_source({"source": "demo", "seed": 7})
+    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source({"source": "demo", "seed": 7})
     assert len(tickers) == 8
     assert list(returns.columns) == tickers
     assert growth_col == "growth" and inflation_col == "inflation"
@@ -73,8 +73,8 @@ def test_load_demo_source():
 
 
 def test_load_response_has_coverage_and_preview():
-    macro, returns, tickers, growth_col, inflation_col, message = web_app.load_data_source({"source": "demo", "seed": 7})
-    response = web_app.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
+    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source({"source": "demo", "seed": 7})
+    response = api.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
     assert response["ok"] is True
     assert response["coverage"]["SPY"]["first"] == "1990-01-31"
     assert response["macro"]["columns"] == ["Date", "growth", "inflation"]
@@ -82,8 +82,8 @@ def test_load_response_has_coverage_and_preview():
 
 
 def test_load_response_includes_portfolio_presets():
-    macro, returns, tickers, growth_col, inflation_col, message = web_app.load_data_source({"source": "demo", "seed": 7})
-    response = web_app.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
+    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source({"source": "demo", "seed": 7})
+    response = api.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
     presets = response["presets"]
     assert len(presets) >= 5
     for preset in presets:
@@ -96,14 +96,14 @@ def test_simulate_reports_real_terms_with_inflation():
     payload = dict(DEMO_PAYLOAD)
     payload["annual_inflation"] = 2.5
     payload["risk_free_rate"] = 1.0
-    response = web_app.build_simulate_response(payload)
+    response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["terms"] == "real"
     assert response["summary"]["sharpe_ratio"] == response["summary"]["sharpe_ratio"]
 
 
 def test_scenario_kwargs_include_long_term_fields():
-    kwargs = web_app.scenario_kwargs(
+    kwargs = api.scenario_kwargs(
         {"weights": {"SPY": 100}, "risk_free_rate": 2.0, "annual_inflation": 3.0}
     )
     assert kwargs["risk_free_rate"] == pytest.approx(0.02)
@@ -111,7 +111,7 @@ def test_scenario_kwargs_include_long_term_fields():
 
 
 def test_simulate_demo_returns_full_result():
-    response = web_app.build_simulate_response(dict(DEMO_PAYLOAD))
+    response = api.build_simulate_response(dict(DEMO_PAYLOAD))
     assert response["ok"] is True
     summary = response["summary"]
     for key in ("mean", "p05", "p50", "p95", "annualized_return", "annualized_volatility", "sharpe_ratio"):
@@ -128,7 +128,7 @@ def test_simulate_demo_with_correlation_overrides():
     payload["use_correlation_override"] = True
     payload["correlation_blend"] = 0.4
     payload["correlation_override_targets"] = {"high_growth_high_inflation": 0.30}
-    response = web_app.build_simulate_response(payload)
+    response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["summary"]["mean"] > 0
 
@@ -137,7 +137,7 @@ def test_compare_demo_returns_two_rows():
     payload = dict(DEMO_PAYLOAD)
     payload["periods"] = 12
     payload["paths"] = 30
-    response = web_app.build_compare_response(payload)
+    response = api.build_compare_response(payload)
     assert response["ok"] is True
     assert response["columns"] == [
         "distribution",
@@ -164,21 +164,21 @@ def test_simulate_rejects_missing_weights():
     payload = dict(DEMO_PAYLOAD)
     payload["weights"] = {}
     with pytest.raises(ValueError, match="weight"):
-        web_app.build_simulate_response(payload)
+        api.build_simulate_response(payload)
 
 
 def test_simulate_rejects_unknown_source():
     payload = dict(DEMO_PAYLOAD)
     payload["source"] = "unknown"
     with pytest.raises(ValueError, match="Unknown data source"):
-        web_app.build_simulate_response(payload)
+        api.build_simulate_response(payload)
 
 
 def test_simulate_rejects_missing_selected_tickers():
     payload = dict(DEMO_PAYLOAD)
     payload["selected_tickers"] = []
     with pytest.raises(ValueError, match="at least one ticker"):
-        web_app.build_simulate_response(payload)
+        api.build_simulate_response(payload)
 
 
 def test_csv_source_load_and_simulate():
@@ -199,19 +199,19 @@ def test_csv_source_load_and_simulate():
             "periods": 3,
         }
     )
-    response = web_app.build_simulate_response(payload)
+    response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["selected_tickers"] == ["SPY", "BONDS"]
     assert len(response["wealth"]["periods"]) == 3
 
 
 def test_threshold_value_parsing():
-    assert web_app._threshold_value("fixed:2.5") == 2.5
-    assert web_app._threshold_value("median") == "median"
-    assert web_app._threshold_value(1.5) == 1.5
+    assert api._threshold_value("fixed:2.5") == 2.5
+    assert api._threshold_value("median") == "median"
+    assert api._threshold_value(1.5) == 1.5
 
 
 def test_simulate_response_is_json_serializable():
-    response = web_app.build_simulate_response(dict(DEMO_PAYLOAD))
+    response = api.build_simulate_response(dict(DEMO_PAYLOAD))
     json.dumps(response)
     assert np.isfinite(response["summary"]["mean"])
