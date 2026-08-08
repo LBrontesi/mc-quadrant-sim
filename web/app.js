@@ -591,15 +591,11 @@ function donutChart(container, items) {
 
 /* ---------- Inputs ---------- */
 
-function sourceValue() {
-  return document.querySelector('input[name="source"]:checked').value;
+function activeSource() {
+  return $("csv-enabled").checked ? "csv" : "yahoo";
 }
 
 function toggleSourceGroups() {
-  const source = sourceValue();
-  $("demo-group").classList.toggle("hidden", source !== "demo");
-  $("yahoo-group").classList.toggle("hidden", source !== "yahoo");
-  $("csv-group").classList.toggle("hidden", source !== "csv");
   if (state.loadResult) {
     state.loadResult = null;
     state.results = null;
@@ -623,11 +619,9 @@ function thresholdPayload(selectId, fixedId) {
 }
 
 function gatherLoadPayload() {
-  const source = sourceValue();
+  const source = activeSource();
   const payload = { source };
-  if (source === "demo") {
-    payload.seed = Number($("demo-seed").value);
-  } else if (source === "yahoo") {
+  if (source === "yahoo") {
     payload.tickers = $("yahoo-tickers").value;
     payload.start = $("yahoo-start").value;
     payload.end = $("yahoo-end").value;
@@ -839,7 +833,7 @@ function updateGuide() {
     step.classList.toggle("complete", completed[index]);
     step.classList.toggle("active", index === activeIndex);
   });
-  if (!loaded) guideStatus.textContent = "Next: load the demo data.";
+  if (!loaded) guideStatus.textContent = "Next: load the market data.";
   else if (!portfolioReady) guideStatus.textContent = "Next: select at least one ticker and set a positive weight.";
   else if (!methodologyReady) guideStatus.textContent = "Next: resolve the highlighted methodology setting.";
   else if (!state.results) guideStatus.textContent = "Next: click Run Simulation.";
@@ -1265,7 +1259,7 @@ async function onDownloadWealth() {
 /* ---------- Settings persistence ---------- */
 
 const CONTROL_IDS = [
-  "demo-seed", "yahoo-tickers", "yahoo-start", "yahoo-end", "yahoo-proxies", "synthetic-seed",
+  "yahoo-tickers", "yahoo-start", "yahoo-end", "yahoo-proxies", "synthetic-seed",
   "synthetic-method", "synthetic-categories",
   "csv-growth", "csv-inflation", "base-currency", "currency-map", "corr-blend",
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
@@ -1276,12 +1270,13 @@ const CONTROL_IDS = [
 ];
 
 function saveControls() {
-  const data = { source: sourceValue() };
+  const data = {};
   CONTROL_IDS.forEach((id) => {
     const el = $(id);
     if (el) data[id] = el.value;
   });
   data.synthetic = Array.from(document.querySelectorAll('#synthetic-options input[type="checkbox"]:checked')).map((el) => el.value);
+  data.csvEnabled = $("csv-enabled").checked;
   data.csvMonthly = $("csv-monthly").checked;
   data.useCorr = $("use-corr-override").checked;
   data.garch = $("garch").checked;
@@ -1299,8 +1294,7 @@ function restoreControls() {
       const el = $(id);
       if (el && data[id] !== undefined) el.value = data[id];
     });
-    const radio = document.querySelector(`input[name="source"][value="${data.source}"]`);
-    if (radio) radio.checked = true;
+    if (data.csvEnabled !== undefined) $("csv-enabled").checked = data.csvEnabled;
     document.querySelectorAll("#synthetic-options input[type='checkbox']").forEach((checkbox) => {
       checkbox.checked = (data.synthetic || []).includes(checkbox.value);
     });
@@ -1412,7 +1406,15 @@ function init() {
     sliderBox.appendChild(label);
   });
 
-  document.querySelectorAll('input[name="source"]').forEach((radio) => radio.addEventListener("change", toggleSourceGroups));
+  function syncCsvEnabled() {
+    const bothFiles = $("csv-prices").files.length > 0 && $("csv-macro").files.length > 0;
+    $("csv-enabled").checked = bothFiles;
+    toggleSourceGroups();
+  }
+
+  $("csv-enabled").addEventListener("change", toggleSourceGroups);
+  $("csv-prices").addEventListener("change", syncCsvEnabled);
+  $("csv-macro").addEventListener("change", syncCsvEnabled);
 
   document.querySelectorAll(".tab-btn").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 

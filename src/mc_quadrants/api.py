@@ -21,7 +21,6 @@ from mc_quadrants.data import (
     load_market_data,
     prices_to_returns,
 )
-from mc_quadrants.demo import _demo_history
 from mc_quadrants.pipeline import compare_distributions, run_scenario
 from mc_quadrants.regimes import REGIME_ORDER
 
@@ -93,17 +92,6 @@ def _state_label(state: str) -> str:
 
     return REGIME_NAMES.get(state, f"Regime {state.removeprefix('state_')}")
 
-
-DEMO_TICKERS = {
-    "Stocks": "SPY",
-    "Bonds": "IEF",
-    "Gold": "GLD",
-    "Commodities": "DBC",
-    "International Stocks": "EFA",
-    "Real Estate": "VNQ",
-    "TIPS": "TIP",
-    "Short Treasuries": "SHY",
-}
 
 DEFAULT_TICKER_ORDER = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
 SYNTHETIC_TICKER_OPTIONS = DEFAULT_TICKER_ORDER + ["DBMF", "KMLM", "TLT", "QQQ"]
@@ -304,20 +292,7 @@ def _normalize_columns(data: pd.DataFrame) -> pd.DataFrame:
 def load_data_source(
     payload: Mapping[str, Any],
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str], str, str, str]:
-    source = str(payload.get("source", "demo"))
-    if source == "demo":
-        seed = int(payload.get("seed", 42))
-        macro, returns = _demo_history(seed)
-        returns = _normalize_columns(returns.rename(columns=DEMO_TICKERS))
-        return (
-            macro,
-            returns,
-            list(returns.columns),
-            "growth",
-            "inflation",
-            f"Loaded demo data with seed {seed}.",
-        )
-
+    source = str(payload.get("source", "yahoo"))
     if source == "yahoo":
         tickers = parse_tickers(payload.get("tickers", []))
         if not tickers:

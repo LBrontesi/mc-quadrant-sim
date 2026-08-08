@@ -1,31 +1,59 @@
 import json
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import mc_quadrants.api as api
 
-DEMO_PAYLOAD = {
-    "source": "demo",
-    "seed": 42,
-    "selected_tickers": ["SPY", "IEF", "GLD", "DBC"],
-    "weights": {"SPY": 40, "IEF": 20, "GLD": 10, "DBC": 10},
-    "periods": 12,
-    "paths": 50,
-    "random_seed": 7,
-    "base_currency": "USD",
-    "currency_map": "",
-    "growth_threshold": "median",
-    "inflation_threshold": "median",
-    "macro_lag": 1,
-    "transition_uncertainty": 0,
-    "distribution": "normal",
-    "degrees_of_freedom": 5,
-    "block_size": 3,
-    "rebalance": "monthly",
-    "cost_bps": 10,
-    "start_state": "Stationary",
-}
+ASSET_TICKERS = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
+
+
+def _csv_payload(**overrides):
+    rng = np.random.default_rng(7)
+    dates = pd.date_range("2010-01-31", periods=120, freq="ME")
+    prices = pd.DataFrame(
+        {
+            ticker: 100 * np.exp(np.cumsum(rng.normal(0.004, 0.02, len(dates))))
+            for ticker in ASSET_TICKERS
+        },
+        index=pd.Index(dates, name="Date"),
+    )
+    macro = pd.DataFrame(
+        {
+            "growth": rng.normal(0.0, 0.6, len(dates)),
+            "inflation": rng.normal(0.0, 0.4, len(dates)),
+        },
+        index=pd.Index(dates, name="Date"),
+    )
+    payload = {
+        "source": "csv",
+        "csv_prices": prices.reset_index().to_csv(index=False),
+        "csv_macro": macro.reset_index().to_csv(index=False),
+        "asset_input": "Price levels",
+        "monthly": True,
+        "growth_col": "growth",
+        "inflation_col": "inflation",
+        "selected_tickers": ["SPY", "IEF", "GLD", "DBC"],
+        "weights": {"SPY": 40, "IEF": 20, "GLD": 10, "DBC": 10},
+        "periods": 12,
+        "paths": 50,
+        "random_seed": 7,
+        "base_currency": "USD",
+        "currency_map": "",
+        "growth_threshold": "median",
+        "inflation_threshold": "median",
+        "macro_lag": 1,
+        "transition_uncertainty": 0,
+        "distribution": "normal",
+        "degrees_of_freedom": 5,
+        "block_size": 3,
+        "rebalance": "monthly",
+        "cost_bps": 10,
+        "start_state": "Stationary",
+    }
+    payload.update(overrides)
+    return payload
 
 
 def test_parse_tickers_handles_strings_and_lists():
@@ -70,30 +98,35 @@ def test_correlation_overrides_helper():
         )
 
 
-def test_load_demo_source():
+def test_load_csv_source():
     macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source(
-        {"source": "demo", "seed": 7}
+        _csv_payload()
     )
     assert len(tickers) == 8
     assert list(returns.columns) == tickers
     assert growth_col == "growth" and inflation_col == "inflation"
-    assert "demo" in message
+    assert "CSV" in message
+
+
+def test_load_rejects_unknown_source():
+    with pytest.raises(ValueError, match="Unknown data source"):
+        api.load_data_source({"source": "unknown"})
 
 
 def test_load_response_has_coverage_and_preview():
     macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source(
-        {"source": "demo", "seed": 7}
+        _csv_payload()
     )
     response = api.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
     assert response["ok"] is True
-    assert response["coverage"]["SPY"]["first"] == "1990-01-31"
+    assert response["coverage"]["SPY"]["first"] == "2010-02-28"
     assert response["macro"]["columns"] == ["Date", "growth", "inflation"]
     assert response["returns"]["columns"] == ["Date"] + tickers
 
 
 def test_load_response_includes_portfolio_presets():
     macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source(
-        {"source": "demo", "seed": 7}
+        _csv_payload()
     )
     response = api.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
     presets = response["presets"]
@@ -107,9 +140,7 @@ def test_load_response_includes_portfolio_presets():
 
 
 def test_simulate_reports_real_terms_with_inflation():
-    payload = dict(DEMO_PAYLOAD)
-    payload["annual_inflation"] = 2.5
-    payload["risk_free_rate"] = 1.0
+    payload = _csv_payload(annual_inflation=2.5, risk_free_rate=1.0)
     response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["terms"] == "real"
@@ -197,7 +228,7 @@ def test_scenario_kwargs_parse_fees_and_leverage():
 
 
 def test_simulate_response_reports_model_kind_and_validation():
-    response = api.build_simulate_response(dict(DEMO_PAYLOAD))
+    response = api.build_simulate_response(_csv_payload())
     assert response["model_kind"] == "quadrant"
     validation = response["validation"]
     assert validation is not None
@@ -207,9 +238,7 @@ def test_simulate_response_reports_model_kind_and_validation():
 
 
 def test_simulate_reports_cash_flow_summary():
-    payload = dict(DEMO_PAYLOAD)
-    payload["contribution"] = 20.0
-    payload["withdrawal"] = 5.0
+    payload = _csv_payload(contribution=20.0, withdrawal=5.0)
     response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["summary"]["periodic_contribution"] == pytest.approx(20.0)
@@ -220,14 +249,11 @@ def test_simulate_reports_cash_flow_summary():
 
 
 def test_simulate_reports_fee_and_leverage_assumptions():
-    payload = dict(DEMO_PAYLOAD)
-    payload.update(
-        {
-            "expense_ratios": "SPY:0.03, IEF:0.15",
-            "leverage_multiple": 1.5,
-            "financing_rate": 6.0,
-            "maintenance_margin": 20.0,
-        }
+    payload = _csv_payload(
+        expense_ratios="SPY:0.03, IEF:0.15",
+        leverage_multiple=1.5,
+        financing_rate=6.0,
+        maintenance_margin=20.0,
     )
 
     response = api.build_simulate_response(payload)
@@ -237,8 +263,8 @@ def test_simulate_reports_fee_and_leverage_assumptions():
     assert response["costs"]["weighted_expense_ratio"] > 0
 
 
-def test_simulate_demo_returns_full_result():
-    response = api.build_simulate_response(dict(DEMO_PAYLOAD))
+def test_simulate_csv_returns_full_result():
+    response = api.build_simulate_response(_csv_payload())
     assert response["ok"] is True
     summary = response["summary"]
     for key in ("mean", "p05", "p50", "p95", "annualized_return", "annualized_volatility", "sharpe_ratio"):
@@ -250,20 +276,19 @@ def test_simulate_demo_returns_full_result():
     assert response["selected_tickers"] == ["SPY", "IEF", "GLD", "DBC"]
 
 
-def test_simulate_demo_with_correlation_overrides():
-    payload = dict(DEMO_PAYLOAD)
-    payload["use_correlation_override"] = True
-    payload["correlation_blend"] = 0.4
-    payload["correlation_override_targets"] = {"high_growth_high_inflation": 0.30}
+def test_simulate_csv_with_correlation_overrides():
+    payload = _csv_payload(
+        use_correlation_override=True,
+        correlation_blend=0.4,
+        correlation_override_targets={"high_growth_high_inflation": 0.30},
+    )
     response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["summary"]["mean"] > 0
 
 
-def test_compare_demo_returns_two_rows():
-    payload = dict(DEMO_PAYLOAD)
-    payload["periods"] = 12
-    payload["paths"] = 30
+def test_compare_csv_returns_two_rows():
+    payload = _csv_payload(periods=12, paths=30)
     response = api.build_compare_response(payload)
     assert response["ok"] is True
     assert response["columns"] == [
@@ -288,22 +313,19 @@ def test_compare_demo_returns_two_rows():
 
 
 def test_simulate_rejects_missing_weights():
-    payload = dict(DEMO_PAYLOAD)
-    payload["weights"] = {}
+    payload = _csv_payload(weights={})
     with pytest.raises(ValueError, match="weight"):
         api.build_simulate_response(payload)
 
 
 def test_simulate_rejects_unknown_source():
-    payload = dict(DEMO_PAYLOAD)
-    payload["source"] = "unknown"
+    payload = _csv_payload(source="unknown")
     with pytest.raises(ValueError, match="Unknown data source"):
         api.build_simulate_response(payload)
 
 
 def test_simulate_rejects_missing_selected_tickers():
-    payload = dict(DEMO_PAYLOAD)
-    payload["selected_tickers"] = []
+    payload = _csv_payload(selected_tickers=[])
     with pytest.raises(ValueError, match="at least one ticker"):
         api.build_simulate_response(payload)
 
@@ -313,20 +335,12 @@ def test_csv_source_load_and_simulate():
         "Date,SPY,BONDS\n2020-01-31,100,50\n2020-02-29,110,51\n2020-03-31,120,52\n2020-04-30,115,53\n"
     )
     macro_csv = "Date,growth,inflation\n2020-01-31,2.0,1.0\n2020-02-29,2.5,4.0\n2020-03-31,-1.0,4.5\n2020-04-30,-1.5,1.2\n"
-    payload = dict(DEMO_PAYLOAD)
-    payload.update(
-        {
-            "source": "csv",
-            "csv_prices": prices_csv,
-            "csv_macro": macro_csv,
-            "asset_input": "Price levels",
-            "monthly": True,
-            "growth_col": "growth",
-            "inflation_col": "inflation",
-            "selected_tickers": ["SPY", "BONDS"],
-            "weights": {"SPY": 60, "BONDS": 40},
-            "periods": 3,
-        }
+    payload = _csv_payload(
+        csv_prices=prices_csv,
+        csv_macro=macro_csv,
+        selected_tickers=["SPY", "BONDS"],
+        weights={"SPY": 60, "BONDS": 40},
+        periods=3,
     )
     response = api.build_simulate_response(payload)
     assert response["ok"] is True
@@ -341,6 +355,6 @@ def test_threshold_value_parsing():
 
 
 def test_simulate_response_is_json_serializable():
-    response = api.build_simulate_response(dict(DEMO_PAYLOAD))
+    response = api.build_simulate_response(_csv_payload())
     json.dumps(response)
     assert np.isfinite(response["summary"]["mean"])

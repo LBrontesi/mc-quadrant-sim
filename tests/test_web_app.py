@@ -43,7 +43,23 @@ def test_web_backend_serves_health_and_load_endpoints():
 
         request = Request(
             f"{base_url}/api/load",
-            data=json.dumps({"source": "demo", "seed": 42}).encode("utf-8"),
+            data=json.dumps(
+                {
+                    "source": "csv",
+                    "csv_prices": (
+                        "Date,SPY,IEF\n2020-01-31,100,50\n2020-02-29,110,51\n"
+                        "2020-03-31,120,52\n2020-04-30,115,53\n"
+                    ),
+                    "csv_macro": (
+                        "Date,growth,inflation\n2020-01-31,2.0,1.0\n2020-02-29,2.5,4.0\n"
+                        "2020-03-31,-1.0,4.5\n2020-04-30,-1.5,1.2\n"
+                    ),
+                    "asset_input": "Price levels",
+                    "monthly": True,
+                    "growth_col": "growth",
+                    "inflation_col": "inflation",
+                }
+            ).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
         )

@@ -356,15 +356,15 @@ Then you can adapt:
 python examples/calibrate_real_data.py
 ```
 
-## Run The Demo
+## Run The Web Backend
 
 ```bash
-mcq-demo
+python web_app.py
 ```
 
-The demo uses synthetic history so it runs offline, but it exercises the same
-calibration and simulation pipeline used for real data. It includes eight asset
-classes and 420 monthly observations from January 1990 through December 2024.
+The backend serves the web UI and the shared simulation API from real market
+data. By default it loads live Yahoo Finance / FRED history; asset and macro
+CSV uploads are supported as an optional override from the UI.
 
 ## Run The Gradio UI
 
@@ -395,7 +395,7 @@ client calls the same `/api/load`, `/api/simulate`, `/api/compare`, and
 `/api/wealth` payload contracts used by the other frontends.
 
 Open the URL printed by Streamlit (default `http://localhost:8501`). It
-supports the same demo, Yahoo Finance/FRED, and CSV sources and the same
+supports the same Yahoo Finance/FRED and CSV sources and the same
 methodology controls, rendered with Altair charts. Charts are layout to the
 browser width.
 
@@ -406,8 +406,8 @@ in each sidebar selects the regime model (quadrant or HMM), the regime
 duration model (Markov chain or semi-Markov), the causal threshold window,
 GARCH volatility clustering, and walk-forward validation.
 
-The UIs support the offline demo, Yahoo Finance/FRED downloads, and
-uploaded asset and macro CSVs. Yahoo mode starts at 1990 by default and
+The UIs load real data from Yahoo Finance/FRED by default and optionally
+accept uploaded asset and macro CSVs. Yahoo mode starts at 1990 by default and
 accepts optional proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or
 `DBMF` in the synthetic asset picker, then choose the resulting `IEFSIM` or
 `DBMFSIM` series for a backtest. Select a portfolio currency such as `EUR`

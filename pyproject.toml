@@ -23,9 +23,6 @@ dev = [
   "ruff>=0.6",
 ]
 
-[project.scripts]
-mcq-demo = "mc_quadrants.demo:main"
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/mc_quadrants"]
 

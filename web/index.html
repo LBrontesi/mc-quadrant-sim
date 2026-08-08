@@ -33,11 +33,11 @@
       <section class="control-group guide-group">
         <details open>
           <summary>Start here</summary>
-          <p class="guide-intro">Run your first scenario in five steps. The Demo source works offline.</p>
+          <p class="guide-intro">Run your first scenario in five steps. Real market data from Yahoo Finance / FRED is loaded by default.</p>
           <ol class="guide-list">
             <li id="guide-data" class="guide-step">
               <span class="guide-number">1</span>
-              <div><strong>Load data</strong><span>Keep Demo selected, then click <b>Load Data</b>. Yahoo and CSV are available for custom histories.</span></div>
+              <div><strong>Load market data</strong><span>Keep the default tickers, then click <b>Load Data</b>. You can optionally upload your own CSVs in the Custom data section.</span></div>
             </li>
             <li id="guide-portfolio" class="guide-step">
               <span class="guide-number">2</span>
@@ -56,23 +56,15 @@
               <div><strong>Read and export</strong><span>Use Results for outcomes, Diagnostics for model health, and Data for previews and downloads.</span></div>
             </li>
           </ol>
-          <p id="guide-status" class="guide-status">Next: load the demo data.</p>
+          <p id="guide-status" class="guide-status">Next: load the market data.</p>
         </details>
       </section>
-      <section class="control-group">
+      <section class="control-group" id="market-data-section">
         <details open>
-          <summary>Data source</summary>
-          <div class="radio-row" id="source-radios">
-            <label class="pill"><input type="radio" name="source" value="demo" checked> Demo</label>
-            <label class="pill"><input type="radio" name="source" value="yahoo"> Yahoo</label>
-            <label class="pill"><input type="radio" name="source" value="csv"> CSV</label>
-          </div>
+          <summary>Market data</summary>
+          <p class="hint">Real history from Yahoo Finance and FRED. Tickers default to a diversified set; you can edit them or add synthetic backfills.</p>
 
-          <div class="group demo-group" id="demo-group">
-            <label>Demo seed <input type="number" id="demo-seed" value="42" min="1" step="1"></label>
-          </div>
-
-          <div class="group yahoo-group hidden" id="yahoo-group">
+          <div class="group yahoo-group" id="yahoo-group">
             <label>Market tickers
               <textarea id="yahoo-tickers" rows="2">SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY</textarea>
             </label>
@@ -101,20 +93,6 @@
               </label>
               <span class="hint">Selecting an asset adds its live ticker and creates *_SIM and *SIM series.</span>
             </fieldset>
-          </div>
-
-          <div class="group csv-group hidden" id="csv-group">
-            <label>Asset CSV <input type="file" id="csv-prices" accept=".csv"></label>
-            <label>Macro CSV <input type="file" id="csv-macro" accept=".csv"></label>
-            <div class="radio-row">
-              <label class="pill"><input type="radio" name="asset-input" value="Price levels" checked> Price levels</label>
-              <label class="pill"><input type="radio" name="asset-input" value="Returns"> Returns</label>
-            </div>
-            <label class="check-inline"><input type="checkbox" id="csv-monthly" checked> Monthly asset returns</label>
-            <div class="two-col">
-              <label>Growth column <input type="text" id="csv-growth" value="growth"></label>
-              <label>Inflation column <input type="text" id="csv-inflation" value="inflation"></label>
-            </div>
           </div>
 
           <button id="load-btn" class="btn btn-primary btn-block">Load Data</button>
@@ -318,6 +296,26 @@
         </details>
       </section>
 
+      <section class="control-group" id="custom-data-section">
+        <details>
+          <summary>Custom data (optional)</summary>
+          <p class="hint">Instead of the market data above, you can run the analysis on your own asset and macro CSV files.</p>
+          <label class="check-inline"><input type="checkbox" id="csv-enabled"> Use custom CSV files</label>
+          <label>Asset CSV <input type="file" id="csv-prices" accept=".csv"></label>
+          <label>Macro CSV <input type="file" id="csv-macro" accept=".csv"></label>
+          <div class="radio-row">
+            <label class="pill"><input type="radio" name="asset-input" value="Price levels" checked> Price levels</label>
+            <label class="pill"><input type="radio" name="asset-input" value="Returns"> Returns</label>
+          </div>
+          <label class="check-inline"><input type="checkbox" id="csv-monthly" checked> Monthly asset returns</label>
+          <div class="two-col">
+            <label>Growth column <input type="text" id="csv-growth" value="growth"></label>
+            <label>Inflation column <input type="text" id="csv-inflation" value="inflation"></label>
+          </div>
+          <span class="hint">Both files need a <code>Date</code> column. Upload both, then click <b>Load Data</b> in the Market data section.</span>
+        </details>
+      </section>
+
       <button id="run-btn" class="btn btn-primary btn-block btn-lg" disabled>Run Simulation</button>
       <button id="compare-btn" class="btn btn-block" disabled>Compare Normal vs Student-t</button>
       <p id="scenario-status" class="status"></p>
@@ -334,7 +332,7 @@
       <div id="tab-results" class="tab-panel active">
         <div id="intro" class="empty-state">
           <h2>Welcome to the Four-Quadrant Simulator</h2>
-          <p>Choose <strong>Demo</strong> for offline synthetic history, <strong>Yahoo</strong> for real data (with optional proxies and synthetic backfills), or upload your own <strong>CSVs</strong>.</p>
+          <p><strong>Market data</strong> is loaded from Yahoo Finance / FRED by default (with optional proxies and synthetic backfills). To use your own history, upload asset and macro <strong>CSVs</strong> in the Custom data section.</p>
           <p>1. Load data &nbsp;·&nbsp; 2. Select tickers and weights &nbsp;·&nbsp; 3. Run the simulation</p>
         </div>
         <div id="results-content" class="hidden">
