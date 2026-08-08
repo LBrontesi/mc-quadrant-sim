@@ -7,6 +7,11 @@ from functools import lru_cache
 import numpy as np
 import pandas as pd
 
+from mc_quadrants.backfill import (
+    DEFAULT_ANCHOR_UNIVERSE,
+    simulate_regime_conditioned_pre_inception_returns,
+)
+
 
 def read_prices_csv(path: str, date_col: str = "Date") -> pd.DataFrame:
     """Read a wide price CSV with one date column and one column per asset."""
@@ -417,20 +422,36 @@ def _load_market_data_cached(
     historical_proxies: tuple[tuple[str, str], ...] = (),
     synthetic_assets: tuple[str, ...] = (),
     synthetic_seed: int = 42,
-) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...]]:
+    synthetic_method: str = "regime",
+    synthetic_categories: tuple[tuple[str, str], ...] = (),
+    growth_threshold: str | float = "median",
+    inflation_threshold: str | float = "median",
+    threshold_window: int | None = None,
+    macro_lag_periods: int = 1,
+) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...], dict[str, dict[str, object]]]:
     start_date = pd.Timestamp(start)
     end_date = pd.Timestamp(end)
     if end_date <= start_date:
         raise ValueError("History end must be after history start.")
 
+    fetch_tickers = list(tickers)
+    for asset in synthetic_assets:
+        if asset not in fetch_tickers:
+            fetch_tickers.append(asset)
+    needs_anchors = bool(synthetic_assets) and synthetic_method == "regime"
+    if needs_anchors:
+        for anchor in DEFAULT_ANCHOR_UNIVERSE:
+            if anchor not in fetch_tickers:
+                fetch_tickers.append(anchor)
+
     prices = fetch_yahoo_prices(
-        list(tickers),
+        list(fetch_tickers),
         start=start_date.strftime("%Y-%m-%d"),
         end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
     )
     prices = prices.copy()
     prices.columns = [str(column).strip().upper() for column in prices.columns]
-    prices = prices.reindex(columns=list(tickers))
+    prices = prices.reindex(columns=list(fetch_tickers))
 
     if historical_proxies:
         proxy_tickers = tuple(proxy for _, proxy in historical_proxies)
@@ -458,15 +479,7 @@ def _load_market_data_cached(
 
     returns = prices_to_returns(prices.loc[:, list(available)], method="log")
     returns = returns.resample("ME").sum(min_count=1).dropna(how="all")
-    if synthetic_assets:
-        simulated_returns = simulate_pre_inception_returns(
-            returns,
-            assets=synthetic_assets,
-            start=start_date,
-            random_seed=synthetic_seed,
-        )
-        returns = combine_observed_and_simulated_returns(returns, simulated_returns)
-        available = tuple(returns.columns)
+
     macro_levels = fetch_fred_macro(
         {"growth": "INDPRO", "inflation": "CPIAUCSL"},
         start=start_date.strftime("%Y-%m-%d"),
@@ -475,7 +488,43 @@ def _load_market_data_cached(
     macro = yoy_change(macro_levels).apply(pd.to_numeric, errors="coerce").dropna(how="any")
     if macro.empty:
         raise ValueError("Not enough FRED history to calculate year-over-year growth and inflation.")
-    return macro, returns, available
+
+    synthetic_report: dict[str, dict[str, object]] = {}
+    if synthetic_assets:
+        if synthetic_method == "regime":
+            anchor_columns = [anchor for anchor in DEFAULT_ANCHOR_UNIVERSE if anchor in prices.columns]
+            anchor_returns = (
+                prices_to_returns(prices.loc[:, anchor_columns], method="log")
+                .resample("ME")
+                .sum(min_count=1)
+                .dropna(how="all")
+                if anchor_columns
+                else None
+            )
+            category_map = {asset: category for asset, category in synthetic_categories}
+            simulated_returns, synthetic_report = simulate_regime_conditioned_pre_inception_returns(
+                returns,
+                macro,
+                assets=list(synthetic_assets),
+                growth_threshold=growth_threshold,
+                inflation_threshold=inflation_threshold,
+                threshold_window=threshold_window,
+                macro_lag_periods=macro_lag_periods,
+                anchor_returns=anchor_returns,
+                random_seed=synthetic_seed,
+                categories=category_map,
+            )
+        else:
+            simulated_returns = simulate_pre_inception_returns(
+                returns,
+                assets=synthetic_assets,
+                start=start_date,
+                random_seed=synthetic_seed,
+            )
+        if not simulated_returns.empty:
+            returns = combine_observed_and_simulated_returns(returns, simulated_returns)
+        available = tuple(returns.columns)
+    return macro, returns, available, synthetic_report
 
 
 def load_market_data(
@@ -485,8 +534,20 @@ def load_market_data(
     historical_proxies: Mapping[str, str] | None = None,
     synthetic_assets: Sequence[str] | str = (),
     synthetic_seed: int = 42,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    """Load Yahoo prices/FRED macro data, optionally backfilling with proxies."""
+    synthetic_method: str = "regime",
+    synthetic_categories: Mapping[str, str] | None = None,
+    growth_threshold: str | float = "median",
+    inflation_threshold: str | float = "median",
+    threshold_window: int | None = None,
+    macro_lag_periods: int = 1,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str], dict[str, dict[str, object]]]:
+    """Load Yahoo prices/FRED macro data, optionally backfilling with proxies.
+
+    ``synthetic_method="regime"`` generates pre-inception history conditioned on
+    the actual historical macro regime at each date plus a factor model; the
+    ``"full_sample"`` method uses the asset's observed moments only. The last
+    return value is a per-asset synthetic feasibility report.
+    """
 
     raw_tickers = (tickers,) if isinstance(tickers, str) else tickers
     normalized_tickers = tuple(dict.fromkeys(str(ticker).strip().upper() for ticker in raw_tickers))
@@ -509,16 +570,26 @@ def load_market_data(
             "Synthetic assets must be included in the selected tickers: "
             + ", ".join(missing_synthetic)
         )
+    normalized_categories = tuple(
+        (str(asset).strip().upper(), str(category).strip().upper())
+        for asset, category in (synthetic_categories or {}).items()
+    )
 
-    macro, returns, available = _load_market_data_cached(
+    macro, returns, available, synthetic_report = _load_market_data_cached(
         normalized_tickers,
         pd.Timestamp(start).strftime("%Y-%m-%d"),
         pd.Timestamp(end).strftime("%Y-%m-%d"),
         tuple(dict.fromkeys(normalized_proxies)),
         normalized_synthetic_assets,
         int(synthetic_seed),
+        str(synthetic_method).lower(),
+        normalized_categories,
+        growth_threshold,
+        inflation_threshold,
+        threshold_window,
+        int(macro_lag_periods),
     )
-    return macro.copy(), returns.copy(), list(available)
+    return macro.copy(), returns.copy(), list(available), synthetic_report
 
 
 def yoy_change(data: pd.DataFrame, periods: int = 12, scale: float = 100.0) -> pd.DataFrame:
