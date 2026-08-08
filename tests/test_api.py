@@ -61,11 +61,19 @@ def test_correlation_overrides_helper():
     overrides, blend = api.correlation_overrides(payload, ["SPY"])
     assert overrides is None and blend == 1.0
     with pytest.raises(ValueError, match="between -1 and 1"):
-        api.correlation_overrides({"use_correlation_override": True, "correlation_override_targets": {"high_growth_low_inflation": 2.0}}, ["SPY", "IEF"])
+        api.correlation_overrides(
+            {
+                "use_correlation_override": True,
+                "correlation_override_targets": {"high_growth_low_inflation": 2.0},
+            },
+            ["SPY", "IEF"],
+        )
 
 
 def test_load_demo_source():
-    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source({"source": "demo", "seed": 7})
+    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source(
+        {"source": "demo", "seed": 7}
+    )
     assert len(tickers) == 8
     assert list(returns.columns) == tickers
     assert growth_col == "growth" and inflation_col == "inflation"
@@ -73,7 +81,9 @@ def test_load_demo_source():
 
 
 def test_load_response_has_coverage_and_preview():
-    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source({"source": "demo", "seed": 7})
+    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source(
+        {"source": "demo", "seed": 7}
+    )
     response = api.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
     assert response["ok"] is True
     assert response["coverage"]["SPY"]["first"] == "1990-01-31"
@@ -82,7 +92,9 @@ def test_load_response_has_coverage_and_preview():
 
 
 def test_load_response_includes_portfolio_presets():
-    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source({"source": "demo", "seed": 7})
+    macro, returns, tickers, growth_col, inflation_col, message = api.load_data_source(
+        {"source": "demo", "seed": 7}
+    )
     response = api.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
     presets = response["presets"]
     assert len(presets) >= 5
@@ -103,9 +115,7 @@ def test_simulate_reports_real_terms_with_inflation():
 
 
 def test_scenario_kwargs_include_long_term_fields():
-    kwargs = api.scenario_kwargs(
-        {"weights": {"SPY": 100}, "risk_free_rate": 2.0, "annual_inflation": 3.0}
-    )
+    kwargs = api.scenario_kwargs({"weights": {"SPY": 100}, "risk_free_rate": 2.0, "annual_inflation": 3.0})
     assert kwargs["risk_free_rate"] == pytest.approx(0.02)
     assert kwargs["annual_inflation"] == pytest.approx(0.03)
 
@@ -116,6 +126,84 @@ def test_scenario_kwargs_include_periodic_cash_flows():
     assert kwargs["withdrawal"] == pytest.approx(10.0)
 
 
+def test_scenario_kwargs_include_methodology_options():
+    kwargs = api.scenario_kwargs(
+        {
+            "weights": {"SPY": 100},
+            "model": "hmm",
+            "hmm_states": 3,
+            "threshold_window": 12,
+            "duration_model": "semi_markov",
+            "garch": True,
+            "garch_alpha": 0.2,
+            "garch_beta": 0.7,
+            "walk_forward": False,
+        }
+    )
+    assert kwargs["model_kind"] == "hmm"
+    assert kwargs["hmm_states"] == 3
+    assert kwargs["threshold_window"] == 12
+    assert kwargs["duration_model"] == "semi_markov"
+    assert kwargs["garch"] is True
+    assert kwargs["garch_alpha"] == pytest.approx(0.2)
+    assert kwargs["walk_forward"] is False
+    assert kwargs["start_state"] is None
+
+
+def test_scenario_kwargs_reject_invalid_methodology_options():
+    with pytest.raises(ValueError, match="model"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "model": "black_box"})
+    with pytest.raises(ValueError, match="duration model"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "duration_model": "weibull"})
+    with pytest.raises(ValueError, match="hmm_states"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "hmm_states": 1})
+    with pytest.raises(ValueError, match="garch_alpha"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "garch": True, "garch_alpha": 0.5, "garch_beta": 0.6})
+
+
+def test_scenario_kwargs_reject_incompatible_settings():
+    with pytest.raises(ValueError, match="Normal return distribution"):
+        api.scenario_kwargs(
+            {"weights": {"SPY": 100}, "distribution": "student_t", "garch": True}
+        )
+    with pytest.raises(ValueError, match="transaction costs"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "rebalance": "legacy", "cost_bps": 10})
+
+
+def test_metric_formatter_respects_units():
+    assert api.format_metric_value("probability_of_loss", 0.125) == "12.50%"
+    assert api.format_metric_value("p50", 1234.5, "EUR") == "EUR 1,234.50"
+    assert api.format_metric_value("sharpe_ratio", 1.234) == "1.23"
+
+
+def test_scenario_kwargs_parse_fees_and_leverage():
+    kwargs = api.scenario_kwargs(
+        {
+            "weights": {"SPY": 100},
+            "expense_ratios": "SPY:0.03",
+            "leverage_multiple": 2.0,
+            "financing_rate": 6.0,
+            "maintenance_margin": 25.0,
+            "rebalance": "monthly",
+        }
+    )
+
+    assert kwargs["asset_expense_ratios"] == {"SPY": pytest.approx(0.0003)}
+    assert kwargs["leverage_multiple"] == pytest.approx(2.0)
+    assert kwargs["financing_rate"] == pytest.approx(0.06)
+    assert kwargs["maintenance_margin"] == pytest.approx(0.25)
+
+
+def test_simulate_response_reports_model_kind_and_validation():
+    response = api.build_simulate_response(dict(DEMO_PAYLOAD))
+    assert response["model_kind"] == "quadrant"
+    validation = response["validation"]
+    assert validation is not None
+    assert validation["summary"]["splits"] > 0
+    assert "advantage_mean" in validation["summary"]
+    assert validation["rows"]
+
+
 def test_simulate_reports_cash_flow_summary():
     payload = dict(DEMO_PAYLOAD)
     payload["contribution"] = 20.0
@@ -123,8 +211,28 @@ def test_simulate_reports_cash_flow_summary():
     response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["summary"]["periodic_contribution"] == pytest.approx(20.0)
+    assert response["summary"]["total_withdrawn"] == pytest.approx(5.0 * 12)
+    assert "cash_flow_adjusted_annualized_return" in response["summary"]
     assert response["summary"]["periodic_withdrawal"] == pytest.approx(5.0)
     assert response["summary"]["total_contributed"] == pytest.approx(20.0 * 12)
+
+
+def test_simulate_reports_fee_and_leverage_assumptions():
+    payload = dict(DEMO_PAYLOAD)
+    payload.update(
+        {
+            "expense_ratios": "SPY:0.03, IEF:0.15",
+            "leverage_multiple": 1.5,
+            "financing_rate": 6.0,
+            "maintenance_margin": 20.0,
+        }
+    )
+
+    response = api.build_simulate_response(payload)
+
+    assert response["costs"]["leverage_multiple"] == pytest.approx(1.5)
+    assert response["costs"]["annual_financing_cost"] == pytest.approx(0.03)
+    assert response["costs"]["weighted_expense_ratio"] > 0
 
 
 def test_simulate_demo_returns_full_result():
@@ -199,7 +307,9 @@ def test_simulate_rejects_missing_selected_tickers():
 
 
 def test_csv_source_load_and_simulate():
-    prices_csv = "Date,SPY,BONDS\n2020-01-31,100,50\n2020-02-29,110,51\n2020-03-31,120,52\n2020-04-30,115,53\n"
+    prices_csv = (
+        "Date,SPY,BONDS\n2020-01-31,100,50\n2020-02-29,110,51\n2020-03-31,120,52\n2020-04-30,115,53\n"
+    )
     macro_csv = "Date,growth,inflation\n2020-01-31,2.0,1.0\n2020-02-29,2.5,4.0\n2020-03-31,-1.0,4.5\n2020-04-30,-1.5,1.2\n"
     payload = dict(DEMO_PAYLOAD)
     payload.update(

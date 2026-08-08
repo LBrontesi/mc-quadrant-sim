@@ -30,6 +30,35 @@
         <button id="expand-all" class="btn btn-ghost">Expand all</button>
         <button id="collapse-all" class="btn btn-ghost">Collapse all</button>
       </div>
+      <section class="control-group guide-group">
+        <details open>
+          <summary>Start here</summary>
+          <p class="guide-intro">Run your first scenario in five steps. The Demo source works offline.</p>
+          <ol class="guide-list">
+            <li id="guide-data" class="guide-step">
+              <span class="guide-number">1</span>
+              <div><strong>Load data</strong><span>Keep Demo selected, then click <b>Load Data</b>. Yahoo and CSV are available for custom histories.</span></div>
+            </li>
+            <li id="guide-portfolio" class="guide-step">
+              <span class="guide-number">2</span>
+              <div><strong>Build a portfolio</strong><span>Select tickers and edit weights, or apply a preset such as Classic 60/40.</span></div>
+            </li>
+            <li id="guide-methodology" class="guide-step">
+              <span class="guide-number">3</span>
+              <div><strong>Review assumptions</strong><span>Defaults use quadrant regimes, a 12-period causal window, semi-Markov durations, and walk-forward validation.</span></div>
+            </li>
+            <li id="guide-run" class="guide-step">
+              <span class="guide-number">4</span>
+              <div><strong>Run the simulation</strong><span>Set the horizon and path count if needed, then click <b>Run Simulation</b>.</span></div>
+            </li>
+            <li id="guide-read" class="guide-step">
+              <span class="guide-number">5</span>
+              <div><strong>Read and export</strong><span>Use Results for outcomes, Diagnostics for model health, and Data for previews and downloads.</span></div>
+            </li>
+          </ol>
+          <p id="guide-status" class="guide-status">Next: load the demo data.</p>
+        </details>
+      </section>
       <section class="control-group">
         <details open>
           <summary>Data source</summary>
@@ -82,14 +111,14 @@
         </details>
       </section>
 
-      <section class="control-group">
+      <section class="control-group" id="correlation-section">
         <details open>
           <summary>Currency &amp; correlations</summary>
           <div class="two-col">
             <label>Portfolio currency
               <input type="text" id="base-currency" value="USD" maxlength="3">
             </label>
-            <label>Blend
+            <label id="corr-blend-group">Blend
               <input type="number" id="corr-blend" value="0.4" min="0" max="1" step="0.05">
             </label>
           </div>
@@ -97,13 +126,19 @@
             <input type="text" id="currency-map" placeholder="EFA:EUR">
             <span class="hint">ASSET:CURRENCY pairs; unspecified assets are treated as USD.</span>
           </label>
-          <label class="check-inline"><input type="checkbox" id="use-corr-override" checked> Blend custom correlation view</label>
-          <div id="corr-sliders"></div>
-          <span class="hint">Applies to the first two selected tickers.</span>
+          <label>ETF expense ratios (ASSET:annual %)
+            <input type="text" id="expense-ratios" placeholder="SPY:0.03, IEF:0.15">
+            <span class="hint">Forward fee drag. Historical ETF prices may already include historical fund fees.</span>
+          </label>
+          <div id="correlation-override-controls">
+            <label class="check-inline"><input type="checkbox" id="use-corr-override" checked> Blend custom correlation view</label>
+            <div id="corr-sliders"></div>
+            <span class="hint">Applies to the first two selected tickers.</span>
+          </div>
         </details>
       </section>
 
-      <section class="control-group">
+      <section class="control-group" id="quadrant-calibration">
         <details>
           <summary>Calibration</summary>
           <div class="two-col">
@@ -144,6 +179,38 @@
 
       <section class="control-group">
         <details>
+          <summary>Model methodology</summary>
+          <label>Regime model
+            <select id="model-kind">
+              <option value="quadrant" selected>Quadrant (macro thresholds)</option>
+              <option value="hmm">HMM (learned from returns)</option>
+            </select>
+            <span class="hint">Quadrant uses growth/inflation thresholds. HMM learns states from asset returns.</span>
+          </label>
+          <div class="two-col">
+            <label id="hmm-states-group">HMM states
+              <input type="number" id="hmm-states" value="4" min="2" max="8" step="1">
+            </label>
+            <label>Regime duration
+              <select id="duration-model">
+                <option value="markov">Markov chain</option>
+                <option value="semi_markov" selected>Semi-Markov (empirical sojourns)</option>
+              </select>
+            </label>
+          </div>
+          <label id="threshold-window-group">Causal threshold window
+            <input type="number" id="threshold-window" value="12" min="0" step="1">
+            <span class="hint">Prior observations required before classification; 0 uses full-sample thresholds for calibration.</span>
+          </label>
+          <label class="check-inline" id="garch-group"><input type="checkbox" id="garch"> GARCH(1,1) volatility clustering</label>
+          <span class="hint" id="garch-hint">GARCH requires the Normal return distribution.</span>
+          <label class="check-inline" id="walk-forward-group"><input type="checkbox" id="walk-forward" checked> Walk-forward validation</label>
+          <span class="hint">Validation is an out-of-sample regime-signal check against an unconditional benchmark.</span>
+        </details>
+      </section>
+
+      <section class="control-group">
+        <details>
           <summary>Simulation</summary>
           <div class="two-col">
             <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12"></label>
@@ -151,7 +218,7 @@
           </div>
           <div class="two-col">
             <label>Random seed <input type="number" id="seed" value="7" min="1" step="1"></label>
-            <label>Start state
+            <label id="start-state-group">Start state
               <select id="start-state">
                 <option value="Stationary" selected>Stationary</option>
               </select>
@@ -166,8 +233,8 @@
             </select>
           </label>
           <div class="two-col" id="distribution-params">
-            <label>Student-t dof <input type="number" id="degrees-of-freedom" value="5" min="3" max="30" step="1"></label>
-            <label>Block size <input type="number" id="block-size" value="3" min="2" max="12" step="1"></label>
+            <label id="student-t-group">Student-t dof <input type="number" id="degrees-of-freedom" value="5" min="3" max="30" step="1"></label>
+            <label id="block-size-group">Block size <input type="number" id="block-size" value="3" min="2" max="12" step="1"></label>
           </div>
           <div class="two-col">
             <label>Rebalancing
@@ -178,8 +245,21 @@
                 <option value="legacy">Weighted log (legacy)</option>
               </select>
             </label>
-            <label>Cost (bps) <input type="number" id="cost-bps" value="10" min="0" max="100" step="1"></label>
+            <label id="cost-bps-group">Cost (bps) <input type="number" id="cost-bps" value="10" min="0" max="100" step="1"></label>
           </div>
+          <div class="two-col">
+            <label>Leverage multiple
+              <input type="number" id="leverage-multiple" value="1" min="1" max="5" step="0.1">
+              <span class="hint">1.0x is unlevered; leverage requires explicit rebalancing.</span>
+            </label>
+            <label>Financing rate (annual %)
+              <input type="number" id="financing-rate" value="0" min="0" max="30" step="0.1">
+            </label>
+          </div>
+          <label>Maintenance margin (%)
+            <input type="number" id="maintenance-margin" value="0" min="0" max="90" step="1">
+            <span class="hint">Optional liquidation threshold based on equity/assets.</span>
+          </label>
           <div class="two-col">
             <label>Risk-free rate (annual %)
               <input type="number" id="risk-free" value="0" min="-5" max="20" step="0.1">
@@ -229,6 +309,7 @@
 
       <button id="run-btn" class="btn btn-primary btn-block btn-lg" disabled>Run Simulation</button>
       <button id="compare-btn" class="btn btn-block" disabled>Compare Normal vs Student-t</button>
+      <p id="scenario-status" class="status"></p>
       <p id="run-message" class="status"></p>
     </aside>
 
@@ -247,16 +328,27 @@
         </div>
         <div id="results-content" class="hidden">
           <div id="scenario-chips" class="chips"></div>
+          <p id="stale-results" class="warning hidden">Inputs changed since this result was produced. Run the simulation again before interpreting or exporting it.</p>
           <div class="metric-grid" id="metric-grid"></div>
           <p class="caption" id="risk-caption"></p>
           <p class="caption" id="performance-caption"></p>
+          <section id="cash-flow-performance" class="card hidden">
+            <h3>Investment performance excluding external cash flows</h3>
+            <p class="caption">Time-weighted metrics remove the effect of regular contributions and withdrawals. Terminal wealth metrics above still include those cash flows.</p>
+            <div class="metric-grid" id="flow-metric-grid"></div>
+          </section>
+          <section id="cost-assumptions" class="card hidden">
+            <h3>Cost and leverage assumptions</h3>
+            <p class="caption">Expense ratios are modeled as forward monthly fee drag. ETF price histories may already include historical fees.</p>
+            <div class="metric-grid" id="cost-metric-grid"></div>
+          </section>
           <div class="chart-grid">
             <div class="card"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
             <div class="card"><h3>Terminal Wealth Distribution</h3><div class="chart" id="chart-terminal"></div></div>
             <div class="card"><h3>Maximum Drawdown Distribution</h3><div class="chart" id="chart-drawdowns"></div></div>
             <div class="card"><h3>Regime Timeline (sample path)</h3><div class="chart" id="chart-timeline"></div></div>
             <div class="card"><h3>Simulated Regime Mix</h3><div class="chart" id="chart-regime-mix"></div></div>
-            <div class="card"><h3>Macro Quadrants</h3><div class="chart" id="chart-macro"></div></div>
+            <div class="card"><h3 id="macro-chart-title">Macro Quadrants / model states</h3><div class="chart" id="chart-macro"></div></div>
             <div class="card"><h3>Transition Matrix</h3><div class="chart" id="chart-transition"></div></div>
             <div class="card"><h3>Historical Observations</h3><div class="chart" id="chart-observations"></div></div>
             <div class="card card-wide">
@@ -271,6 +363,11 @@
         <div id="diagnostics-empty" class="empty-state">Run a simulation to see calibration diagnostics.</div>
         <div id="diagnostics-content" class="hidden">
           <section class="card">
+            <div id="validation-panel" class="hidden">
+              <h3>Walk-forward validation</h3>
+              <p class="caption" id="validation-summary"></p>
+              <div class="table-wrap" id="validation-table"></div>
+            </div>
             <h3>Calibration Diagnostics</h3>
             <div class="table-wrap" id="diagnostics-table"></div>
             <p class="warning" id="warnings-box"></p>

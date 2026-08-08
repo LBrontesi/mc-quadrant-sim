@@ -38,10 +38,37 @@ const DEFAULT_CORRELATIONS = {
 };
 
 const METRIC_FIELDS = [
-  ["mean", "Mean"], ["p05", "P05"], ["p50", "Median"], ["p95", "P95"], ["std", "Volatility"],
-  ["ulcer_index_mean", "Ulcer Index"], ["sortino_ratio", "Sortino"], ["calmar_ratio", "Calmar"],
-  ["geometric_annualized_return", "CAGR"],
+  ["mean", "Mean terminal wealth"], ["p05", "P05"], ["p50", "Median"], ["p95", "P95"],
+  ["annualized_return", "Annualized return (wealth)"],
+  ["annualized_volatility", "Annualized volatility (wealth)"],
+  ["sharpe_ratio", "Sharpe ratio"], ["sortino_ratio", "Sortino"], ["calmar_ratio", "Calmar"],
+  ["geometric_annualized_return", "CAGR"], ["probability_of_loss", "Probability of loss"],
+  ["var_95", "VaR (95%)"], ["expected_shortfall_95", "Expected shortfall (95%)"],
+  ["max_drawdown_worst", "Worst max drawdown"],
 ];
+
+const FLOW_METRIC_FIELDS = [
+  ["cash_flow_adjusted_annualized_return", "Time-weighted return"],
+  ["cash_flow_adjusted_volatility", "Time-weighted volatility"],
+  ["cash_flow_adjusted_sharpe_ratio", "Time-weighted Sharpe"],
+  ["total_contributed", "Total contributions"],
+  ["total_withdrawn", "Total withdrawals"],
+];
+const COST_METRIC_FIELDS = [
+  ["leverage_multiple", "Leverage"], ["weighted_expense_ratio", "Weighted ETF fee"],
+  ["annual_fee_drag", "Annual fee drag"], ["annual_financing_cost", "Annual financing cost"],
+  ["margin_calls", "Margin calls"],
+];
+
+const PERCENT_METRICS = new Set([
+  "annualized_return", "annualized_volatility", "cash_flow_adjusted_annualized_return",
+  "cash_flow_adjusted_volatility", "geometric_annualized_return", "probability_of_loss",
+  "max_drawdown_mean", "max_drawdown_p95", "max_drawdown_worst", "ulcer_index_mean", "ulcer_index_p95",
+]);
+const CURRENCY_METRICS = new Set([
+  "mean", "std", "p05", "p50", "p95", "var_95", "expected_shortfall_95", "periodic_contribution",
+  "periodic_withdrawal", "total_contributed", "total_withdrawn", "net_external_cash_flow",
+]);
 
 const state = {
   loadPayload: null,
@@ -116,7 +143,17 @@ function notify(message, type = "info") {
   }, 4200);
 }
 
-function animateNumber(el, target, digits) {
+function formatMetricValue(key, value, currency = "USD") {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
+  const numeric = Number(value);
+  if (key === "leverage_multiple") return `${numeric.toFixed(1)}x`;
+  if (key === "margin_calls") return Math.round(numeric).toLocaleString();
+  if (PERCENT_METRICS.has(key)) return `${(numeric * 100).toFixed(2)}%`;
+  if (CURRENCY_METRICS.has(key)) return `${currency} ${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function animateMetric(el, target, key, currency) {
   if (!Number.isFinite(Number(target))) {
     el.textContent = "-";
     return;
@@ -126,7 +163,7 @@ function animateNumber(el, target, digits) {
   function frame(now) {
     const t = Math.min((now - start) / duration, 1);
     const eased = 1 - Math.pow(1 - t, 3);
-    el.textContent = (target * eased).toFixed(digits);
+    el.textContent = formatMetricValue(key, target * eased, currency);
     if (t < 1) requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
@@ -492,16 +529,17 @@ function timelineChart(container, states) {
   const svg = createSvg(width, height);
   const slot = width / states.length;
   const tooltip = attachTooltip(container);
+  const uniqueStates = [...new Set(states)];
   states.forEach((state, index) => {
     const rect = document.createElementNS(SVG_NS, "rect");
     rect.setAttribute("x", index * slot);
     rect.setAttribute("y", 6);
     rect.setAttribute("width", Math.max(slot - 1, 1));
     rect.setAttribute("height", 34);
-    rect.setAttribute("fill", REGIME_COLORS[state] || "#94a3b8");
+    rect.setAttribute("fill", colorForState(state, uniqueStates.indexOf(state)));
     rect.addEventListener("mouseenter", () => {
       rect.setAttribute("opacity", "0.85");
-      tooltip.show(index * slot + slot / 2, 30, `Period ${index + 1}<br>${REGIME_NAMES[state]}`);
+      tooltip.show(index * slot + slot / 2, 30, `Period ${index + 1}<br>${escapeHtml(labelForState(state))}`);
     });
     rect.addEventListener("mouseleave", () => { rect.setAttribute("opacity", "1"); tooltip.hide(); });
     svg.appendChild(rect);
@@ -509,9 +547,9 @@ function timelineChart(container, states) {
   container.appendChild(svg);
   const legend = document.createElement("div");
   legend.className = "legend";
-  REGIME_ORDER.forEach((state) => {
+  uniqueStates.forEach((state, index) => {
     const item = document.createElement("span");
-    item.innerHTML = `<span class="legend-dot" style="background:${REGIME_COLORS[state]}"></span>${REGIME_NAMES[state]}`;
+    item.innerHTML = `<span class="legend-dot" style="background:${colorForState(state, index)}"></span>${escapeHtml(labelForState(state))}`;
     legend.appendChild(item);
   });
   container.appendChild(legend);
@@ -565,11 +603,18 @@ function toggleSourceGroups() {
   if (state.loadResult) {
     state.loadResult = null;
     state.results = null;
+    state.lastSimPayload = null;
+    state.diagnostics = null;
     $("ticker-list").innerHTML = "";
     renderWeightEditor();
     $("preset-apply").disabled = true;
     $("portfolio-status").textContent = "Data source changed — click Load Data to refresh tickers.";
+    $("results-content").classList.add("hidden");
+    $("intro").classList.remove("hidden");
+    $("data-content").classList.add("hidden");
+    $("data-empty").classList.remove("hidden");
   }
+  updateRunAvailability();
 }
 
 function thresholdPayload(selectId, fixedId) {
@@ -621,17 +666,71 @@ function gatherScenario() {
     degrees_of_freedom: Number($("degrees-of-freedom").value),
     block_size: Number($("block-size").value),
     rebalance: $("rebalance").value,
-    cost_bps: Number($("cost-bps").value),
+    cost_bps: $("rebalance").value === "legacy" ? 0 : Number($("cost-bps").value),
     contribution: Number($("contribution").value),
     withdrawal: Number($("withdrawal").value),
-    risk_free_rate: Number($("risk-free").value) / 100,
-    annual_inflation: Number($("annual-inflation").value) / 100,
+    expense_ratios: $("expense-ratios").value,
+    leverage_multiple: Number($("leverage-multiple").value),
+    financing_rate: Number($("financing-rate").value),
+    maintenance_margin: Number($("maintenance-margin").value),
+    risk_free_rate: Number($("risk-free").value),
+    annual_inflation: Number($("annual-inflation").value),
     base_currency: $("base-currency").value,
     currency_map: $("currency-map").value,
     use_correlation_override: $("use-corr-override").checked,
     correlation_blend: Number($("corr-blend").value),
     correlation_override_targets: gatherCorrelationTargets(),
+    model: $("model-kind").value,
+    hmm_states: Number($("hmm-states").value),
+    threshold_window: Number($("threshold-window").value),
+    duration_model: $("duration-model").value,
+    garch: $("garch").checked,
+    walk_forward: $("walk-forward").checked,
   };
+}
+
+function validateScenario() {
+  const errors = [];
+  if ($("garch").checked && $("distribution").value !== "normal") {
+    errors.push("GARCH volatility clustering requires the Normal return distribution.");
+  }
+  if ($("base-currency").value.trim().length !== 3) {
+    errors.push("Portfolio currency must be a three-letter ISO code.");
+  }
+  const leverage = Number($("leverage-multiple").value);
+  const margin = Number($("maintenance-margin").value) / 100;
+  if (leverage > 1 && $("rebalance").value === "legacy") {
+    errors.push("Leverage requires monthly, quarterly, or annual rebalancing.");
+  }
+  if (leverage === 1 && margin > 0) {
+    errors.push("Maintenance margin only applies when leverage is greater than 1.0x.");
+  }
+  if (leverage > 1 && margin >= 1 / leverage) {
+    errors.push("Maintenance margin must be below the initial equity margin for the selected leverage.");
+  }
+  return errors;
+}
+
+function updateMethodologyControls() {
+  const isHMM = $("model-kind").value === "hmm";
+  const distribution = $("distribution").value;
+  const legacy = $("rebalance").value === "legacy";
+  $("quadrant-calibration").classList.toggle("hidden", isHMM);
+  $("hmm-states-group").classList.toggle("hidden", !isHMM);
+  $("threshold-window-group").classList.toggle("hidden", isHMM);
+  $("walk-forward-group").classList.toggle("hidden", isHMM);
+  $("correlation-override-controls").classList.toggle("hidden", isHMM);
+  $("corr-blend-group").classList.toggle("hidden", isHMM);
+  $("start-state-group").classList.toggle("hidden", isHMM);
+  $("student-t-group").classList.toggle("hidden", distribution !== "student_t");
+  $("block-size-group").classList.toggle("hidden", distribution !== "block_bootstrap");
+  $("cost-bps").disabled = legacy;
+  $("cost-bps-group").classList.toggle("methodology-muted", legacy);
+  $("garch").disabled = distribution !== "normal";
+  $("garch-hint").textContent = distribution === "normal"
+    ? "GARCH requires the Normal return distribution."
+    : "GARCH is disabled because the selected return distribution is not Normal.";
+  updateRunAvailability();
 }
 
 function gatherCorrelationTargets() {
@@ -697,8 +796,53 @@ function updateWeightTotal() {
   el.textContent = `Total weight: ${total.toFixed(1)}%. The simulator normalizes this to 100%.`;
   el.style.color = total <= 0 ? "var(--danger)" : "var(--muted)";
   donutChart($("donut"), selected.map((ticker) => ({ label: ticker, value: Number(state.weights[ticker]) || 0 })));
-  $("run-btn").disabled = !state.loadResult || selected.length === 0 || total <= 0;
-  $("compare-btn").disabled = !state.loadResult || selected.length === 0 || total <= 0;
+  updateRunAvailability();
+}
+
+function updateRunAvailability() {
+  const selected = selectedTickers();
+  const total = selected.reduce((sum, ticker) => sum + (Number(state.weights[ticker]) || 0), 0);
+  const errors = validateScenario();
+  const status = $("scenario-status");
+  if (errors.length) {
+    status.textContent = errors.join(" ");
+    status.style.color = "var(--danger)";
+  } else {
+    status.textContent = "";
+  }
+  const disabled = !state.loadResult || selected.length === 0 || total <= 0 || errors.length > 0;
+  $("run-btn").disabled = disabled;
+  $("compare-btn").disabled = disabled;
+  if (state.results && state.lastSimPayload) {
+    const stale = JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload);
+    $("stale-results").classList.toggle("hidden", !stale);
+  } else {
+    $("stale-results").classList.add("hidden");
+  }
+  updateGuide();
+}
+
+function updateGuide() {
+  const guideStatus = $("guide-status");
+  if (!guideStatus) return;
+  const selected = selectedTickers();
+  const total = selected.reduce((sum, ticker) => sum + (Number(state.weights[ticker]) || 0), 0);
+  const loaded = Boolean(state.loadResult);
+  const portfolioReady = loaded && selected.length > 0 && total > 0;
+  const methodologyReady = portfolioReady && validateScenario().length === 0;
+  const completed = [loaded, portfolioReady, methodologyReady, Boolean(state.results), Boolean(state.results)];
+  const activeIndex = completed.findIndex((step) => !step);
+  ["data", "portfolio", "methodology", "run", "read"].forEach((name, index) => {
+    const step = $(`guide-${name}`);
+    step.classList.toggle("complete", completed[index]);
+    step.classList.toggle("active", index === activeIndex);
+  });
+  if (!loaded) guideStatus.textContent = "Next: load the demo data.";
+  else if (!portfolioReady) guideStatus.textContent = "Next: select at least one ticker and set a positive weight.";
+  else if (!methodologyReady) guideStatus.textContent = "Next: resolve the highlighted methodology setting.";
+  else if (!state.results) guideStatus.textContent = "Next: click Run Simulation.";
+  else if (state.lastSimPayload && JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) guideStatus.textContent = "Inputs changed: run the simulation again to refresh the results.";
+  else guideStatus.textContent = "Scenario ready: inspect Results, Diagnostics, or Data.";
 }
 
 function gatherWeights() {
@@ -755,15 +899,16 @@ function switchTab(tabId) {
 /* ---------- Results rendering ---------- */
 
 function renderTables(preview) {
-  const render = (elementId, data) => {
-    const el = $(elementId);
-    if (!data || !data.rows.length) { el.innerHTML = "<p class='status'>No data.</p>"; return; }
-    el.innerHTML = "<table><thead><tr>" + data.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
-      data.rows.map((row) => "<tr>" + row.map((value) => `<td>${escapeHtml(value === null || value === undefined ? "" : fmtNumber(value))}</td>`).join("") + "</tr>").join("") +
-      "</tbody></table>";
-  };
-  render("macro-preview", preview.macro);
-  render("returns-preview", preview.returns);
+  renderTable("macro-preview", preview.macro);
+  renderTable("returns-preview", preview.returns);
+}
+
+function renderTable(elementId, data) {
+  const el = $(elementId);
+  if (!data || !data.rows.length) { el.innerHTML = "<p class='status'>No data.</p>"; return; }
+  el.innerHTML = "<table><thead><tr>" + data.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
+    data.rows.map((row) => "<tr>" + row.map((value) => `<td>${escapeHtml(value === null || value === undefined ? "" : fmtNumber(value))}</td>`).join("") + "</tr>").join("") +
+    "</tbody></table>";
 }
 
 function renderCoverage(coverage) {
@@ -795,6 +940,9 @@ function renderScenarioChips(payload, data) {
   chips.push(data.terms === "real" ? "Real terms" : "Nominal");
   chips.push(data.currency);
   chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
+  chips.push(payload.model === "hmm" ? `HMM · ${payload.hmm_states} states` : "Quadrant model");
+  chips.push(payload.duration_model === "semi_markov" ? "Semi-Markov durations" : "Markov durations");
+  if (Number(payload.leverage_multiple || 1) > 1) chips.push(`${Number(payload.leverage_multiple).toFixed(1)}x leverage`);
   el.innerHTML = chips.map((text) => `<span class="chip">${escapeHtml(text)}</span>`).join("");
 }
 
@@ -806,18 +954,30 @@ function fmtNumber(value) {
   return typeof value === "number" ? (Math.abs(value) >= 1000 ? value.toFixed(0) : value.toFixed(4)) : value;
 }
 
+const STATE_PALETTE = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16"];
+
+function labelForState(state) {
+  if (REGIME_NAMES[state]) return REGIME_NAMES[state];
+  if (String(state).startsWith("state_")) return `Regime ${String(state).slice(6)}`;
+  return String(state);
+}
+
 function regimeNameToState(name) {
   return REGIME_ORDER.find((state) => REGIME_NAMES[state] === name) || null;
 }
 
-function renderResults(data) {
-  $("intro").classList.add("hidden");
-  $("results-content").classList.remove("hidden");
-  renderScenarioChips(state.lastSimPayload, data);
+function colorForState(state, index = 0) {
+  return REGIME_COLORS[state] || STATE_PALETTE[index % STATE_PALETTE.length];
+}
 
-  const grid = $("metric-grid");
+function colorForLabel(label, index = 0) {
+  return colorForState(regimeNameToState(label), index);
+}
+
+function renderMetricGrid(containerId, fields, data) {
+  const grid = $(containerId);
   grid.innerHTML = "";
-  METRIC_FIELDS.forEach(([key, label]) => {
+  fields.forEach(([key, label]) => {
     const card = document.createElement("div");
     card.className = "metric";
     const valueEl = document.createElement("div");
@@ -825,19 +985,36 @@ function renderResults(data) {
     card.appendChild(Object.assign(document.createElement("div"), { className: "label", textContent: label }));
     card.appendChild(valueEl);
     grid.appendChild(card);
-    animateNumber(valueEl, data.summary[key], 2);
+    animateMetric(valueEl, data.summary[key], key, data.currency);
   });
+}
+
+function renderResults(data) {
+  $("intro").classList.add("hidden");
+  $("results-content").classList.remove("hidden");
+  renderScenarioChips(state.lastSimPayload, data);
+  $("macro-chart-title").textContent = data.model_kind === "hmm" ? "HMM states / macro history" : "Macro quadrants";
+  renderMetricGrid("metric-grid", METRIC_FIELDS, data);
+  const hasCashFlows = Number(data.summary.periodic_contribution || 0) > 0 || Number(data.summary.periodic_withdrawal || 0) > 0;
+  $("cash-flow-performance").classList.toggle("hidden", !hasCashFlows);
+  if (hasCashFlows) renderMetricGrid("flow-metric-grid", FLOW_METRIC_FIELDS, data);
+  const costs = data.costs || {};
+  const hasCosts = Number(costs.leverage_multiple || 1) > 1 || Number(costs.weighted_expense_ratio || 0) > 0;
+  $("cost-assumptions").classList.toggle("hidden", !hasCosts);
+  if (hasCosts) renderMetricGrid("cost-metric-grid", COST_METRIC_FIELDS, { summary: costs, currency: data.currency });
+  $("stale-results").classList.add("hidden");
   $("risk-caption").textContent =
     `${data.terms === "real" ? "Real (inflation-adjusted) | " : "Nominal | "}` +
     `Currency: ${data.currency} | ` +
     `Probability of loss: ${pct(data.summary.probability_of_loss)} | ` +
-    `VaR (95%): ${fmt(data.summary.var_95)} | ` +
-    `Expected shortfall (95%): ${fmt(data.summary.expected_shortfall_95)} | ` +
+    `VaR (95%): ${formatMetricValue("var_95", data.summary.var_95, data.currency)} | ` +
+    `Expected shortfall (95%): ${formatMetricValue("expected_shortfall_95", data.summary.expected_shortfall_95, data.currency)} | ` +
     `Worst max drawdown: ${pct(data.summary.max_drawdown_worst)}`;
+  const riskFree = Number(state.lastSimPayload?.risk_free_rate || 0);
   $("performance-caption").textContent =
     `Annualized return: ${pct(data.summary.annualized_return)} | ` +
     `Annualized volatility: ${pct(data.summary.annualized_volatility)} | ` +
-    `Sharpe ratio (0% risk-free): ${fmt(data.summary.sharpe_ratio, 2)} | ` +
+    `Sharpe ratio (${fmt(riskFree, 2)}% risk-free): ${fmt(data.summary.sharpe_ratio, 2)} | ` +
     `Ulcer index: ${fmt(data.summary.ulcer_index_mean, 2)} (p95 ${fmt(data.summary.ulcer_index_p95, 2)}) | ` +
     `Terminal skew: ${fmt(data.summary.terminal_skewness, 2)} | ` +
     `Excess kurtosis: ${fmt(data.summary.terminal_kurtosis, 2)}`;
@@ -853,26 +1030,27 @@ function renderResults(data) {
   barChart($("chart-regime-mix"), data.regime_mix.map((item) => ({
     label: item.label,
     value: item.share,
-    color: REGIME_COLORS[regimeNameToState(item.label)] || "#3b82f6",
+    color: colorForLabel(item.label, data.regime_mix.indexOf(item)),
   })), { digits: 3 });
+  const macroLabels = [...new Set(data.macro_scatter.map((point) => point.regime))];
   scatterChart(
     $("chart-macro"),
     data.macro_scatter.map((p) => ({
       x: p.growth,
       y: p.inflation,
-      color: REGIME_COLORS[regimeNameToState(p.regime)] || "#94a3b8",
+      color: colorForLabel(p.regime, macroLabels.indexOf(p.regime)),
       label: p.date,
       regime: p.regime,
     })),
     "Growth",
     "Inflation",
-    REGIME_ORDER.map((state) => ({ label: REGIME_NAMES[state], color: REGIME_COLORS[state] }))
+    macroLabels.map((label, index) => ({ label, color: colorForLabel(label, index) }))
   );
   heatmap($("chart-transition"), data.transition.labels, data.transition.values, [0, 1], "From / To");
   barChart($("chart-observations"), Object.entries(data.observations).map(([label, value]) => ({
     label,
     value,
-    color: REGIME_COLORS[regimeNameToState(label)] || "#3b82f6",
+    color: colorForLabel(label, Object.keys(data.observations).indexOf(label)),
   })), { digits: 0 });
 
   const regimeSelect = $("correlation-regime");
@@ -895,6 +1073,16 @@ function renderResults(data) {
   $("diagnostics-table").innerHTML = "<table><thead><tr>" + diagnostics.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
     diagnostics.rows.map((row) => "<tr>" + row.map((value) => `<td>${escapeHtml(fmtNumber(value))}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
   $("warnings-box").textContent = data.warnings.length ? data.warnings.join("\n") : "";
+  const validation = data.validation;
+  $("validation-panel").classList.toggle("hidden", !validation);
+  if (validation) {
+    const summary = validation.summary;
+    $("validation-summary").textContent =
+      `Out-of-sample advantage: ${summary.advantage_mean > 0 ? "+" : ""}${fmt(summary.advantage_mean, 4)} log-likelihood units/period · ` +
+      `positive split share: ${pct(summary.advantage_positive_share)} · ` +
+      `one-step regime hit rate: ${pct(summary.regime_hit_rate, 0)} · ${summary.splits} splits.`;
+    renderTable("validation-table", { columns: validation.columns, rows: validation.rows });
+  }
   state.diagnostics = diagnostics;
   $("diagnostics-empty").classList.add("hidden");
   $("diagnostics-content").classList.remove("hidden");
@@ -913,6 +1101,8 @@ async function onLoad() {
     state.loadPayload = payload;
     const data = await postJSON("/api/load", payload);
     state.loadResult = data;
+    state.results = null;
+    state.lastSimPayload = null;
     setStatus(message, data.message);
     notify(data.message, "success");
     renderTickerChecklist(data.tickers, data.default_tickers);
@@ -951,9 +1141,10 @@ async function onRun() {
   showOverlay("Running simulation...");
   try {
     const payload = gatherSimPayload();
-    state.lastSimPayload = payload;
     const data = await postJSON("/api/simulate", payload);
+    state.lastSimPayload = payload;
     state.results = data;
+    updateGuide();
     setStatus(message, data.message);
     notify("Simulation complete", "success");
     renderResults(data);
@@ -994,6 +1185,10 @@ function onDownloadSummary() {
     notify("Run a simulation first.", "error");
     return;
   }
+  if (state.lastSimPayload && JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) {
+    notify("Run the current inputs before exporting results.", "error");
+    return;
+  }
   const summary = state.results.summary;
   const rows = Object.entries(summary).map(([key, value]) => [key, value]);
   downloadCSV("risk_summary.csv", toCSV(["metric", "value"], rows));
@@ -1005,6 +1200,10 @@ function onDownloadDiagnostics() {
     notify("Run a simulation first.", "error");
     return;
   }
+  if (state.lastSimPayload && JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) {
+    notify("Run the current inputs before exporting results.", "error");
+    return;
+  }
   downloadCSV("calibration_diagnostics.csv", toCSV(state.diagnostics.columns, state.diagnostics.rows));
   notify("Diagnostics downloaded", "success");
 }
@@ -1012,6 +1211,10 @@ function onDownloadDiagnostics() {
 async function onDownloadWealth() {
   if (!state.lastSimPayload) {
     notify("Run a simulation first.", "error");
+    return;
+  }
+  if (JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) {
+    notify("Run the current inputs before exporting results.", "error");
     return;
   }
   showOverlay("Exporting wealth paths...");
@@ -1034,7 +1237,8 @@ const CONTROL_IDS = [
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
   "macro-lag", "transition-uncertainty", "periods", "paths", "seed", "distribution",
   "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "contribution", "withdrawal",
-  "risk-free", "annual-inflation",
+  "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate", "maintenance-margin",
+  "model-kind", "hmm-states", "threshold-window", "duration-model",
 ];
 
 function saveControls() {
@@ -1046,6 +1250,8 @@ function saveControls() {
   data.synthetic = Array.from(document.querySelectorAll('#synthetic-options input[type="checkbox"]:checked')).map((el) => el.value);
   data.csvMonthly = $("csv-monthly").checked;
   data.useCorr = $("use-corr-override").checked;
+  data.garch = $("garch").checked;
+  data.walkForward = $("walk-forward").checked;
   data.corrTargets = gatherCorrelationTargets();
   localStorage.setItem("mcq-controls", JSON.stringify(data));
 }
@@ -1066,6 +1272,8 @@ function restoreControls() {
     });
     if (data.csvMonthly !== undefined) $("csv-monthly").checked = data.csvMonthly;
     if (data.useCorr !== undefined) $("use-corr-override").checked = data.useCorr;
+    if (data.garch !== undefined) $("garch").checked = data.garch;
+    if (data.walkForward !== undefined) $("walk-forward").checked = data.walkForward;
     document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
       if (data.corrTargets && data.corrTargets[slider.dataset.state] !== undefined) slider.value = data.corrTargets[slider.dataset.state];
     });
@@ -1113,6 +1321,10 @@ function setSectionsOpen(open) {
 function onDownloadJson() {
   if (!state.results) {
     notify("Run a simulation first.", "error");
+    return;
+  }
+  if (state.lastSimPayload && JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) {
+    notify("Run the current inputs before exporting results.", "error");
     return;
   }
   downloadFile("results.json", JSON.stringify(state.results, null, 2), "application/json;charset=utf-8");
@@ -1184,8 +1396,8 @@ function init() {
   $("expand-all").addEventListener("click", () => setSectionsOpen(true));
   $("collapse-all").addEventListener("click", () => setSectionsOpen(false));
 
-  document.addEventListener("input", saveControls);
-  document.addEventListener("change", saveControls);
+  document.addEventListener("input", () => { saveControls(); updateMethodologyControls(); });
+  document.addEventListener("change", () => { saveControls(); updateMethodologyControls(); });
   document.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !$("run-btn").disabled) {
       event.preventDefault();
@@ -1195,6 +1407,7 @@ function init() {
 
   restoreControls();
   toggleSourceGroups();
+  updateMethodologyControls();
   applyTheme(localStorage.getItem("mcq-theme") || "dark");
 
   fetch("/api/health")

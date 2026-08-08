@@ -33,6 +33,67 @@ REGIME_NAMES = {
 }
 REGIME_LOOKUP = {name: state for state, name in REGIME_NAMES.items()}
 
+_PERCENT_METRICS = {
+    "annualized_return",
+    "annualized_volatility",
+    "cash_flow_adjusted_annualized_return",
+    "cash_flow_adjusted_volatility",
+    "geometric_annualized_return",
+    "weighted_expense_ratio",
+    "annual_fee_drag",
+    "annual_financing_cost",
+    "maintenance_margin",
+    "probability_of_loss",
+    "max_drawdown_mean",
+    "max_drawdown_p95",
+    "max_drawdown_worst",
+    "ulcer_index_mean",
+    "ulcer_index_p95",
+}
+_CURRENCY_METRICS = {
+    "mean",
+    "std",
+    "p05",
+    "p50",
+    "p95",
+    "var_95",
+    "expected_shortfall_95",
+    "periodic_contribution",
+    "periodic_withdrawal",
+    "total_contributed",
+    "total_withdrawn",
+    "net_external_cash_flow",
+}
+
+
+def format_metric_value(key: str, value: Any, currency: str = "USD") -> str:
+    """Format a result value according to its semantic unit for frontend use."""
+
+    if value is None:
+        return "-"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if not np.isfinite(numeric):
+        return "-"
+    if key == "leverage_multiple":
+        return f"{numeric:.1f}x"
+    if key == "margin_calls":
+        return f"{int(numeric):,}"
+    if key in _PERCENT_METRICS:
+        return f"{numeric * 100:.2f}%"
+    if key in _CURRENCY_METRICS:
+        return f"{currency} {numeric:,.2f}"
+    return f"{numeric:,.2f}"
+
+
+def _state_label(state: str) -> str:
+    """Human-readable label for quadrant or HMM states."""
+
+    return REGIME_NAMES.get(state, f"Regime {state.removeprefix('state_')}")
+
+
 DEMO_TICKERS = {
     "Stocks": "SPY",
     "Bonds": "IEF",
@@ -108,6 +169,34 @@ def parse_pair_map(raw: str, kind: str) -> dict[str, str]:
     return parsed
 
 
+def parse_expense_ratios(raw: str | Mapping[str, Any] | None) -> dict[str, float]:
+    """Parse annual ETF expense ratios supplied as percentages into decimals."""
+
+    if not raw:
+        return {}
+    if isinstance(raw, Mapping):
+        items = raw.items()
+    else:
+        items = []
+        for pair in re.split(r"[,;\s]+", str(raw).strip().upper()):
+            if not pair:
+                continue
+            if ":" not in pair:
+                raise ValueError(f"Invalid expense ratio '{pair}'. Use ASSET:PERCENT.")
+            asset, value = pair.split(":", 1)
+            items.append((asset, value))
+    ratios: dict[str, float] = {}
+    for asset, raw_value in items:
+        normalized_asset = str(asset).strip().upper()
+        if not normalized_asset:
+            raise ValueError("Expense ratio asset names must not be empty.")
+        percentage = float(raw_value)
+        if not np.isfinite(percentage) or not 0 <= percentage < 100:
+            raise ValueError(f"Expense ratio for {normalized_asset} must be between 0 and 100 percent.")
+        ratios[normalized_asset] = percentage / 100.0
+    return ratios
+
+
 def _currency_for_asset(asset: str, asset_currencies: Mapping[str, str]) -> str:
     normalized = str(asset).strip().upper()
     base_asset = normalized.removesuffix("_SIM").removesuffix("SIM")
@@ -121,11 +210,7 @@ def prepare_fx_rates(
     currency_map: Mapping[str, str],
 ) -> tuple[dict[str, str], pd.DataFrame | None]:
     foreign_currencies = sorted(
-        {
-            _currency_for_asset(ticker, currency_map)
-            for ticker in selected_tickers
-        }
-        - {base_currency}
+        {_currency_for_asset(ticker, currency_map) for ticker in selected_tickers} - {base_currency}
     )
     if not foreign_currencies:
         return dict(currency_map), None
@@ -216,13 +301,22 @@ def _normalize_columns(data: pd.DataFrame) -> pd.DataFrame:
     return normalized
 
 
-def load_data_source(payload: Mapping[str, Any]) -> tuple[pd.DataFrame, pd.DataFrame, list[str], str, str, str]:
+def load_data_source(
+    payload: Mapping[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str], str, str, str]:
     source = str(payload.get("source", "demo"))
     if source == "demo":
         seed = int(payload.get("seed", 42))
         macro, returns = _demo_history(seed)
         returns = _normalize_columns(returns.rename(columns=DEMO_TICKERS))
-        return macro, returns, list(returns.columns), "growth", "inflation", f"Loaded demo data with seed {seed}."
+        return (
+            macro,
+            returns,
+            list(returns.columns),
+            "growth",
+            "inflation",
+            f"Loaded demo data with seed {seed}.",
+        )
 
     if source == "yahoo":
         tickers = parse_tickers(payload.get("tickers", []))
@@ -274,7 +368,14 @@ def load_data_source(payload: Mapping[str, Any]) -> tuple[pd.DataFrame, pd.DataF
         returns = returns.dropna(how="all")
         if returns.empty or not any(returns[column].notna().any() for column in returns.columns):
             raise ValueError("The asset CSV has no usable numeric data.")
-        return macro_data, returns, list(returns.columns), growth_col, inflation_col, "Loaded data from CSV uploads."
+        return (
+            macro_data,
+            returns,
+            list(returns.columns),
+            growth_col,
+            inflation_col,
+            "Loaded data from CSV uploads.",
+        )
 
     raise ValueError(f"Unknown data source: {source}")
 
@@ -285,7 +386,10 @@ def _frame_preview(frame: pd.DataFrame, columns: list[str] | None = None, rows: 
     records = preview.loc[:, [col for col in selected if col in preview.columns]].reset_index(names="Date")
     return {
         "columns": [str(column) for column in records.columns],
-        "rows": [[None if pd.isna(value) else _json_value(value) for value in record] for record in records.itertuples(index=False, name=None)],
+        "rows": [
+            [None if pd.isna(value) else _json_value(value) for value in record]
+            for record in records.itertuples(index=False, name=None)
+        ],
     }
 
 
@@ -318,10 +422,7 @@ def build_load_response(
         "inflation_col": inflation_col,
         "message": message,
         "coverage": _coverage(returns),
-        "presets": [
-            {"name": name, "weights": dict(weights)}
-            for name, weights in PORTFOLIO_PRESETS.items()
-        ],
+        "presets": [{"name": name, "weights": dict(weights)} for name, weights in PORTFOLIO_PRESETS.items()],
         "macro": _frame_preview(macro, columns=[growth_col, inflation_col]),
         "returns": _frame_preview(returns),
     }
@@ -338,21 +439,68 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     distribution = DISTRIBUTION_KEYS.get(distribution, distribution)
     if distribution not in DISTRIBUTION_KEYS.values():
         raise ValueError("Unknown return distribution.")
+    model_kind = str(payload.get("model", "quadrant")).lower()
+    if model_kind not in {"quadrant", "hmm"}:
+        raise ValueError("Unknown model kind (expected 'quadrant' or 'hmm').")
+    duration_model = str(payload.get("duration_model", "markov")).lower()
+    if duration_model not in {"markov", "semi_markov"}:
+        raise ValueError("Unknown duration model (expected 'markov' or 'semi_markov').")
+    hmm_states = int(payload.get("hmm_states", 4))
+    if not 2 <= hmm_states <= 8:
+        raise ValueError("hmm_states must be between 2 and 8.")
+    threshold_window = int(payload.get("threshold_window", 0) or 0) or None
+    if threshold_window is not None and threshold_window <= 0:
+        raise ValueError("threshold_window must be positive or zero.")
     rebalance_label = str(payload.get("rebalance", "monthly")).lower()
     if rebalance_label not in REBALANCE_KEYS:
         raise ValueError(f"Unknown rebalancing frequency: {rebalance_label}")
+    garch = bool(payload.get("garch", False))
+    cost_bps = float(payload.get("cost_bps", 10.0))
+    leverage_multiple = float(payload.get("leverage_multiple", 1.0))
+    financing_rate = float(payload.get("financing_rate", 0.0)) / 100.0
+    maintenance_margin = float(payload.get("maintenance_margin", 0.0)) / 100.0
+    if rebalance_label == "legacy" and not np.isclose(cost_bps, 0.0):
+        raise ValueError("Legacy rebalancing does not support transaction costs; set cost_bps to 0.")
+    if garch and distribution != "normal":
+        raise ValueError("GARCH volatility clustering requires the Normal return distribution.")
+    if not np.isfinite(leverage_multiple) or leverage_multiple < 1:
+        raise ValueError("leverage_multiple must be at least 1.0.")
+    if leverage_multiple != 1.0 and rebalance_label == "legacy":
+        raise ValueError("Leverage requires an explicit rebalancing frequency, not legacy accounting.")
+    if not np.isfinite(financing_rate) or financing_rate < 0:
+        raise ValueError("financing_rate must be a finite, non-negative percentage.")
+    if not np.isfinite(maintenance_margin) or not 0 <= maintenance_margin < 1:
+        raise ValueError("maintenance_margin must be between 0 and 100 percent.")
+    if leverage_multiple == 1.0 and not np.isclose(maintenance_margin, 0.0):
+        raise ValueError("maintenance_margin only applies when leverage_multiple is greater than 1.0.")
+    if leverage_multiple > 1.0 and maintenance_margin >= 1.0 / leverage_multiple:
+        raise ValueError("maintenance_margin must be below the initial equity margin for the selected leverage.")
     start_state = None
     start_label = str(payload.get("start_state", "Stationary"))
     if start_label != "Stationary":
         start_state = REGIME_LOOKUP.get(start_label)
         if start_state is None:
             raise ValueError(f"Unknown start state: {start_label}")
-    weights = {str(ticker).strip().upper(): float(weight) for ticker, weight in (payload.get("weights") or {}).items()}
+    if model_kind == "hmm":
+        start_state = None
+    weights = {
+        str(ticker).strip().upper(): float(weight)
+        for ticker, weight in (payload.get("weights") or {}).items()
+    }
     if not weights:
         raise ValueError("Set at least one ticker weight above zero.")
+    if not all(np.isfinite(weight) for weight in weights.values()):
+        raise ValueError("Portfolio weights must be finite numbers.")
+    if np.isclose(sum(weights.values()), 0.0):
+        raise ValueError("Portfolio weights must have a non-zero sum.")
+    expense_ratios = parse_expense_ratios(payload.get("expense_ratios"))
     base_currency = str(payload.get("base_currency", "USD")).strip().upper()
     if len(base_currency) != 3:
         raise ValueError("Portfolio currency must be a three-letter ISO code.")
+    garch_alpha = float(payload.get("garch_alpha", 0.10))
+    garch_beta = float(payload.get("garch_beta", 0.85))
+    if not 0 <= garch_alpha < 1 or not 0 <= garch_beta < 1 or garch_alpha + garch_beta >= 1:
+        raise ValueError("garch_alpha and garch_beta must satisfy 0 <= alpha, beta < 1 and alpha + beta < 1.")
     return {
         "growth_threshold": _threshold_value(payload.get("growth_threshold", "median")),
         "inflation_threshold": _threshold_value(payload.get("inflation_threshold", "median")),
@@ -367,12 +515,24 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "block_size": int(payload.get("block_size", 3)),
         "transition_uncertainty": float(payload.get("transition_uncertainty", 0.0)),
         "rebalance_frequency": REBALANCE_KEYS[rebalance_label],
-        "transaction_cost_bps": float(payload.get("cost_bps", 10.0)),
+        "transaction_cost_bps": cost_bps,
+        "asset_expense_ratios": expense_ratios,
+        "leverage_multiple": leverage_multiple,
+        "financing_rate": financing_rate,
+        "maintenance_margin": maintenance_margin,
         "contribution": float(payload.get("contribution", 0.0)),
         "withdrawal": float(payload.get("withdrawal", 0.0)),
         "base_currency": base_currency,
         "risk_free_rate": float(payload.get("risk_free_rate", 0.0)) / 100.0,
         "annual_inflation": float(payload.get("annual_inflation", 0.0)) / 100.0,
+        "model_kind": model_kind,
+        "hmm_states": hmm_states,
+        "threshold_window": threshold_window,
+        "duration_model": duration_model,
+        "garch": garch,
+        "garch_alpha": garch_alpha,
+        "garch_beta": garch_beta,
+        "walk_forward": bool(payload.get("walk_forward", True)),
     }
 
 
@@ -445,6 +605,25 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _validation_response(walk_forward: Any) -> dict[str, Any] | None:
+    """Shape the walk-forward validation result for JSON output."""
+
+    if walk_forward is None:
+        return None
+    splits = walk_forward.splits
+    return {
+        "summary": {str(key): _json_value(value) for key, value in walk_forward.summary.items()},
+        "columns": [str(column) for column in splits.columns],
+        "rows": [
+            [
+                value.strftime("%Y-%m-%d") if isinstance(value, pd.Timestamp) else _json_value(value)
+                for value in record
+            ]
+            for record in splits.tail(60).itertuples(index=False, name=None)
+        ],
+    }
+
+
 def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     scenario, selected_tickers, macro = run_scenario_payload(payload)
     model = scenario.model
@@ -458,12 +637,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     regime_mix = (
         pd.Series(result.regimes.ravel())
         .value_counts(normalize=True)
-        .reindex(REGIME_ORDER)
+        .reindex(model.states)
         .fillna(0.0)
-        .rename(index=REGIME_NAMES)
+        .rename(index={state: _state_label(state) for state in model.states})
     )
     scatter = macro[[growth_col, inflation_col]].copy()
-    scatter["regime"] = scenario.regimes.map(REGIME_NAMES)
+    scatter["regime"] = scenario.regimes.map(_state_label, na_action="ignore")
     scatter["date"] = scatter.index.astype(str)
     scatter_records = [
         {
@@ -475,12 +654,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         for record in scatter.dropna().tail(240).itertuples(index=False)
     ]
     observations = {
-        REGIME_NAMES[state]: int(moments.observations) for state, moments in model.moments.items()
+        _state_label(state): int(moments.observations) for state, moments in model.moments.items()
     }
     diagnostics = scenario.diagnostics.regime_summary.copy()
     simulated_diagnostics = _simulated_regime_summary(result)
     diagnostics = diagnostics.merge(simulated_diagnostics, on="regime", how="left")
-    diagnostics["regime"] = diagnostics["regime"].map(REGIME_NAMES)
+    diagnostics["regime"] = diagnostics["regime"].map(_state_label)
 
     summary_values = {str(key): _json_value(value) for key, value in summary.items()}
     contribution = float(payload.get("contribution", 0.0))
@@ -489,6 +668,17 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         summary_values["periodic_contribution"] = contribution
         summary_values["periodic_withdrawal"] = withdrawal
         summary_values["total_contributed"] = contribution * len(wealth)
+        summary_values["total_withdrawn"] = withdrawal * len(wealth)
+        summary_values["net_external_cash_flow"] = (contribution - withdrawal) * len(wealth)
+
+    costs = {
+        "weighted_expense_ratio": summary_values.get("weighted_expense_ratio", 0.0),
+        "annual_fee_drag": summary_values.get("annual_fee_drag", 0.0),
+        "annual_financing_cost": summary_values.get("annual_financing_cost", 0.0),
+        "leverage_multiple": summary_values.get("leverage_multiple", 1.0),
+        "maintenance_margin": summary_values.get("maintenance_margin", 0.0),
+        "margin_calls": summary_values.get("margin_calls", 0),
+    }
 
     return {
         "ok": True,
@@ -496,6 +686,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "currency": scenario.model.metadata.get("base_currency", "USD"),
         "terms": "real" if scenario_kwargs(payload)["annual_inflation"] > 0 else "nominal",
         "warnings": list(scenario.diagnostics.warnings),
+        "costs": costs,
         "wealth": {
             "periods": list(range(1, len(wealth) + 1)),
             "p05": percentiles[0.05].tolist(),
@@ -507,18 +698,20 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "regime_timeline": [str(state) for state in result.regimes[0]],
         "regime_mix": [{"label": label, "share": float(share)} for label, share in regime_mix.items()],
         "transition": {
-            "labels": [REGIME_NAMES[state] for state in model.transition_matrix.index],
+            "labels": [_state_label(state) for state in model.transition_matrix.index],
             "values": model.transition_matrix.to_numpy(dtype=float).tolist(),
         },
         "macro_scatter": scatter_records,
         "observations": observations,
         "correlations": {
-            REGIME_NAMES[state]: {
+            _state_label(state): {
                 "labels": list(model.moments[state].correlation.columns),
                 "values": model.moments[state].correlation.to_numpy(dtype=float).tolist(),
             }
-            for state in REGIME_ORDER
+            for state in model.states
         },
+        "validation": _validation_response(scenario.walk_forward),
+        "model_kind": scenario.model.metadata.get("model_kind", "quadrant"),
         "diagnostics": {
             "columns": [str(column) for column in diagnostics.columns],
             "rows": [
@@ -553,7 +746,9 @@ def build_compare_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     kwargs = scenario_kwargs(payload)
     kwargs.pop("distribution", None)
     currency_map = parse_pair_map(payload.get("currency_map", ""), "currency")
-    asset_currencies, fx_rates = prepare_fx_rates(returns, selected_tickers, kwargs["base_currency"], currency_map)
+    asset_currencies, fx_rates = prepare_fx_rates(
+        returns, selected_tickers, kwargs["base_currency"], currency_map
+    )
     correlation_targets, override_weight = correlation_overrides(payload, selected_tickers)
     comparison = compare_distributions(
         {"Normal": "normal", "Student-t": "student_t"},

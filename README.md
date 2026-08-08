@@ -78,6 +78,14 @@ threshold are considered high.
 | Low | High | Low growth / high inflation |
 | Low | Low | Low growth / low inflation |
 
+A full-sample median silently uses future data to classify the past, which
+leaks look-ahead information into calibration. Setting a **causal threshold
+window** re-estimates each cutoff on an expanding window of prior observations
+only (the earliest rows stay unclassified until enough history exists). The
+UIs default to a 12-period window. Direct calibration keeps the full-sample
+behavior unless `threshold_window` is supplied; walk-forward validation always
+uses a causal 12-period window when none is supplied.
+
 ### 3. Markov Regime Model
 
 The transition matrix counts adjacent historical regime changes and adds the
@@ -90,6 +98,23 @@ Dirichlet distribution. The dashboard maps uncertainty `u` in `[0, 1]` to a
 row concentration of `max(1, 1 / u^2)`. Higher uncertainty therefore produces
 more variation around the calibrated transition probabilities.
 
+A first-order Markov chain implies geometrically distributed regime run
+lengths, which understates how long real regimes persist. With **semi-Markov
+durations** the simulator draws each stay length from the empirical sojourn
+distribution observed in history (stored in the calibrated model's metadata),
+then transitions to a different state via the matrix with self-transitions
+renormalized away. The dashboard defaults to semi-Markov; the core API uses
+the plain chain unless `duration_model="semi_markov"` is requested.
+
+An alternative **HMM regime model** fits a Gaussian-emission hidden Markov
+model directly on asset returns with expectation-maximization (states learned
+from the return distribution rather than macro thresholds, with k-means
+initialization and restarts). The fitted means, covariances, transition
+matrix, and most-likely (Viterbi) state path are wrapped in the same
+`ScenarioModel`, so simulation, reporting, and diagnostics work unchanged.
+State labels are `state_0..state_{n-1}`; their economic meaning follows from
+the fitted moments (a low-mean, high-covariance state is a stress regime).
+
 ### 4. Regime-Specific Return Moments
 
 Returns aligned to each regime provide a state-specific mean and covariance. If
@@ -99,6 +124,13 @@ shrunk toward the full-sample covariance, projected to the nearest positive
 semidefinite matrix, and converted to correlations. Optional pairwise
 correlation views are blended into each regime and projected back to a valid
 correlation matrix.
+
+By default the shrinkage intensity is no longer a fixed `0.25` blend: the
+Ledoit-Wolf optimal intensity is computed from the data, so sparse regimes are
+shrunk aggressively while long histories keep their empirical covariance. The
+PSD projection uses the Higham (2002) alternating projection, which preserves
+the diagonal and minimizes the Frobenius distance to the PSD cone instead of
+clipping eigenvalues. A fixed shrinkage value can still be forced.
 
 The diagnostics panel reports observations per regime and covariance condition
 numbers so sparse or unstable calibrations are visible rather than hidden.
@@ -117,6 +149,23 @@ regime's parameters:
 
 Student-t degrees of freedom must be greater than `2` so the variance is
 finite. Bootstrap methods require historical returns saved during calibration.
+
+**GARCH(1,1) volatility clustering** adds conditional-variance dynamics within
+each regime (Gaussian draws only): every asset's variance follows
+`h_t = omega + alpha * eps_{t-1}^2 + beta * h_{t-1}` anchored so the
+unconditional level matches the regime covariance, and the variance re-anchors
+when a path enters a new regime. Shocks therefore cluster in time without
+drifting away from the calibrated regime covariance. `garch_alpha` governs
+responsiveness to new shocks (default 0.10) and `garch_beta` the persistence
+of past variance (default 0.85).
+
+**Walk-forward validation** (quadrant model only, enabled by default in the
+dashboard) checks the regime model strictly out of sample: each split fits on
+data up to period `t` and scores the next observation under the one-step
+regime mixture density versus an unconditional Gaussian fitted on the same
+history. The reported advantage (log-likelihood units per period) and the
+one-step regime hit rate show whether regime conditioning actually predicts
+returns; a non-positive advantage is surfaced as a warning rather than hidden.
 
 ### 6. Portfolio Accounting
 
@@ -144,6 +193,18 @@ Cash-flow scenarios suit retirement-style analysis: accumulation phases use a
 positive contribution, drawdown phases a positive withdrawal, and the
 difference between terminal wealth and total contributed shows how much of the
 outcome came from returns rather than savings.
+
+ETF expense ratios are supplied per asset as annual percentage points, for
+example `SPY:0.03, IEF:0.15`. They are applied as a forward monthly fee drag
+to simulated asset growth. Historical ETF price returns may already include
+fund expenses, so applying an expense ratio is an explicit additional forward
+assumption rather than a historical fee reconstruction.
+
+Leverage is modeled with explicit borrowed balance and deterministic financing
+cost. A leverage multiple above `1.0` requires an explicit rebalancing
+frequency. Optional maintenance margin liquidates paths when equity divided by
+asset value falls below the configured threshold. The model is monthly and
+does not represent intramonth margin calls.
 
 ### 7. Reported Risk Metrics
 
@@ -174,7 +235,7 @@ kurtosis describe the shape of the terminal distribution.
 
 - Macro release lag is period-based and does not model data revisions or exact publication dates.
 - Regime transitions are Markovian and depend only on the current regime.
-- Parametric draws do not model volatility clustering; bootstrap methods are the better choice when preserving historical shape matters.
+- Parametric draws do not model volatility clustering unless optional GARCH is enabled; bootstrap methods are the better choice when preserving historical shape matters.
 - Transaction costs are charged only at modeled rebalancing events.
 - Results are scenario estimates, not forecasts or investment advice.
 
@@ -225,7 +286,7 @@ in practice:
 
 **Future directions**
 
-- GARCH-style volatility clustering or regime-dependent t distributions.
+- Regime-dependent Student-t degrees of freedom (per-regime tail shapes).
 - Bond duration and yield-curve simulation instead of price-only histories.
 - Inflation-indexed cash flows, where contributions and withdrawals grow with
   the inflation assumption.
@@ -265,39 +326,47 @@ The demo uses synthetic history so it runs offline, but it exercises the same
 calibration and simulation pipeline used for real data. It includes eight asset
 classes and 420 monthly observations from January 1990 through December 2024.
 
-## Frontends And Shared Methodology
-
-The simulation methodology lives in `src/mc_quadrants/` and is identical across
-every frontend. The UI-agnostic orchestration layer `src/mc_quadrants/api.py`
-handles data loading, scenario building, and result shaping; frontends only
-call it and render the returned structures. Each frontend ships on its own
-branch with the same core:
-
-| Branch | Frontend | Run |
-| --- | --- | --- |
-| `web-ui` | HTML/CSS/JS served by a small Python HTTP backend | `python web_app.py` (port 7860) |
-| `ui-streamlit` | Streamlit + Altair | `streamlit run streamlit_app.py` (port 8501) |
-| `ui-gradio` | Gradio + Plotly | `python gradio_app.py` (port 7860) |
-
-All three support the same workflow: demo/Yahoo/CSV data sources, historical
-proxies, synthetic backfills, FX conversion, correlation overrides, portfolio
-presets, the full metric set, calibration diagnostics, Normal-vs-Student-t
-comparison, and CSV/JSON exports.
-
-## Run The Web UI
-
-The UI is written in plain HTML, CSS, and JavaScript (no frontend framework,
-no CDN dependencies) and is served by a small Python backend that wraps the
-same simulation core:
+## Run The Gradio UI
 
 ```bash
-python web_app.py
+python gradio_app.py
 ```
 
 Open `http://127.0.0.1:7860` after the server starts. Set `PORT` to use a
 different port. The optional data helpers need `.[data]`.
 
-The web UI supports the offline demo, Yahoo Finance/FRED downloads, and
+## Run The Streamlit UI
+
+```bash
+streamlit run streamlit_app.py
+```
+
+## Run The Web UI
+
+The `web-ui` branch provides the same simulation methodology through a plain
+HTML/CSS/JavaScript interface and a small Python HTTP backend:
+
+```bash
+python web_app.py
+```
+
+Open `http://127.0.0.1:7860`. Set `PORT` to use a different port. The browser
+client calls the same `/api/load`, `/api/simulate`, `/api/compare`, and
+`/api/wealth` payload contracts used by the other frontends.
+
+Open the URL printed by Streamlit (default `http://localhost:8501`). It
+supports the same demo, Yahoo Finance/FRED, and CSV sources and the same
+methodology controls, rendered with Altair charts. Charts are layout to the
+browser width.
+
+Both frontends delegate all data loading, scenario building, and result
+shaping to the shared `mc_quadrants.api` layer, so the simulation methodology
+is identical regardless of the interface. The **Model methodology** section
+in each sidebar selects the regime model (quadrant or HMM), the regime
+duration model (Markov chain or semi-Markov), the causal threshold window,
+GARCH volatility clustering, and walk-forward validation.
+
+The UIs support the offline demo, Yahoo Finance/FRED downloads, and
 uploaded asset and macro CSVs. Yahoo mode starts at 1990 by default and
 accepts optional proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or
 `DBMF` in the synthetic asset picker, then choose the resulting `IEFSIM` or
@@ -312,7 +381,8 @@ Periodic contributions and withdrawals model dollar-cost averaging and
 retirement drawdowns. Results include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, macro scatter, calibration diagnostics, scenario
-comparison, and CSV downloads. Charts are rendered client-side as SVG.
+comparison, and CSV downloads. Gradio charts are rendered with Plotly;
+Streamlit charts use Altair.
 
 ## Run With Docker
 
@@ -372,9 +442,7 @@ print(summarize_terminal_wealth(wealth))
 
 For a reusable application workflow, `mc_quadrants.pipeline.run_scenario()`
 returns the calibrated model, simulated paths, wealth, risk summary, and
-calibration diagnostics together. Frontends use `mc_quadrants.api` instead,
-which wraps that workflow behind the payload contract shared by the web,
-Streamlit, and Gradio UIs.
+calibration diagnostics together.
 
 ## Suggested Real Data Inputs
 

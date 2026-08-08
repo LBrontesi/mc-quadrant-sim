@@ -3,11 +3,19 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from mc_quadrants.api import (
+# Allow `python web_app.py` to work directly from a source checkout.
+PROJECT_DIR = Path(__file__).resolve().parent
+SRC_DIR = PROJECT_DIR / "src"
+if SRC_DIR.is_dir() and str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from mc_quadrants.api import (  # noqa: E402
     build_compare_response,
     build_load_response,
     build_simulate_response,
@@ -15,7 +23,7 @@ from mc_quadrants.api import (
     load_data_source,
 )
 
-WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+WEB_DIR = str(PROJECT_DIR / "web")
 PORT = int(os.getenv("PORT", "7860"))
 
 

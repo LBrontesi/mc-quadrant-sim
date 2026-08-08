@@ -36,6 +36,7 @@ def build_calibration_diagnostics(
     growth_threshold: str | float,
     inflation_threshold: str | float,
     macro_lag_periods: int = 0,
+    threshold_window: int | None = None,
 ) -> CalibrationDiagnostics:
     """Check regime coverage, covariance conditioning, and transition data."""
 
@@ -45,6 +46,7 @@ def build_calibration_diagnostics(
         inflation_col=inflation_col,
         growth_threshold=growth_threshold,
         inflation_threshold=inflation_threshold,
+        threshold_window=threshold_window,
     )
     lagged_regimes = regimes.sort_index().shift(macro_lag_periods)
     aligned = lagged_regimes.dropna().reindex(returns.sort_index().index, method="ffill")
@@ -68,7 +70,11 @@ def build_calibration_diagnostics(
                 "observations": observations,
                 "share": observations / total,
                 "covariance_condition_number": condition_number,
-                "shrinkage": float(model.metadata.get("shrinkage", np.nan)),
+                "shrinkage": (
+                    float(model.metadata["shrinkage"])
+                    if model.metadata.get("shrinkage") is not None
+                    else np.nan
+                ),
             }
         )
         if observations < minimum_observations:
@@ -83,9 +89,59 @@ def build_calibration_diagnostics(
         warnings.append(
             f"Macro regimes are lagged by {macro_lag_periods} period(s) to reduce look-ahead bias."
         )
+    if threshold_window:
+        warnings.append(
+            f"Thresholds use causal expanding windows with {threshold_window} minimum prior "
+            "observations; the earliest macro observations are left unclassified."
+        )
     if len(aligned) < 24:
         warnings.append("The aligned calibration sample contains fewer than 24 observations.")
 
+    return CalibrationDiagnostics(
+        regime_summary=pd.DataFrame(rows),
+        transition_counts=_transition_counts(regimes),
+        warnings=warnings,
+    )
+
+
+def build_hmm_diagnostics(
+    model: ScenarioModel,
+    regimes: pd.Series,
+) -> CalibrationDiagnostics:
+    """Regime coverage and conditioning checks for a fitted HMM model."""
+
+    rows: list[dict[str, object]] = []
+    warnings: list[str] = []
+    total = max(int(len(regimes)), 1)
+    minimum_observations = max(int(model.metadata.get("n_states", 4)) * 4, 12)
+    for state in model.states:
+        moments = model.moments[state]
+        observations = int(moments.observations)
+        covariance = moments.covariance.to_numpy(dtype=float)
+        condition_number = float(np.linalg.cond(covariance)) if covariance.size else np.nan
+        rows.append(
+            {
+                "regime": state,
+                "observations": observations,
+                "share": observations / total,
+                "covariance_condition_number": condition_number,
+                "shrinkage": np.nan,
+            }
+        )
+        if observations < minimum_observations:
+            warnings.append(
+                f"{state} has {observations} fitted observations; "
+                f"the minimum is {minimum_observations} for stable moments."
+            )
+        if not np.isfinite(condition_number) or condition_number > 1e8:
+            warnings.append(f"{state} covariance is poorly conditioned.")
+    log_likelihood = model.metadata.get("log_likelihood")
+    if log_likelihood is not None:
+        warnings.append(
+            f"HMM fitted {model.metadata.get('n_states')} states "
+            f"in {model.metadata.get('iterations')} iterations "
+            f"(log-likelihood {log_likelihood:.1f})."
+        )
     return CalibrationDiagnostics(
         regime_summary=pd.DataFrame(rows),
         transition_counts=_transition_counts(regimes),
