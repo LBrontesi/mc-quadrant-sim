@@ -30,33 +30,27 @@
         <button id="expand-all" class="btn btn-ghost">Expand all</button>
         <button id="collapse-all" class="btn btn-ghost">Collapse all</button>
       </div>
-      <section class="control-group guide-group">
+      <section class="control-group" id="allocation-section">
         <details open>
-          <summary>Start here</summary>
-          <p class="guide-intro">Run your first scenario in five steps. Real market data from Yahoo Finance / FRED is loaded by default.</p>
-          <ol class="guide-list">
-            <li id="guide-data" class="guide-step">
-              <span class="guide-number">1</span>
-              <div><strong>Load market data</strong><span>Keep the default tickers, then click <b>Load Data</b>. You can optionally upload your own CSVs in the Custom data section.</span></div>
-            </li>
-            <li id="guide-portfolio" class="guide-step">
-              <span class="guide-number">2</span>
-              <div><strong>Build a portfolio</strong><span>Select tickers and edit weights, or apply a preset such as Classic 60/40.</span></div>
-            </li>
-            <li id="guide-methodology" class="guide-step">
-              <span class="guide-number">3</span>
-              <div><strong>Review assumptions</strong><span>Defaults use quadrant regimes, a 12-period causal window, semi-Markov durations, and walk-forward validation.</span></div>
-            </li>
-            <li id="guide-run" class="guide-step">
-              <span class="guide-number">4</span>
-              <div><strong>Run the simulation</strong><span>Set the horizon and path count if needed, then click <b>Run Simulation</b>.</span></div>
-            </li>
-            <li id="guide-read" class="guide-step">
-              <span class="guide-number">5</span>
-              <div><strong>Read and export</strong><span>Use Results for outcomes, Diagnostics for model health, and Data for previews and downloads.</span></div>
-            </li>
-          </ol>
-          <p id="guide-status" class="guide-status">Next: load the market data.</p>
+          <summary>Allocation</summary>
+          <p class="status" id="portfolio-status">Load data to select assets.</p>
+          <div id="allocation-list"></div>
+          <p id="weight-total" class="status"></p>
+          <div class="row-actions">
+            <button id="equalize-btn" class="btn btn-ghost">Equalize</button>
+            <button id="reset-btn" class="btn btn-ghost">Reset</button>
+          </div>
+          <details class="sub-details">
+            <summary>Add assets</summary>
+            <div id="ticker-list" class="check-list"></div>
+          </details>
+          <div class="two-col">
+            <label>Preset
+              <select id="preset-select"><option value="">— choose —</option></select>
+            </label>
+            <button id="preset-apply" class="btn" disabled>Apply</button>
+          </div>
+          <span class="hint">Presets inspired by PortfolioCharts, mapped onto the loaded tickers.</span>
         </details>
       </section>
       <section class="control-group" id="market-data-section">
@@ -272,30 +266,6 @@
         </details>
       </section>
 
-      <section class="control-group">
-        <details open>
-          <summary>Portfolio</summary>
-          <p class="status" id="portfolio-status">Load data to select tickers.</p>
-          <div id="ticker-list" class="check-list"></div>
-          <div class="portfolio-blocks">
-            <div id="weight-editor"></div>
-            <div id="donut" class="donut"></div>
-          </div>
-          <div class="row-actions">
-            <button id="equalize-btn" class="btn btn-ghost">Equalize</button>
-            <button id="reset-btn" class="btn btn-ghost">Reset all</button>
-          </div>
-          <p id="weight-total" class="status"></p>
-          <div class="two-col">
-            <label>Portfolio preset
-              <select id="preset-select"><option value="">— choose —</option></select>
-            </label>
-            <button id="preset-apply" class="btn" disabled>Apply preset</button>
-          </div>
-          <span class="hint">Presets inspired by PortfolioCharts, mapped onto the loaded tickers.</span>
-        </details>
-      </section>
-
       <section class="control-group" id="custom-data-section">
         <details>
           <summary>Custom data (optional)</summary>
@@ -316,6 +286,36 @@
         </details>
       </section>
 
+      <section class="control-group guide-group">
+        <details>
+          <summary>Start here</summary>
+          <p class="guide-intro">Run your first scenario in five steps. Real market data from Yahoo Finance / FRED is loaded by default.</p>
+          <ol class="guide-list">
+            <li id="guide-data" class="guide-step">
+              <span class="guide-number">1</span>
+              <div><strong>Load market data</strong><span>Keep the default tickers, then click <b>Load Data</b>. You can optionally upload your own CSVs in the Custom data section.</span></div>
+            </li>
+            <li id="guide-portfolio" class="guide-step">
+              <span class="guide-number">2</span>
+              <div><strong>Build an allocation</strong><span>Toggle assets and edit weights in the Allocation panel, or apply a preset such as Classic 60/40.</span></div>
+            </li>
+            <li id="guide-methodology" class="guide-step">
+              <span class="guide-number">3</span>
+              <div><strong>Review assumptions</strong><span>Defaults use quadrant regimes, a 12-period causal window, semi-Markov durations, and walk-forward validation.</span></div>
+            </li>
+            <li id="guide-run" class="guide-step">
+              <span class="guide-number">4</span>
+              <div><strong>Run the simulation</strong><span>Set the horizon and path count if needed, then click <b>Run Simulation</b>.</span></div>
+            </li>
+            <li id="guide-read" class="guide-step">
+              <span class="guide-number">5</span>
+              <div><strong>Read and export</strong><span>Use Growth for outcomes, Diagnostics for model health, and Data for previews and downloads.</span></div>
+            </li>
+          </ol>
+          <p id="guide-status" class="guide-status">Next: load the market data.</p>
+        </details>
+      </section>
+
       <button id="run-btn" class="btn btn-primary btn-block btn-lg" disabled>Run Simulation</button>
       <button id="compare-btn" class="btn btn-block" disabled>Compare Normal vs Student-t</button>
       <p id="scenario-status" class="status"></p>
@@ -324,20 +324,26 @@
 
     <main class="panel panel-main" id="results">
       <div class="tabs" id="result-tabs">
-        <button class="tab-btn active" data-tab="tab-results">Results</button>
+        <button class="tab-btn active" data-tab="tab-growth">Growth</button>
+        <button class="tab-btn" data-tab="tab-returns">Returns</button>
+        <button class="tab-btn" data-tab="tab-drawdowns">Drawdowns</button>
+        <button class="tab-btn" data-tab="tab-correlations">Correlations</button>
+        <button class="tab-btn" data-tab="tab-monthly">Monthly</button>
+        <button class="tab-btn" data-tab="tab-compare">Compare</button>
         <button class="tab-btn" data-tab="tab-diagnostics">Diagnostics</button>
         <button class="tab-btn" data-tab="tab-data">Data</button>
       </div>
 
-      <div id="tab-results" class="tab-panel active">
+      <div id="tab-growth" class="tab-panel active">
         <div id="intro" class="empty-state">
           <h2>Welcome to the Four-Quadrant Simulator</h2>
           <p><strong>Market data</strong> is loaded from Yahoo Finance / FRED by default (with optional proxies and synthetic backfills). To use your own history, upload asset and macro <strong>CSVs</strong> in the Custom data section.</p>
-          <p>1. Load data &nbsp;·&nbsp; 2. Select tickers and weights &nbsp;·&nbsp; 3. Run the simulation</p>
+          <p>1. Load data &nbsp;·&nbsp; 2. Set the allocation &nbsp;·&nbsp; 3. Run the simulation</p>
         </div>
-        <div id="results-content" class="hidden">
+        <div id="growth-content" class="hidden">
           <div id="scenario-chips" class="chips"></div>
           <p id="stale-results" class="warning hidden">Inputs changed since this result was produced. Run the simulation again before interpreting or exporting it.</p>
+          <h3 class="section-title">Portfolio metrics</h3>
           <div class="metric-grid" id="metric-grid"></div>
           <p class="caption" id="risk-caption"></p>
           <p class="caption" id="performance-caption"></p>
@@ -352,19 +358,62 @@
             <div class="metric-grid" id="cost-metric-grid"></div>
           </section>
           <div class="chart-grid">
-            <div class="card"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
+            <div class="card card-wide"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
+            <div class="card card-wide"><h3>Regime Timeline (sample path)</h3><div class="chart" id="chart-timeline"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-returns" class="tab-panel">
+        <div class="results-empty empty-state">Run a simulation to see return distributions.</div>
+        <div id="returns-content" class="hidden">
+          <div class="chart-grid">
             <div class="card"><h3>Terminal Wealth Distribution</h3><div class="chart" id="chart-terminal"></div></div>
-            <div class="card"><h3>Maximum Drawdown Distribution</h3><div class="chart" id="chart-drawdowns"></div></div>
-            <div class="card"><h3>Regime Timeline (sample path)</h3><div class="chart" id="chart-timeline"></div></div>
             <div class="card"><h3>Simulated Regime Mix</h3><div class="chart" id="chart-regime-mix"></div></div>
             <div class="card"><h3 id="macro-chart-title">Macro Quadrants / model states</h3><div class="chart" id="chart-macro"></div></div>
-            <div class="card"><h3>Transition Matrix</h3><div class="chart" id="chart-transition"></div></div>
             <div class="card"><h3>Historical Observations</h3><div class="chart" id="chart-observations"></div></div>
-            <div class="card card-wide">
-              <h3>Correlation Matrix <select id="correlation-regime"></select></h3>
-              <div class="chart" id="chart-correlation"></div>
-            </div>
           </div>
+        </div>
+      </div>
+
+      <div id="tab-drawdowns" class="tab-panel">
+        <div class="results-empty empty-state">Run a simulation to see drawdown risk.</div>
+        <div id="drawdowns-content" class="hidden">
+          <div class="chart-grid">
+            <div class="card card-wide"><h3>Maximum Drawdown Distribution</h3><div class="chart" id="chart-drawdowns"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-correlations" class="tab-panel">
+        <div class="results-empty empty-state">Run a simulation to see correlations.</div>
+        <div id="correlations-content" class="hidden">
+          <div class="chart-grid">
+            <div class="card card-wide"><h3>Correlation Matrix <select id="correlation-regime"></select></h3><div class="chart" id="chart-correlation"></div></div>
+            <div class="card card-wide"><h3>Transition Matrix</h3><div class="chart" id="chart-transition"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-monthly" class="tab-panel">
+        <div class="results-empty empty-state">Run a simulation to see monthly returns.</div>
+        <div id="monthly-content" class="hidden">
+          <div class="card card-wide">
+            <h3>Monthly Returns (median path)</h3>
+            <p class="caption">Monthly returns of the median simulation path, by calendar year and month.</p>
+            <div class="chart" id="chart-monthly"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-compare" class="tab-panel">
+        <div class="results-empty empty-state">Run a simulation, then click Compare to see the Normal vs Student-t comparison.</div>
+        <div id="compare-content" class="hidden">
+          <section class="card">
+            <h3>Scenario Comparison</h3>
+            <p class="caption">Normal vs Student-t distributions under the same methodology and allocation.</p>
+            <div class="table-wrap" id="comparison-table"></div>
+          </section>
         </div>
       </div>
 
@@ -380,10 +429,6 @@
             <h3>Calibration Diagnostics</h3>
             <div class="table-wrap" id="diagnostics-table"></div>
             <p class="warning" id="warnings-box"></p>
-          </section>
-          <section class="card">
-            <h3>Scenario Comparison</h3>
-            <div class="table-wrap" id="comparison-table"></div>
           </section>
         </div>
       </div>

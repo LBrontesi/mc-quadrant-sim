@@ -616,6 +616,13 @@ def _validation_response(walk_forward: Any) -> dict[str, Any] | None:
     }
 
 
+def _simulation_start_date(macro: pd.DataFrame) -> str | None:
+    if macro is None or macro.empty:
+        return None
+    last_observed = pd.Timestamp(macro.index.max())
+    return (last_observed + pd.DateOffset(months=1)).strftime("%Y-%m-%d")
+
+
 def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     scenario, selected_tickers, macro = run_scenario_payload(payload)
     model = scenario.model
@@ -712,6 +719,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             ],
         },
         "selected_tickers": selected_tickers,
+        "start_date": _simulation_start_date(macro),
         "message": (
             f"Simulation complete: {len(wealth)} periods x {wealth.shape[1]} paths. "
             f"Distribution: {scenario.result.distribution}."

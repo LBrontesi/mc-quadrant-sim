@@ -418,11 +418,14 @@ Three-Fund, Permanent, Golden Butterfly, All Seasons, Core Four, Risk Parity)
 apply PortfolioCharts-style allocations to the loaded tickers, and the
 inflation/risk-free inputs report real terms and a proper Sharpe ratio.
 Periodic contributions and withdrawals model dollar-cost averaging and
-retirement drawdowns. Results include metric cards,
+retirement drawdowns. The web UI uses a testfol-style layout with an
+allocation editor (color-coded asset rows with weights) in the sidebar and
+tabbed result views for Growth, Returns, Drawdowns, Correlations, Monthly
+returns, and distribution comparison. Results include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
-and correlation heatmaps, macro scatter, calibration diagnostics, scenario
-comparison, and CSV downloads. Gradio charts are rendered with Plotly;
-Streamlit charts use Altair.
+and correlation heatmaps, a monthly-return calendar, macro scatter,
+calibration diagnostics, scenario comparison, and CSV downloads. Gradio
+charts are rendered with Plotly; Streamlit charts use Altair.
 
 ## Run With Docker
 

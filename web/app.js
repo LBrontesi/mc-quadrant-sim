@@ -555,44 +555,22 @@ function timelineChart(container, states) {
   container.appendChild(legend);
 }
 
-function donutChart(container, items) {
-  container.innerHTML = "";
-  if (!items.length) return;
-  const size = 110, cx = size / 2, cy = size / 2, r = 42, stroke = 15;
-  const total = items.reduce((sum, item) => sum + item.value, 0) || 1;
-  const svg = createSvg(size, size);
-  const palette = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16", "#f97316", "#14b8a6", "#a78bfa", "#22c55e"];
-  const tooltip = attachTooltip(container);
-  let angle = -Math.PI / 2;
-  items.forEach((item, index) => {
-    const frac = item.value / total;
-    const start = angle;
-    const end = angle + frac * 2 * Math.PI;
-    angle = end;
-    const large = frac > 0.5 ? 1 : 0;
-    const x1 = cx + r * Math.cos(start);
-    const y1 = cy + r * Math.sin(start);
-    const x2 = cx + r * Math.cos(end);
-    const y2 = cy + r * Math.sin(end);
-    const path = document.createElementNS(SVG_NS, "path");
-    path.setAttribute("d", `M ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2}`);
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", palette[index % palette.length]);
-    path.setAttribute("stroke-width", stroke);
-    path.addEventListener("mouseenter", () => {
-      tooltip.show(cx, cy, `<b>${escapeHtml(item.label)}</b><br>${item.value.toFixed(1)}%`);
-    });
-    path.addEventListener("mouseleave", () => tooltip.hide());
-    svg.appendChild(path);
-  });
-  svgText(svg, cx, cy + 4, total.toFixed(0) + "%", "chart-title");
-  container.appendChild(svg);
-}
-
 /* ---------- Inputs ---------- */
 
 function activeSource() {
   return $("csv-enabled").checked ? "csv" : "yahoo";
+}
+
+function resetResultsView() {
+  ["growth", "returns", "drawdowns", "correlations", "monthly", "compare", "diagnostics", "data"]
+    .forEach((name) => {
+      const content = $(`${name}-content`);
+      if (content) content.classList.add("hidden");
+    });
+  document.querySelectorAll(".results-empty").forEach((el) => el.classList.remove("hidden"));
+  $("diagnostics-empty").classList.remove("hidden");
+  $("data-empty").classList.remove("hidden");
+  $("intro").classList.remove("hidden");
 }
 
 function toggleSourceGroups() {
@@ -605,10 +583,7 @@ function toggleSourceGroups() {
     renderWeightEditor();
     $("preset-apply").disabled = true;
     $("portfolio-status").textContent = "Data source changed — click Load Data to refresh tickers.";
-    $("results-content").classList.add("hidden");
-    $("intro").classList.remove("hidden");
-    $("data-content").classList.add("hidden");
-    $("data-empty").classList.remove("hidden");
+    resetResultsView();
   }
   updateRunAvailability();
 }
@@ -759,15 +734,35 @@ function selectedTickers() {
   return Array.from(document.querySelectorAll('#ticker-list input[type="checkbox"]:checked')).map((el) => el.value);
 }
 
+let assetColors = {};
+
+function assetColor(ticker) {
+  if (!assetColors[ticker] && state.loadResult) {
+    const index = state.loadResult.tickers.indexOf(ticker);
+    assetColors[ticker] = STATE_PALETTE[Math.max(index, 0) % STATE_PALETTE.length];
+  }
+  return assetColors[ticker] || "#3b82f6";
+}
+
 function renderWeightEditor() {
   const selected = selectedTickers();
-  const container = $("weight-editor");
+  const container = $("allocation-list");
   container.innerHTML = "";
+  if (!selected.length) {
+    container.innerHTML = "<p class='status'>No assets selected.</p>";
+    state.selected = selected;
+    updateWeightTotal();
+    return;
+  }
   selected.forEach((ticker) => {
     const row = document.createElement("div");
-    row.className = "weight-row";
-    const label = document.createElement("span");
-    label.textContent = ticker;
+    row.className = "allocation-row";
+    const swatch = document.createElement("span");
+    swatch.className = "allocation-swatch";
+    swatch.style.background = assetColor(ticker);
+    const name = document.createElement("span");
+    name.className = "ticker";
+    name.textContent = ticker;
     const input = document.createElement("input");
     input.type = "number";
     input.min = "0";
@@ -777,8 +772,21 @@ function renderWeightEditor() {
     state.weights[ticker] = weight;
     input.value = weight;
     input.addEventListener("input", () => { state.weights[ticker] = Number(input.value); updateWeightTotal(); });
-    row.appendChild(label);
-    row.appendChild(input);
+    const unit = document.createElement("span");
+    unit.className = "weight-unit";
+    unit.textContent = "%";
+    const remove = document.createElement("button");
+    remove.className = "allocation-remove";
+    remove.type = "button";
+    remove.title = "Remove asset";
+    remove.textContent = "×";
+    remove.addEventListener("click", () => {
+      const checkbox = document.querySelector(`#ticker-list input[value="${CSS.escape(ticker)}"]`);
+      if (checkbox) checkbox.checked = false;
+      delete state.weights[ticker];
+      renderWeightEditor();
+    });
+    row.append(swatch, name, input, unit, remove);
     container.appendChild(row);
   });
   state.selected = selected;
@@ -789,9 +797,8 @@ function updateWeightTotal() {
   const selected = selectedTickers();
   const total = selected.reduce((sum, ticker) => sum + (Number(state.weights[ticker]) || 0), 0);
   const el = $("weight-total");
-  el.textContent = `Total weight: ${total.toFixed(1)}%. The simulator normalizes this to 100%.`;
+  el.textContent = `Total: ${total.toFixed(1)}% — the simulation normalizes this to 100%.`;
   el.style.color = total <= 0 ? "var(--danger)" : "var(--muted)";
-  donutChart($("donut"), selected.map((ticker) => ({ label: ticker, value: Number(state.weights[ticker]) || 0 })));
   updateRunAvailability();
 }
 
@@ -1015,9 +1022,84 @@ function renderMetricGrid(containerId, fields, data) {
   });
 }
 
+const MONTH_ABBREV = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function monthlyReturnColor(returnValue, maxAbs) {
+  const intensity = Math.min(Math.abs(returnValue) / maxAbs, 1);
+  const alpha = 0.10 + intensity * 0.72;
+  if (returnValue >= 0) return `rgba(16, 185, 129, ${alpha.toFixed(3)})`;
+  return `rgba(239, 68, 68, ${alpha.toFixed(3)})`;
+}
+
+function renderMonthlyCalendar(data) {
+  const container = $("chart-monthly");
+  container.innerHTML = "";
+  const medians = (data.wealth && data.wealth.median) || [];
+  const startDate = data.start_date ? new Date(`${data.start_date}T00:00:00`) : null;
+  if (!startDate || medians.length === 0) {
+    container.innerHTML = "<p class='status'>No monthly data to display.</p>";
+    return;
+  }
+  const returns = [];
+  let previous = 100;
+  medians.forEach((median, index) => {
+    const rate = index === 0 ? median / 100 - 1 : median / previous - 1;
+    returns.push(rate);
+    previous = median;
+  });
+  const byYear = {};
+  returns.forEach((rate, index) => {
+    const date = new Date(startDate.getFullYear(), startDate.getMonth() + index, 1);
+    const year = date.getFullYear();
+    if (!byYear[year]) byYear[year] = {};
+    byYear[year][date.getMonth()] = rate;
+  });
+  const maxAbs = Math.max(...returns.map((rate) => Math.abs(rate)), 0.001);
+  const years = Object.keys(byYear).sort();
+
+  const table = document.createElement("table");
+  table.className = "monthly-table";
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  headRow.appendChild(document.createElement("th"));
+  MONTH_ABBREV.forEach((month) => {
+    const th = document.createElement("th");
+    th.textContent = month;
+    headRow.appendChild(th);
+  });
+  head.appendChild(headRow);
+  table.appendChild(head);
+
+  const body = document.createElement("tbody");
+  years.forEach((year) => {
+    const row = document.createElement("tr");
+    const yearCell = document.createElement("td");
+    yearCell.className = "monthly-year";
+    yearCell.textContent = year;
+    row.appendChild(yearCell);
+    MONTH_ABBREV.forEach((_, monthIndex) => {
+      const cell = document.createElement("td");
+      const rate = byYear[year][monthIndex];
+      if (rate !== undefined) {
+        cell.style.background = monthlyReturnColor(rate, maxAbs);
+        cell.textContent = (rate * 100).toFixed(1) + "%";
+        cell.title = `${year}-${String(monthIndex + 1).padStart(2, "0")}: ${(rate * 100).toFixed(2)}%`;
+      }
+      row.appendChild(cell);
+    });
+    body.appendChild(row);
+  });
+  table.appendChild(body);
+  container.appendChild(table);
+}
+
 function renderResults(data) {
   $("intro").classList.add("hidden");
-  $("results-content").classList.remove("hidden");
+  ["growth", "returns", "drawdowns", "correlations", "monthly"].forEach((name) => {
+    const content = $(`${name}-content`);
+    if (content) content.classList.remove("hidden");
+  });
+  document.querySelectorAll(".results-empty").forEach((el) => el.classList.add("hidden"));
   renderScenarioChips(state.lastSimPayload, data);
   $("macro-chart-title").textContent = data.model_kind === "hmm" ? "HMM states / macro history" : "Macro quadrants";
   renderMetricGrid("metric-grid", METRIC_FIELDS, data);
@@ -1095,6 +1177,8 @@ function renderResults(data) {
   regimeSelect.addEventListener("change", drawCorrelation);
   drawCorrelation();
 
+  renderMonthlyCalendar(data);
+
   const diagnostics = data.diagnostics;
   $("diagnostics-table").innerHTML = "<table><thead><tr>" + diagnostics.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
     diagnostics.rows.map((row) => "<tr>" + row.map((value) => `<td>${escapeHtml(fmtNumber(value))}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
@@ -1133,13 +1217,14 @@ async function onLoad() {
     notify(data.message, "success");
     renderTickerChecklist(data.tickers, data.default_tickers);
     state.weights = {};
+    assetColors = {};
     renderWeightEditor();
     renderTables(data);
     renderCoverage(data.coverage);
     renderSyntheticReport(data.synthetic);
     populatePresets(data.presets);
     $("preset-apply").disabled = false;
-    $("portfolio-status").textContent = `${data.tickers.length} tickers available. Select tickers and set weights.`;
+    $("portfolio-status").textContent = `${data.tickers.length} tickers available. Toggle assets and set weights.`;
     $("data-empty").classList.add("hidden");
     $("data-content").classList.remove("hidden");
     switchTab("tab-data");
@@ -1175,7 +1260,7 @@ async function onRun() {
     setStatus(message, data.message);
     notify("Simulation complete", "success");
     renderResults(data);
-    switchTab("tab-results");
+    switchTab("tab-growth");
   } catch (error) {
     setStatus(message, error.message, true);
     notify(error.message, "error");
@@ -1197,7 +1282,9 @@ async function onCompare() {
       data.rows.map((row) => "<tr>" + row.map((value) => `<td>${escapeHtml(fmtNumber(value))}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
     setStatus(message, "Scenario comparison complete.");
     notify("Scenario comparison complete", "success");
-    switchTab("tab-diagnostics");
+    $("compare-content").classList.remove("hidden");
+    document.querySelectorAll("#tab-compare .results-empty").forEach((el) => el.classList.add("hidden"));
+    switchTab("tab-compare");
   } catch (error) {
     setStatus(message, error.message, true);
     notify(error.message, "error");
