@@ -55,7 +55,32 @@ def test_gradio_app_loads_demo_data():
     )
     assert message.startswith("Loaded 8 tickers")
     assert ticker_group.get("choices") == ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
-    assert weights.get("value") == [["SPY", 40.0], ["IEF", 20.0], ["GLD", 10.0], ["DBC", 10.0], ["EFA", 10.0], ["VNQ", 5.0], ["TIP", 3.0], ["SHY", 2.0]]
+    assert weights.get("value") == [
+        ["SPY", 40.0],
+        ["IEF", 20.0],
+        ["GLD", 10.0],
+        ["DBC", 10.0],
+        ["EFA", 10.0],
+        ["VNQ", 5.0],
+        ["TIP", 3.0],
+        ["SHY", 2.0],
+    ]
+    assert state["presets"]
+
+
+def test_gradio_app_applies_loaded_preset():
+    _, ticker_group, _, _, state = app.on_load(
+        "demo", 42, "", "", "", "", [], 42, None, None, "Price levels", True, "growth", "inflation"
+    )
+
+    updated, message = app.apply_preset(
+        "Classic 60/40",
+        state,
+        ticker_group.get("choices"),
+    )
+
+    assert message == "Applied Classic 60/40."
+    assert updated.get("value")[:2] == [["SPY", 60.0], ["IEF", 40.0]]
 
 
 def test_gradio_app_full_simulation_flow():

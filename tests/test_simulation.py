@@ -6,11 +6,12 @@ from mc_quadrants.calibration import calibrate_quadrant_model
 from mc_quadrants.regimes import Regime
 from mc_quadrants.simulation import (
     simulate_portfolio_paths,
+    simulate_regime_paths,
     simulate_returns,
     stationary_distribution,
     summarize_wealth_risk,
 )
-from mc_quadrants.types import SimulationResult
+from mc_quadrants.types import ScenarioModel, SimulationResult
 
 
 def _calibrated_model():
@@ -142,9 +143,7 @@ def test_periodic_contributions_increase_wealth():
     plain = simulate_portfolio_paths(result, {"Stocks": 1.0})
     with_dca = simulate_portfolio_paths(result, {"Stocks": 1.0}, contribution=10.0)
     assert with_dca.iloc[-1, 0] > plain.iloc[-1, 0]
-    assert with_dca.iloc[-1, 0] == pytest.approx(
-        ((100.0 + 10.0) * np.exp(0.10) + 10.0) * np.exp(0.10)
-    )
+    assert with_dca.iloc[-1, 0] == pytest.approx(((100.0 + 10.0) * np.exp(0.10) + 10.0) * np.exp(0.10))
 
 
 def test_withdrawals_reduce_wealth_and_floor_at_zero():
@@ -184,6 +183,84 @@ def test_cash_flows_validate_inputs():
         simulate_portfolio_paths(result, {"Stocks": 1.0}, contribution=-1.0)
     with pytest.raises(ValueError, match="withdrawal"):
         simulate_portfolio_paths(result, {"Stocks": 1.0}, withdrawal=-1.0)
+
+
+def test_cash_flow_adjusted_metrics_ignore_regular_contributions():
+    result = SimulationResult(
+        returns=np.zeros((2, 1, 1)),
+        regimes=np.empty((2, 1), dtype=object),
+        assets=["Stocks"],
+        states=[],
+        frequency="M",
+    )
+    wealth = simulate_portfolio_paths(result, {"Stocks": 1.0}, contribution=10.0)
+
+    summary = summarize_wealth_risk(wealth, periods_per_year=12, contribution=10.0)
+
+    assert summary["cash_flow_adjusted_annualized_return"] == pytest.approx(0.0)
+    assert summary["cash_flow_adjusted_volatility"] == pytest.approx(0.0)
+    assert summary["total_contributed"] == pytest.approx(20.0)
+
+
+def test_expense_ratio_reduces_simulated_wealth():
+    result = SimulationResult(
+        returns=np.zeros((2, 1, 1)),
+        regimes=np.empty((2, 1), dtype=object),
+        assets=["Stocks"],
+        states=[],
+        frequency="M",
+    )
+
+    wealth = simulate_portfolio_paths(
+        result,
+        {"Stocks": 1.0},
+        asset_expense_ratios={"Stocks": 0.12},
+    )
+
+    assert wealth.iloc[-1, 0] == pytest.approx(100.0 * np.exp(2 * np.log(0.88) / 12))
+
+
+def test_leverage_charges_financing_and_preserves_equity_accounting():
+    result = SimulationResult(
+        returns=np.zeros((1, 1, 1)),
+        regimes=np.empty((1, 1), dtype=object),
+        assets=["Stocks"],
+        states=[],
+        frequency="M",
+    )
+
+    wealth = simulate_portfolio_paths(
+        result,
+        {"Stocks": 1.0},
+        rebalance_frequency=1,
+        leverage_multiple=2.0,
+        financing_rate=0.12,
+    )
+
+    expected = 200.0 - 100.0 * (1.12 ** (1 / 12))
+    assert wealth.iloc[-1, 0] == pytest.approx(expected)
+    assert wealth.attrs["margin_calls"] == 0
+
+
+def test_leverage_liquidates_when_maintenance_margin_is_breached():
+    result = SimulationResult(
+        returns=np.array([[[-0.60]]]),
+        regimes=np.empty((1, 1), dtype=object),
+        assets=["Stocks"],
+        states=[],
+        frequency="M",
+    )
+
+    wealth = simulate_portfolio_paths(
+        result,
+        {"Stocks": 1.0},
+        rebalance_frequency=1,
+        leverage_multiple=2.0,
+        maintenance_margin=0.25,
+    )
+
+    assert wealth.iloc[-1, 0] == 0.0
+    assert wealth.attrs["margin_calls"] == 1
 
 
 def test_wealth_risk_summary_includes_downside_metrics():
@@ -270,7 +347,9 @@ def test_annualized_metrics_match_known_terminal_returns():
 
     assert summary["annualized_return"] == pytest.approx((120.0 / 100.0) ** 12 - 1.0)
     assert summary["annualized_volatility"] == pytest.approx((10.0 / 100.0) * np.sqrt(12))
-    assert summary["sharpe_ratio"] == pytest.approx(summary["annualized_return"] / summary["annualized_volatility"])
+    assert summary["sharpe_ratio"] == pytest.approx(
+        summary["annualized_return"] / summary["annualized_volatility"]
+    )
 
 
 def test_annualized_metrics_default_to_single_period_scaling():
@@ -329,3 +408,128 @@ def test_portfolio_rejects_non_finite_weights():
 
     with pytest.raises(ValueError, match="finite"):
         simulate_portfolio_paths(result, {"Stocks": np.nan})
+
+
+def _persistent_model() -> ScenarioModel:
+    from mc_quadrants.types import RegimeMoments
+
+    transition = pd.DataFrame(
+        [[0.95, 0.05], [0.05, 0.95]],
+        index=["state_a", "state_b"],
+        columns=["state_a", "state_b"],
+    )
+    moments = {
+        "state_a": RegimeMoments(
+            mean=pd.Series([0.01], index=["Stocks"]),
+            covariance=pd.DataFrame([[0.01]], index=["Stocks"], columns=["Stocks"]),
+            correlation=pd.DataFrame([[1.0]], index=["Stocks"], columns=["Stocks"]),
+            observations=100,
+        ),
+        "state_b": RegimeMoments(
+            mean=pd.Series([-0.01], index=["Stocks"]),
+            covariance=pd.DataFrame([[0.04]], index=["Stocks"], columns=["Stocks"]),
+            correlation=pd.DataFrame([[1.0]], index=["Stocks"], columns=["Stocks"]),
+            observations=100,
+        ),
+    }
+    return ScenarioModel(
+        states=["state_a", "state_b"],
+        transition_matrix=transition,
+        moments=moments,
+        metadata={"sojourn_durations": {"state_a": np.array([50]), "state_b": np.array([50])}},
+    )
+
+
+def _switches_per_path(regimes: np.ndarray) -> float:
+    changes = regimes[1:, :] != regimes[:-1, :]
+    return float(changes.sum(axis=0).mean())
+
+
+def test_semi_markov_sojourns_switch_less_than_markov_chain():
+    model = _persistent_model()
+
+    markov = simulate_regime_paths(model, periods=60, paths=40, random_seed=4)
+    semi = simulate_regime_paths(model, periods=60, paths=40, random_seed=4, duration_model="semi_markov")
+
+    assert markov.shape == (60, 40)
+    assert semi.shape == (60, 40)
+    assert _switches_per_path(semi) < _switches_per_path(markov)
+
+
+def test_semi_markov_requires_sojourn_metadata():
+    model = _persistent_model()
+    model.metadata.pop("sojourn_durations")
+
+    with pytest.raises(ValueError, match="sojourn_durations"):
+        simulate_regime_paths(model, periods=6, paths=2, duration_model="semi_markov")
+
+
+def test_semi_markov_rejects_unknown_duration_model():
+    model = _persistent_model()
+
+    with pytest.raises(ValueError, match="duration_model"):
+        simulate_regime_paths(model, periods=6, paths=2, duration_model="weibull")
+
+
+def test_garch_creates_volatility_clustering():
+    from mc_quadrants.types import RegimeMoments
+
+    moments = {
+        "only": RegimeMoments(
+            mean=pd.Series([0.0], index=["Stocks"]),
+            covariance=pd.DataFrame([[0.01]], index=["Stocks"], columns=["Stocks"]),
+            correlation=pd.DataFrame([[1.0]], index=["Stocks"], columns=["Stocks"]),
+            observations=1000,
+        )
+    }
+    model = ScenarioModel(
+        states=["only"],
+        transition_matrix=pd.DataFrame([[1.0]], index=["only"], columns=["only"]),
+        moments=moments,
+    )
+
+    def squared_autocorrelation(result: SimulationResult) -> float:
+        path = result.returns[:, 0, 0]
+        squared = path**2
+        centered = squared - squared.mean()
+        return float((centered[1:] * centered[:-1]).mean() / (centered**2).mean())
+
+    plain = simulate_returns(model, periods=600, paths=1, random_seed=11)
+    garch_result = simulate_returns(
+        model,
+        periods=600,
+        paths=1,
+        random_seed=11,
+        garch=True,
+        garch_alpha=0.12,
+        garch_beta=0.85,
+    )
+
+    assert squared_autocorrelation(garch_result) > squared_autocorrelation(plain)
+    assert np.isfinite(garch_result.returns).all()
+
+
+def test_garch_is_reproducible_and_validated():
+    model = _persistent_model()
+    first = simulate_returns(
+        model,
+        periods=12,
+        paths=5,
+        random_seed=2,
+        garch=True,
+    )
+    second = simulate_returns(
+        model,
+        periods=12,
+        paths=5,
+        random_seed=2,
+        garch=True,
+    )
+    assert np.array_equal(first.returns, second.returns)
+
+    with pytest.raises(ValueError, match="distribution='normal'"):
+        simulate_returns(model, periods=4, paths=2, distribution="student_t", garch=True)
+    with pytest.raises(ValueError, match="garch_alpha"):
+        simulate_returns(model, periods=4, paths=2, garch=True, garch_alpha=1.5)
+    with pytest.raises(ValueError, match="less than 1"):
+        simulate_returns(model, periods=4, paths=2, garch=True, garch_alpha=0.3, garch_beta=0.8)

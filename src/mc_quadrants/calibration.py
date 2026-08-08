@@ -5,8 +5,19 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
-from mc_quadrants.matrix import covariance_to_correlation, nearest_correlation, nearest_psd
-from mc_quadrants.regimes import REGIME_ORDER, ThresholdSpec, classify_quadrants, estimate_transition_matrix
+from mc_quadrants.matrix import (
+    covariance_to_correlation,
+    nearest_correlation,
+    nearest_psd,
+    nearest_psd_higham,
+)
+from mc_quadrants.regimes import (
+    REGIME_ORDER,
+    ThresholdSpec,
+    classify_quadrants,
+    estimate_transition_matrix,
+    sojourn_durations,
+)
 from mc_quadrants.types import RegimeMoments, ScenarioModel
 
 CorrelationOverrides = Mapping[str, Mapping[tuple[str, str], float]]
@@ -51,11 +62,55 @@ def _clean_aligned_returns(
     return clean_returns, aligned_regimes
 
 
+def _ledoit_wolf_alpha(
+    observations: np.ndarray,
+    sample_covariance: np.ndarray,
+    target: np.ndarray,
+) -> float:
+    """Return the Ledoit-Wolf optimal shrinkage intensity toward a target.
+
+    ``alpha`` minimizes the expected quadratic loss of the blended estimate
+    ``(1 - alpha) * S + alpha * T``. Its closed form (Ledoit & Wolf 2004)
+    scales the variance of each sample covariance entry by the squared
+    distance between ``S`` and ``T``, so sparse or short histories shrink
+    aggressively while long samples keep their empirical covariance.
+    """
+
+    observations = np.asarray(observations, dtype=float)
+    sample_covariance = np.asarray(sample_covariance, dtype=float)
+    target = np.asarray(target, dtype=float)
+    n, p = observations.shape
+    if n < 2 or p == 0:
+        return 1.0
+    deviations = observations - observations.mean(axis=0)
+    cross = np.einsum("ti,tj->tij", deviations, deviations)
+    biased = cross.mean(axis=0)
+    unbiased = biased * n / (n - 1.0)
+    variance = n / (n - 1.0) ** 3 * np.square(cross - biased).sum(axis=0)
+    numerator = float(variance.sum())
+    denominator = float(np.square(unbiased - target).sum())
+    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator <= 0:
+        return 1.0
+    return float(np.clip(numerator / denominator, 0.0, 1.0))
+
+
 def _blend_covariance(
     local_covariance: pd.DataFrame,
     global_covariance: pd.DataFrame,
-    shrinkage: float,
+    shrinkage: float | None,
+    observations: np.ndarray | None = None,
 ) -> pd.DataFrame:
+    if shrinkage is None:
+        alpha = (
+            _ledoit_wolf_alpha(
+                observations, local_covariance.to_numpy(dtype=float), global_covariance.to_numpy(dtype=float)
+            )
+            if observations is not None and len(observations) > 1
+            else 1.0
+        )
+        blended = (1.0 - alpha) * local_covariance + alpha * global_covariance
+        psd = nearest_psd_higham(blended.to_numpy(dtype=float))
+        return pd.DataFrame(psd, index=blended.index, columns=blended.columns)
     if not 0 <= shrinkage <= 1:
         raise ValueError("shrinkage must be between 0 and 1.")
     blended = (1.0 - shrinkage) * local_covariance + shrinkage * global_covariance
@@ -97,12 +152,16 @@ def estimate_regime_moments(
     regimes: pd.Series,
     states: list[str] | None = None,
     min_observations: int = 12,
-    shrinkage: float = 0.25,
+    shrinkage: float | None = None,
     correlation_overrides: CorrelationOverrides | None = None,
     override_weight: float = 1.0,
     regime_lag_periods: int = 0,
 ) -> dict[str, RegimeMoments]:
-    """Estimate asset mean/covariance/correlation separately for each regime."""
+    """Estimate asset mean/covariance/correlation separately for each regime.
+
+    ``shrinkage=None`` selects the Ledoit-Wolf optimal shrinkage intensity
+    toward the full-sample covariance instead of a fixed blend.
+    """
 
     if returns.empty:
         raise ValueError("returns must not be empty.")
@@ -132,14 +191,24 @@ def estimate_regime_moments(
         elif observations > 1:
             weight = observations / max(min_observations, 1)
             local_mean = weight * state_returns.mean() + (1.0 - weight) * global_mean
-            local_covariance = weight * state_returns.cov() + (1.0 - weight) * global_covariance
+            if shrinkage is None:
+                local_covariance = state_returns.cov()
+            else:
+                local_covariance = weight * state_returns.cov() + (1.0 - weight) * global_covariance
         else:
             local_mean = global_mean
             local_covariance = global_covariance
 
-        local_covariance = local_covariance.reindex(index=clean_returns.columns, columns=clean_returns.columns)
+        local_covariance = local_covariance.reindex(
+            index=clean_returns.columns, columns=clean_returns.columns
+        )
         local_covariance = local_covariance.fillna(global_covariance)
-        covariance = _blend_covariance(local_covariance, global_covariance, shrinkage)
+        covariance = _blend_covariance(
+            local_covariance,
+            global_covariance,
+            shrinkage,
+            observations=state_returns.to_numpy(dtype=float) if observations > 1 else None,
+        )
 
         state_overrides = correlation_overrides.get(state) if correlation_overrides else None
         covariance, correlation = _apply_correlation_overrides(
@@ -167,11 +236,12 @@ def calibrate_quadrant_model(
     inflation_threshold: ThresholdSpec = "median",
     transition_smoothing: float = 1.0,
     min_observations: int = 12,
-    shrinkage: float = 0.25,
+    shrinkage: float | None = None,
     correlation_overrides: CorrelationOverrides | None = None,
     override_weight: float = 1.0,
     macro_lag_periods: int = 0,
     frequency: str = "M",
+    threshold_window: int | None = None,
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
 
@@ -181,6 +251,7 @@ def calibrate_quadrant_model(
         inflation_col=inflation_col,
         growth_threshold=growth_threshold,
         inflation_threshold=inflation_threshold,
+        threshold_window=threshold_window,
     )
     transition_matrix = estimate_transition_matrix(
         regimes,
@@ -203,10 +274,7 @@ def calibrate_quadrant_model(
         regimes,
         lag_periods=macro_lag_periods,
     )
-    historical_returns = {
-        state: clean_returns.loc[aligned_regimes == state].copy()
-        for state in REGIME_ORDER
-    }
+    historical_returns = {state: clean_returns.loc[aligned_regimes == state].copy() for state in REGIME_ORDER}
 
     model = ScenarioModel(
         states=REGIME_ORDER.copy(),
@@ -223,6 +291,9 @@ def calibrate_quadrant_model(
             "min_observations": min_observations,
             "shrinkage": shrinkage,
             "transition_smoothing": transition_smoothing,
+            "threshold_window": threshold_window,
+            "model_kind": "quadrant",
+            "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER),
         },
     )
     model.validate()

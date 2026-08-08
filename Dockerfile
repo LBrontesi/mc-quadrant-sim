@@ -9,8 +9,7 @@ WORKDIR $HOME/app
 
 COPY --chown=user pyproject.toml README.md uv.lock ./
 COPY --chown=user src ./src
-COPY --chown=user web ./web
-COPY --chown=user web_app.py ./
+COPY --chown=user gradio_app.py streamlit_app.py ./
 
 RUN python -m pip install --no-cache-dir --user uv \
     && PATH="$HOME/.local/bin:$PATH" uv sync --frozen --extra data
@@ -18,5 +17,6 @@ RUN python -m pip install --no-cache-dir --user uv \
 ENV PATH="$HOME/app/.venv/bin:$HOME/.local/bin:$PATH"
 
 EXPOSE 7860
+EXPOSE 8501
 
 CMD ["python", "gradio_app.py"]
