@@ -100,8 +100,10 @@ def test_load_response_includes_portfolio_presets():
     assert len(presets) >= 5
     for preset in presets:
         assert "name" in preset and preset["weights"]
-        assert sum(preset["weights"].values()) == pytest.approx(100.0)
+    assert sum(preset["weights"].values()) == pytest.approx(100.0)
     assert any(preset["name"] == "Classic 60/40" for preset in presets)
+    assert "synthetic" in response
+    assert response["synthetic"] == {}
 
 
 def test_simulate_reports_real_terms_with_inflation():

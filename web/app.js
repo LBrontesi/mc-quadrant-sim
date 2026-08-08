@@ -634,6 +634,8 @@ function gatherLoadPayload() {
     payload.proxies = $("yahoo-proxies").value;
     payload.synthetic = Array.from(document.querySelectorAll('#synthetic-options input[type="checkbox"]:checked')).map((el) => el.value);
     payload.synthetic_seed = Number($("synthetic-seed").value);
+    payload.synthetic_method = $("synthetic-method").value;
+    payload.synthetic_categories = $("synthetic-categories").value;
   } else {
     payload.csv_prices = null;
     payload.csv_macro = null;
@@ -920,6 +922,36 @@ function renderCoverage(coverage) {
     : "<p class='status'>No coverage data.</p>";
 }
 
+const GRADE_LABELS = { A: "High confidence", B: "Moderate confidence", C: "Proxy / weak", X: "Not feasible" };
+const GRADE_COLORS = { A: "#10b981", B: "#f59e0b", C: "#f97316", X: "#ef4444" };
+
+function renderSyntheticReport(report) {
+  const container = $("synthetic-report");
+  const entries = Object.entries(report || {});
+  $("synthetic-card").classList.toggle("hidden", entries.length === 0);
+  if (!entries.length) {
+    container.innerHTML = "<p class='status'>No synthetic backfill assets selected.</p>";
+    return;
+  }
+  const rows = entries.map(([asset, info]) => {
+    const counts = Object.entries(info.observations_by_regime || {})
+      .map(([state, count]) => `${labelForState(state)}: ${count}`)
+      .join(" · ");
+    return "<tr>" +
+      `<td><strong>${escapeHtml(asset)}</strong></td>` +
+      `<td><span class="grade-badge" style="color:${GRADE_COLORS[info.grade] || "var(--muted)"};border-color:${GRADE_COLORS[info.grade] || "var(--border)"}">${escapeHtml(info.grade)} · ${escapeHtml(GRADE_LABELS[info.grade] || info.grade)}</span></td>` +
+      `<td>${escapeHtml(info.category || "-")}</td>` +
+      `<td>${Number(info.history_months || 0)}</td>` +
+      `<td>${info.factor_r2 === null || info.factor_r2 === undefined ? "-" : fmt(info.factor_r2, 2)}</td>` +
+      `<td>${escapeHtml(counts || "-")}</td>` +
+      `<td><span class="hint">${escapeHtml((info.warnings || []).join(" "))}</span></td>` +
+      "</tr>";
+  });
+  container.innerHTML = "<table><thead><tr>" +
+    "<th>Asset</th><th>Feasibility</th><th>Category</th><th>Observed months</th><th>Factor R²</th><th>Observations by regime</th><th>Warnings</th>" +
+    "</tr></thead><tbody>" + rows.join("") + "</tbody></table>";
+}
+
 const DISTRIBUTION_LABELS = {
   normal: "Normal",
   student_t: "Student-t",
@@ -1110,6 +1142,7 @@ async function onLoad() {
     renderWeightEditor();
     renderTables(data);
     renderCoverage(data.coverage);
+    renderSyntheticReport(data.synthetic);
     populatePresets(data.presets);
     $("preset-apply").disabled = false;
     $("portfolio-status").textContent = `${data.tickers.length} tickers available. Select tickers and set weights.`;
@@ -1233,6 +1266,7 @@ async function onDownloadWealth() {
 
 const CONTROL_IDS = [
   "demo-seed", "yahoo-tickers", "yahoo-start", "yahoo-end", "yahoo-proxies", "synthetic-seed",
+  "synthetic-method", "synthetic-categories",
   "csv-growth", "csv-inflation", "base-currency", "currency-map", "corr-blend",
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
   "macro-lag", "transition-uncertainty", "periods", "paths", "seed", "distribution",

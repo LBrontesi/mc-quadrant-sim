@@ -21,10 +21,13 @@ def test_web_ui_exposes_shared_methodology_controls():
 
     for control in ("model-kind", "hmm-states", "duration-model", "threshold-window", "garch", "walk-forward"):
         assert f'id="{control}"' in html
+    for control in ("synthetic-method", "synthetic-categories", "synthetic-report"):
+        assert f'id="{control}"' in html
     assert "cash_flow_adjusted_annualized_return" in javascript
     assert "validation-panel" in html
     assert "guide-status" in html
     assert "updateGuide" in javascript
+    assert "renderSyntheticReport" in javascript
     assert 'risk_free_rate: Number($("risk-free").value)' in javascript
 
 

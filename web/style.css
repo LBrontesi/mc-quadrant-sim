@@ -256,6 +256,16 @@ legend { font-size: 11px; color: var(--muted); padding: 0 6px; }
   font-weight: 600;
 }
 
+.grade-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .btn {
   padding: 10px 16px;
   border: 1px solid var(--border);

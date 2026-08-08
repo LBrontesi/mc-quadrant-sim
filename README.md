@@ -52,6 +52,46 @@ creates `IEFSIM` and `DBMFSIM` as stitched series for calibration. The generated
 segment is reproducible from its seed and calibrated from observed monthly
 returns; it is not an official index history.
 
+#### Regime-conditioned synthetic backfill
+
+The default backfill method (`synthetic_method="regime"`) reconstructs a
+pre-inception history from the actual historical economy rather than from the
+asset's full-sample moments alone:
+
+1. Every historical month is classified into the four growth/inflation
+   quadrants using the real FRED macro history for that date. Data-driven
+   thresholds (median/mean) use a causal expanding window; fixed numeric
+   thresholds classify every month without look-ahead.
+2. A factor model `r_asset = alpha + sum(beta_j * r_anchor,j) + epsilon` is
+   estimated on the asset's observed overlap against a default anchor universe
+   (`SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY`), which is fetched automatically.
+3. For each pre-inception month the synthetic return combines the real anchor
+   returns that month with a regime-specific residual when the asset has
+   enough observed history in that regime, falling back to regime moments or
+   the observed sample otherwise.
+4. Reconstructed backward price levels anchor to the first observed price:
+   `P_t = P_first * exp(-sum of synthetic log returns after t)`.
+
+Each synthetic asset gets a feasibility grade describing how much of its
+history rests on observed behavior versus projection:
+
+| Grade | Meaning |
+| --- | --- |
+| `A` | All regimes observed, stable factor model (R² ≥ 0.5) |
+| `B` | Partial regime coverage or moderate factor fit |
+| `C` | Weak factor fit, short history, or proxy needed |
+| `X` | Not enough observed history to backfill |
+
+The asset-category registry (`EQUITY`, `LONG_TERM_BOND`, `MANAGED_FUTURES`,
+and so on) provides default labels and can be overridden per asset with values
+such as `DBMF:MANAGED_FUTURES`. A `full_sample` method is also available for
+backward compatibility; it uses the asset's observed moments only.
+
+The critical assumption is that behavior estimated on the post-inception window
+applies to earlier anchor-based months. Synthetic pre-inception values are an
+explicit approximation for deeper backtests, not the fund's actual historical
+NAV.
+
 Portfolio currency conversion uses historical FX levels aligned to the return
 frequency. For an asset in EUR and a USD portfolio, the EUR local-currency log
 return is combined with the USD-per-EUR log FX return. A current spot quote is

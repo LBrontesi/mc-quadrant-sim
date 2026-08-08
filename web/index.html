@@ -88,6 +88,17 @@
               <legend>Synthetic backfill assets</legend>
               <div id="synthetic-options" class="check-list"></div>
               <label>Synthetic history seed <input type="number" id="synthetic-seed" value="42" min="1" step="1"></label>
+              <label>Backfill method
+                <select id="synthetic-method">
+                  <option value="regime" selected>Regime-conditioned (macro + factor)</option>
+                  <option value="full_sample">Full-sample statistics</option>
+                </select>
+                <span class="hint">Regime-conditioned uses the actual historical macro state per month plus a factor model from the asset's observed history.</span>
+              </label>
+              <label>Synthetic categories (ASSET:CATEGORY)
+                <input type="text" id="synthetic-categories" placeholder="DBMF:MANAGED_FUTURES">
+                <span class="hint">Optional category overrides, for example EQUITY, LONG_TERM_BOND, MANAGED_FUTURES.</span>
+              </label>
               <span class="hint">Selecting an asset adds its live ticker and creates *_SIM and *SIM series.</span>
             </fieldset>
           </div>
@@ -398,6 +409,11 @@
                 <div class="table-wrap" id="returns-preview"></div>
               </div>
             </div>
+          </section>
+          <section class="card" id="synthetic-card">
+            <h3>Synthetic Backfill Feasibility</h3>
+            <p class="caption">Grades describe how much of a synthetic pre-inception history rests on observed behavior versus projection. Synthetic series are approximations, not actual historical values.</p>
+            <div class="table-wrap" id="synthetic-report"></div>
           </section>
           <section class="card actions">
             <button id="download-summary" class="btn">Download risk summary</button>

@@ -326,22 +326,38 @@ def load_data_source(
         synthetic_assets = parse_tickers(payload.get("synthetic", []))
         tickers.extend(asset for asset in synthetic_assets if asset not in tickers)
         synthetic_seed = int(payload.get("synthetic_seed", 42))
+        synthetic_method = str(payload.get("synthetic_method", "regime"))
+        synthetic_categories = parse_pair_map(payload.get("synthetic_categories", ""), "category")
+        growth_threshold = _threshold_value(payload.get("growth_threshold", "median"))
+        inflation_threshold = _threshold_value(payload.get("inflation_threshold", "median"))
+        threshold_window = int(payload.get("threshold_window", 0) or 0) or None
+        macro_lag = int(payload.get("macro_lag", 1))
         start = str(payload.get("start", "1990-01-01"))
         end = str(payload.get("end", date.today().isoformat()))
-        macro, returns, available = load_market_data(
+        macro, returns, available, synthetic_report = load_market_data(
             tickers,
             start,
             end,
             historical_proxies=historical_proxies or None,
             synthetic_assets=synthetic_assets,
             synthetic_seed=synthetic_seed,
+            synthetic_method=synthetic_method,
+            synthetic_categories=synthetic_categories or None,
+            growth_threshold=growth_threshold,
+            inflation_threshold=inflation_threshold,
+            threshold_window=threshold_window,
+            macro_lag_periods=macro_lag,
         )
+        returns.attrs["synthetic_report"] = synthetic_report
         available_list = list(available)
         msg = f"Loaded {len(available_list)} tickers from Yahoo Finance."
         if historical_proxies:
             msg += f" Backfilled proxies: {', '.join(historical_proxies.values())}."
         if synthetic_assets:
             msg += f" Simulated sources: {', '.join(f'{asset}SIM' for asset in synthetic_assets)}."
+        if synthetic_report:
+            grades = ", ".join(f"{name}:{info['grade']}" for name, info in synthetic_report.items())
+            msg += f" Synthetic feasibility: {grades}."
         return macro, returns, available_list, "growth", "inflation", msg
 
     if source == "csv":
@@ -425,6 +441,7 @@ def build_load_response(
         "presets": [{"name": name, "weights": dict(weights)} for name, weights in PORTFOLIO_PRESETS.items()],
         "macro": _frame_preview(macro, columns=[growth_col, inflation_col]),
         "returns": _frame_preview(returns),
+        "synthetic": returns.attrs.get("synthetic_report", {}),
     }
 
 
