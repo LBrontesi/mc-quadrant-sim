@@ -437,6 +437,9 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     duration_model = str(payload.get("duration_model", "markov")).lower()
     if duration_model not in {"markov", "semi_markov"}:
         raise ValueError("Unknown duration model (expected 'markov' or 'semi_markov').")
+    min_regime_duration = int(payload.get("min_regime_duration", 3))
+    if min_regime_duration < 1:
+        raise ValueError("min_regime_duration must be at least 1.")
     hmm_states = int(payload.get("hmm_states", 4))
     if not 2 <= hmm_states <= 8:
         raise ValueError("hmm_states must be between 2 and 8.")
@@ -521,6 +524,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "hmm_states": hmm_states,
         "threshold_window": threshold_window,
         "duration_model": duration_model,
+        "min_regime_duration": min_regime_duration,
         "garch": garch,
         "garch_alpha": garch_alpha,
         "garch_beta": garch_beta,

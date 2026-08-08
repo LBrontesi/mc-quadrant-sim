@@ -147,13 +147,14 @@ def classify_quadrants(
     return regimes.astype("string")
 
 
-def sojourn_durations(regime_series: pd.Series, states: Iterable[str]) -> dict[str, np.ndarray]:
+def sojourn_durations(regime_series: pd.Series, states: Iterable[str], min_length: int = 1) -> dict[str, np.ndarray]:
     """Extract the empirical run-length distribution of each state.
 
     A sojourn is a maximal consecutive run of the same state. The resulting
     distributions are fatter-tailed than the geometric lengths implied by a
     first-order Markov chain, which is why regimes persist longer in reality
-    than a naive chain suggests.
+    than a naive chain suggests.  Set *min_length* to exclude threshold-noise
+    single-month flips from the empirical distribution.
     """
 
     state_list = list(dict.fromkeys(states))
@@ -168,10 +169,12 @@ def sojourn_durations(regime_series: pd.Series, states: Iterable[str]) -> dict[s
         if consecutive[position] and str(observation) == current_state:
             length += 1
         else:
-            durations[current_state].append(length)
+            if length >= min_length:
+                durations[current_state].append(length)
             current_state = str(observation)
             length = 1
-    durations[current_state].append(length)
+    if length >= min_length:
+        durations[current_state].append(length)
     return {state: np.array(lengths, dtype=int) for state, lengths in durations.items()}
 
 

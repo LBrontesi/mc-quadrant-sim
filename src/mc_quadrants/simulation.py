@@ -79,21 +79,26 @@ def _sample_sojourn(
     duration_map: dict[str, np.ndarray],
     states: list[str],
     transition: np.ndarray,
+    min_duration: int = 3,
 ) -> int:
     """Draw a sojourn length for a state from its empirical run distribution.
 
     States never observed in history fall back to the geometric duration
-    implied by the transition matrix, capped to stay conservative.
+    implied by the transition matrix, capped to stay conservative. A minimum
+    duration floor prevents unrealistic single-period regime flips.
     """
 
     observed = duration_map.get(states[state], np.array([], dtype=int))
     if len(observed):
-        return int(rng.choice(observed))
+        valid = observed[observed >= min_duration]
+        if len(valid):
+            return int(rng.choice(valid))
+        return int(np.maximum(int(rng.choice(observed)), min_duration))
     persistence = float(transition[state, state])
     if persistence < 1.0:
         mean_duration = 1.0 / (1.0 - persistence)
-        return int(np.clip(round(mean_duration), 1, 240))
-    return 1
+        return int(np.clip(round(mean_duration), min_duration, 240))
+    return max(min_duration, 1)
 
 
 def simulate_regime_paths(
@@ -104,6 +109,7 @@ def simulate_regime_paths(
     random_seed: int | None = None,
     transition_concentration: float | None = None,
     duration_model: str = "markov",
+    min_regime_duration: int = 3,
 ) -> np.ndarray:
     """Simulate Markov (or semi-Markov) regime paths.
 
@@ -173,7 +179,7 @@ def simulate_regime_paths(
             probabilities = probabilities / max(float(probabilities.sum()), 1e-300)
             following = rng.choice(other_states, size=mask.sum(), p=probabilities)
             next_sojourns = np.array(
-                [_sample_sojourn(rng, int(index), sojourns, states, transition) for index in following],
+                [_sample_sojourn(rng, int(index), sojourns, states, transition, min_regime_duration) for index in following],
                 dtype=int,
             )
             current[mask] = following
@@ -192,6 +198,7 @@ def simulate_returns(
     block_size: int = 3,
     transition_concentration: float | None = None,
     duration_model: str = "markov",
+    min_regime_duration: int = 3,
     garch: bool = False,
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
@@ -243,6 +250,7 @@ def simulate_returns(
         random_seed=random_seed,
         transition_concentration=transition_concentration,
         duration_model=duration_model,
+        min_regime_duration=min_regime_duration,
     )
     rng = _rng(None if random_seed is None else random_seed + 1)
     assets = model.assets

@@ -201,6 +201,10 @@
                 <option value="semi_markov" selected>Semi-Markov (empirical sojourns)</option>
               </select>
             </label>
+            <label id="min-duration-group">Min regime months
+              <input type="number" id="min-regime-duration" value="3" min="1" max="24" step="1">
+              <span class="hint">Regimes forced to last at least this many months. Single-month flips are filtered from calibration.</span>
+            </label>
           </div>
           <label id="threshold-window-group">Causal threshold window
             <input type="number" id="threshold-window" value="12" min="0" step="1">
@@ -298,7 +302,7 @@
           </details>
           <button id="equalize-btn" class="btn btn-ghost btn-sm">Equalize</button>
           <button id="reset-btn" class="btn btn-ghost btn-sm">Reset</button>
-          <select id="preset-select"><option value="">Presets</option></select>
+          <select id="preset-select" class="preset-select"><option value="">Presets</option></select>
           <button id="preset-apply" class="btn btn-sm" disabled>Apply</button>
         </div>
         <p id="weight-total" class="status inline-status"></p>

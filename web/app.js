@@ -655,6 +655,7 @@ function gatherScenario() {
     hmm_states: Number($("hmm-states").value),
     threshold_window: Number($("threshold-window").value),
     duration_model: $("duration-model").value,
+    min_regime_duration: Number($("min-regime-duration").value),
     garch: $("garch").checked,
     walk_forward: $("walk-forward").checked,
   };
@@ -693,6 +694,7 @@ function updateMethodologyControls() {
   $("correlation-override-controls").classList.toggle("hidden", isHMM);
   $("corr-blend-group").classList.toggle("hidden", isHMM);
   $("start-state-group").classList.toggle("hidden", isHMM);
+  $("min-duration-group").classList.toggle("hidden", isHMM);
   $("student-t-group").classList.toggle("hidden", distribution !== "student_t");
   $("block-size-group").classList.toggle("hidden", distribution !== "block_bootstrap");
   $("cost-bps").disabled = legacy;
@@ -891,6 +893,7 @@ function populatePresets(presets) {
     select.appendChild(option);
   });
   select.value = current && presets.some((p) => p.name === current) ? current : "";
+  $("preset-apply").disabled = !select.value;
 }
 
 /* ---------- Tabs ---------- */
@@ -1224,7 +1227,6 @@ async function onLoad() {
     renderCoverage(data.coverage);
     renderSyntheticReport(data.synthetic);
     populatePresets(data.presets);
-    $("preset-apply").disabled = false;
     $("portfolio-status").textContent = `${data.tickers.length} tickers available. Toggle assets and set weights.`;
     $("data-empty").classList.add("hidden");
     $("data-content").classList.remove("hidden");
@@ -1354,7 +1356,7 @@ const CONTROL_IDS = [
   "macro-lag", "transition-uncertainty", "periods", "paths", "seed", "distribution",
   "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "contribution", "withdrawal",
   "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate", "maintenance-margin",
-  "model-kind", "hmm-states", "threshold-window", "duration-model",
+  "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
 ];
 
 function saveControls() {
@@ -1510,6 +1512,7 @@ function init() {
   $("download-wealth").addEventListener("click", onDownloadWealth);
   $("download-json").addEventListener("click", onDownloadJson);
   $("preset-apply").addEventListener("click", applyPreset);
+  $("preset-select").addEventListener("change", () => { $("preset-apply").disabled = !$("preset-select").value; });
   $("theme-toggle").addEventListener("click", toggleTheme);
   $("equalize-btn").addEventListener("click", equalizeWeights);
   $("reset-btn").addEventListener("click", resetControls);

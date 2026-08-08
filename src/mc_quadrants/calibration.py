@@ -242,6 +242,7 @@ def calibrate_quadrant_model(
     macro_lag_periods: int = 0,
     frequency: str = "M",
     threshold_window: int | None = None,
+    min_regime_duration: int = 1,
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
 
@@ -293,7 +294,7 @@ def calibrate_quadrant_model(
             "transition_smoothing": transition_smoothing,
             "threshold_window": threshold_window,
             "model_kind": "quadrant",
-            "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER),
+            "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER, min_length=min_regime_duration),
         },
     )
     model.validate()

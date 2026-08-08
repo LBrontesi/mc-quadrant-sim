@@ -72,6 +72,7 @@ def run_scenario(
     hmm_states: int = 4,
     threshold_window: int | None = None,
     duration_model: str = "markov",
+    min_regime_duration: int = 3,
     garch: bool = False,
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
@@ -187,6 +188,7 @@ def run_scenario(
             None if transition_uncertainty == 0.0 else max(1.0, 1.0 / transition_uncertainty**2)
         ),
         duration_model=duration_model,
+        min_regime_duration=int(min_regime_duration),
         garch=garch,
         garch_alpha=float(garch_alpha),
         garch_beta=float(garch_beta),
