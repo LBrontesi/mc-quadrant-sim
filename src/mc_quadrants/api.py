@@ -698,7 +698,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         },
         "terminal": wealth.iloc[-1].tolist(),
         "drawdowns": _max_drawdown_paths(wealth).tolist(),
-        "regime_timeline": [str(state) for state in result.regimes[0]],
+        "regime_timeline": [str(state) for state in result.regimes[:, 0]],
         "regime_mix": [{"label": label, "share": float(share)} for label, share in regime_mix.items()],
         "transition": {
             "labels": [_state_label(state) for state in model.transition_matrix.index],
