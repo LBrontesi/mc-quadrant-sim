@@ -755,28 +755,29 @@ function renderWeightEditor() {
     return;
   }
   selected.forEach((ticker) => {
-    const row = document.createElement("div");
-    row.className = "allocation-row";
+    const pill = document.createElement("div");
+    pill.className = "asset-pill";
     const swatch = document.createElement("span");
-    swatch.className = "allocation-swatch";
+    swatch.className = "asset-swatch";
     swatch.style.background = assetColor(ticker);
     const name = document.createElement("span");
-    name.className = "ticker";
+    name.className = "asset-ticker";
     name.textContent = ticker;
     const input = document.createElement("input");
     input.type = "number";
     input.min = "0";
     input.max = "100";
     input.step = "1";
+    input.className = "asset-weight";
     const weight = state.weights[ticker] ?? defaultWeight(ticker);
     state.weights[ticker] = weight;
     input.value = weight;
     input.addEventListener("input", () => { state.weights[ticker] = Number(input.value); updateWeightTotal(); });
     const unit = document.createElement("span");
-    unit.className = "weight-unit";
+    unit.className = "asset-pct";
     unit.textContent = "%";
     const remove = document.createElement("button");
-    remove.className = "allocation-remove";
+    remove.className = "asset-remove";
     remove.type = "button";
     remove.title = "Remove asset";
     remove.textContent = "×";
@@ -786,8 +787,8 @@ function renderWeightEditor() {
       delete state.weights[ticker];
       renderWeightEditor();
     });
-    row.append(swatch, name, input, unit, remove);
-    container.appendChild(row);
+    pill.append(swatch, name, input, unit, remove);
+    container.appendChild(pill);
   });
   state.selected = selected;
   updateWeightTotal();
@@ -1429,10 +1430,6 @@ function resetControls() {
   location.reload();
 }
 
-function setSectionsOpen(open) {
-  document.querySelectorAll("#controls details").forEach((details) => { details.open = open; });
-}
-
 function onDownloadJson() {
   if (!state.results) {
     notify("Run a simulation first.", "error");
@@ -1516,8 +1513,6 @@ function init() {
   $("theme-toggle").addEventListener("click", toggleTheme);
   $("equalize-btn").addEventListener("click", equalizeWeights);
   $("reset-btn").addEventListener("click", resetControls);
-  $("expand-all").addEventListener("click", () => setSectionsOpen(true));
-  $("collapse-all").addEventListener("click", () => setSectionsOpen(false));
 
   document.addEventListener("input", () => { saveControls(); updateMethodologyControls(); });
   document.addEventListener("change", () => { saveControls(); updateMethodologyControls(); });

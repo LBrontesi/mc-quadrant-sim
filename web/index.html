@@ -25,39 +25,51 @@
   </header>
 
   <div class="layout">
-    <aside class="panel panel-side" id="controls">
-      <div class="row-actions">
-        <button id="expand-all" class="btn btn-ghost">Expand all</button>
-        <button id="collapse-all" class="btn btn-ghost">Collapse all</button>
+    <main class="panel" id="main-content">
+      <details class="guide-mini">
+        <summary>Getting started</summary>
+        <p class="guide-intro">Run your first scenario in five steps. Real market data from Yahoo Finance / FRED is loaded by default.</p>
+        <ol class="guide-list">
+          <li id="guide-data" class="guide-step">
+            <span class="guide-number">1</span>
+            <div><strong>Load market data</strong><span>Configure tickers in Market data, then click <b>Load Data</b>. You can optionally upload your own CSVs in the Custom data section.</span></div>
+          </li>
+          <li id="guide-portfolio" class="guide-step">
+            <span class="guide-number">2</span>
+            <div><strong>Build an allocation</strong><span>Toggle assets and edit weights in the allocation bar, or apply a preset such as Classic 60/40.</span></div>
+          </li>
+          <li id="guide-methodology" class="guide-step">
+            <span class="guide-number">3</span>
+            <div><strong>Review assumptions</strong><span>Defaults use quadrant regimes, semi-Markov durations, and walk-forward validation.</span></div>
+          </li>
+          <li id="guide-run" class="guide-step">
+            <span class="guide-number">4</span>
+            <div><strong>Run the simulation</strong><span>Set the horizon and path count if needed, then click <b>Run Simulation</b>.</span></div>
+          </li>
+          <li id="guide-read" class="guide-step">
+            <span class="guide-number">5</span>
+            <div><strong>Read and export</strong><span>Use Growth for outcomes, Diagnostics for model health, and Data for previews and downloads.</span></div>
+          </li>
+        </ol>
+        <p id="guide-status" class="guide-status">Next: load the market data.</p>
+      </details>
+
+      <div class="action-bar">
+        <div class="action-bar-buttons">
+          <button id="load-btn" class="btn btn-primary">Load Data</button>
+          <button id="run-btn" class="btn btn-primary btn-lg" disabled>Run Simulation</button>
+          <button id="compare-btn" class="btn" disabled>Compare</button>
+        </div>
+        <div class="action-bar-status">
+          <p id="load-message" class="status inline-status"></p>
+          <p id="run-message" class="status inline-status"></p>
+        </div>
       </div>
-      <section class="control-group" id="allocation-section">
-        <details open>
-          <summary>Allocation</summary>
-          <p class="status" id="portfolio-status">Load data to select assets.</p>
-          <div id="allocation-list"></div>
-          <p id="weight-total" class="status"></p>
-          <div class="row-actions">
-            <button id="equalize-btn" class="btn btn-ghost">Equalize</button>
-            <button id="reset-btn" class="btn btn-ghost">Reset</button>
-          </div>
-          <details class="sub-details">
-            <summary>Add assets</summary>
-            <div id="ticker-list" class="check-list"></div>
-          </details>
-          <div class="two-col">
-            <label>Preset
-              <select id="preset-select"><option value="">— choose —</option></select>
-            </label>
-            <button id="preset-apply" class="btn" disabled>Apply</button>
-          </div>
-          <span class="hint">Presets inspired by PortfolioCharts, mapped onto the loaded tickers.</span>
-        </details>
-      </section>
-      <section class="control-group" id="market-data-section">
+
+      <div class="settings-panel">
         <details open>
           <summary>Market data</summary>
           <p class="hint">Real history from Yahoo Finance and FRED. Tickers default to a diversified set; you can edit them or add synthetic backfills.</p>
-
           <div class="group yahoo-group" id="yahoo-group">
             <label>Market tickers
               <textarea id="yahoo-tickers" rows="2">SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY</textarea>
@@ -88,14 +100,27 @@
               <span class="hint">Selecting an asset adds its live ticker and creates *_SIM and *SIM series.</span>
             </fieldset>
           </div>
-
-          <button id="load-btn" class="btn btn-primary btn-block">Load Data</button>
-          <p id="load-message" class="status"></p>
         </details>
-      </section>
 
-      <section class="control-group" id="correlation-section">
-        <details open>
+        <details id="custom-data-toggle">
+          <summary>Custom data (optional)</summary>
+          <p class="hint">Instead of the market data above, you can run the analysis on your own asset and macro CSV files.</p>
+          <label class="check-inline"><input type="checkbox" id="csv-enabled"> Use custom CSV files</label>
+          <label>Asset CSV <input type="file" id="csv-prices" accept=".csv"></label>
+          <label>Macro CSV <input type="file" id="csv-macro" accept=".csv"></label>
+          <div class="radio-row">
+            <label class="pill"><input type="radio" name="asset-input" value="Price levels" checked> Price levels</label>
+            <label class="pill"><input type="radio" name="asset-input" value="Returns"> Returns</label>
+          </div>
+          <label class="check-inline"><input type="checkbox" id="csv-monthly" checked> Monthly asset returns</label>
+          <div class="two-col">
+            <label>Growth column <input type="text" id="csv-growth" value="growth"></label>
+            <label>Inflation column <input type="text" id="csv-inflation" value="inflation"></label>
+          </div>
+          <span class="hint">Both files need a <code>Date</code> column.</span>
+        </details>
+
+        <details id="correlation-section">
           <summary>Currency &amp; correlations</summary>
           <div class="two-col">
             <label>Portfolio currency
@@ -119,10 +144,8 @@
             <span class="hint">Applies to the first two selected tickers.</span>
           </div>
         </details>
-      </section>
 
-      <section class="control-group" id="quadrant-calibration">
-        <details>
+        <details id="quadrant-calibration">
           <summary>Calibration</summary>
           <div class="two-col">
             <label>Growth threshold
@@ -158,9 +181,7 @@
             <span class="hint">0 uses the calibrated matrix; higher values sample more uncertain transitions.</span>
           </label>
         </details>
-      </section>
 
-      <section class="control-group">
         <details>
           <summary>Model methodology</summary>
           <label>Regime model
@@ -190,9 +211,7 @@
           <label class="check-inline" id="walk-forward-group"><input type="checkbox" id="walk-forward" checked> Walk-forward validation</label>
           <span class="hint">Validation is an out-of-sample regime-signal check against an unconditional benchmark.</span>
         </details>
-      </section>
 
-      <section class="control-group">
         <details>
           <summary>Simulation</summary>
           <div class="two-col">
@@ -264,65 +283,29 @@
             </label>
           </div>
         </details>
-      </section>
+      </div>
 
-      <section class="control-group" id="custom-data-section">
-        <details>
-          <summary>Custom data (optional)</summary>
-          <p class="hint">Instead of the market data above, you can run the analysis on your own asset and macro CSV files.</p>
-          <label class="check-inline"><input type="checkbox" id="csv-enabled"> Use custom CSV files</label>
-          <label>Asset CSV <input type="file" id="csv-prices" accept=".csv"></label>
-          <label>Macro CSV <input type="file" id="csv-macro" accept=".csv"></label>
-          <div class="radio-row">
-            <label class="pill"><input type="radio" name="asset-input" value="Price levels" checked> Price levels</label>
-            <label class="pill"><input type="radio" name="asset-input" value="Returns"> Returns</label>
-          </div>
-          <label class="check-inline"><input type="checkbox" id="csv-monthly" checked> Monthly asset returns</label>
-          <div class="two-col">
-            <label>Growth column <input type="text" id="csv-growth" value="growth"></label>
-            <label>Inflation column <input type="text" id="csv-inflation" value="inflation"></label>
-          </div>
-          <span class="hint">Both files need a <code>Date</code> column. Upload both, then click <b>Load Data</b> in the Market data section.</span>
-        </details>
-      </section>
+      <div class="allocation-bar">
+        <div class="allocation-bar-header">
+          <span class="allocation-bar-title">Allocation</span>
+          <p id="portfolio-status" class="status inline-status">Load data to select assets.</p>
+        </div>
+        <div id="allocation-list" class="asset-pills"></div>
+        <div class="allocation-controls">
+          <details class="add-assets">
+            <summary>+ Add assets</summary>
+            <div id="ticker-list" class="check-list"></div>
+          </details>
+          <button id="equalize-btn" class="btn btn-ghost btn-sm">Equalize</button>
+          <button id="reset-btn" class="btn btn-ghost btn-sm">Reset</button>
+          <select id="preset-select"><option value="">Presets</option></select>
+          <button id="preset-apply" class="btn btn-sm" disabled>Apply</button>
+        </div>
+        <p id="weight-total" class="status inline-status"></p>
+      </div>
 
-      <section class="control-group guide-group">
-        <details>
-          <summary>Start here</summary>
-          <p class="guide-intro">Run your first scenario in five steps. Real market data from Yahoo Finance / FRED is loaded by default.</p>
-          <ol class="guide-list">
-            <li id="guide-data" class="guide-step">
-              <span class="guide-number">1</span>
-              <div><strong>Load market data</strong><span>Keep the default tickers, then click <b>Load Data</b>. You can optionally upload your own CSVs in the Custom data section.</span></div>
-            </li>
-            <li id="guide-portfolio" class="guide-step">
-              <span class="guide-number">2</span>
-              <div><strong>Build an allocation</strong><span>Toggle assets and edit weights in the Allocation panel, or apply a preset such as Classic 60/40.</span></div>
-            </li>
-            <li id="guide-methodology" class="guide-step">
-              <span class="guide-number">3</span>
-              <div><strong>Review assumptions</strong><span>Defaults use quadrant regimes, a 12-period causal window, semi-Markov durations, and walk-forward validation.</span></div>
-            </li>
-            <li id="guide-run" class="guide-step">
-              <span class="guide-number">4</span>
-              <div><strong>Run the simulation</strong><span>Set the horizon and path count if needed, then click <b>Run Simulation</b>.</span></div>
-            </li>
-            <li id="guide-read" class="guide-step">
-              <span class="guide-number">5</span>
-              <div><strong>Read and export</strong><span>Use Growth for outcomes, Diagnostics for model health, and Data for previews and downloads.</span></div>
-            </li>
-          </ol>
-          <p id="guide-status" class="guide-status">Next: load the market data.</p>
-        </details>
-      </section>
-
-      <button id="run-btn" class="btn btn-primary btn-block btn-lg" disabled>Run Simulation</button>
-      <button id="compare-btn" class="btn btn-block" disabled>Compare Normal vs Student-t</button>
       <p id="scenario-status" class="status"></p>
-      <p id="run-message" class="status"></p>
-    </aside>
 
-    <main class="panel panel-main" id="results">
       <div class="tabs" id="result-tabs">
         <button class="tab-btn active" data-tab="tab-growth">Growth</button>
         <button class="tab-btn" data-tab="tab-returns">Returns</button>
