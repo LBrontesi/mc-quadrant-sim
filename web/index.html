@@ -12,7 +12,7 @@
 
   <header class="app-header">
     <div class="brand">
-      <div class="brand-mark">MC</div>
+      <img class="brand-logo" src="/logo.png" alt="MC Quadrant Simulator logo">
       <div>
         <h1>Four-Quadrant Monte Carlo Simulator</h1>
         <p class="subtitle">Goldilocks · Overheating · Stagflation · Recession — regime-based portfolio simulation</p>
@@ -30,10 +30,10 @@
         <summary>Getting started</summary>
         <p class="guide-intro">Run your first scenario in five steps. Real market data from Yahoo Finance / FRED is loaded by default.</p>
         <ol class="guide-list">
-          <li id="guide-data" class="guide-step">
-            <span class="guide-number">1</span>
-            <div><strong>Load market data</strong><span>Configure tickers in Market data, then click <b>Load Data</b>. You can optionally upload your own CSVs in the Custom data section.</span></div>
-          </li>
+            <li id="guide-data" class="guide-step">
+              <span class="guide-number">1</span>
+              <div><strong>Market data loads automatically</strong><span>Default tickers are pre-loaded on start. Edit them in the Market data settings below and Run to refresh.</span></div>
+            </li>
           <li id="guide-portfolio" class="guide-step">
             <span class="guide-number">2</span>
             <div><strong>Build an allocation</strong><span>Toggle assets and edit weights in the allocation bar, or apply a preset such as Classic 60/40.</span></div>
@@ -51,12 +51,11 @@
             <div><strong>Read and export</strong><span>Use Growth for outcomes, Diagnostics for model health, and Data for previews and downloads.</span></div>
           </li>
         </ol>
-        <p id="guide-status" class="guide-status">Next: load the market data.</p>
+        <p id="guide-status" class="guide-status">Loading market data...</p>
       </details>
 
       <div class="action-bar">
         <div class="action-bar-buttons">
-          <button id="load-btn" class="btn btn-primary">Load Data</button>
           <button id="run-btn" class="btn btn-primary btn-lg" disabled>Run Simulation</button>
           <button id="compare-btn" class="btn" disabled>Compare</button>
         </div>
@@ -220,7 +219,7 @@
           <summary>Simulation</summary>
           <div class="two-col">
             <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12"></label>
-            <label>Paths <input type="number" id="paths" value="3000" min="250" max="20000" step="250"></label>
+            <label>Paths <input type="number" id="paths" value="100000" min="250" max="500000" step="1000"></label>
           </div>
           <div class="two-col">
             <label>Random seed <input type="number" id="seed" value="7" min="1" step="1"></label>
@@ -262,10 +261,16 @@
               <input type="number" id="financing-rate" value="0" min="0" max="30" step="0.1">
             </label>
           </div>
-          <label>Maintenance margin (%)
-            <input type="number" id="maintenance-margin" value="0" min="0" max="90" step="1">
-            <span class="hint">Optional liquidation threshold based on equity/assets.</span>
-          </label>
+          <div class="two-col">
+            <label>Inflation-linked financing sensitivity
+              <input type="number" id="financing-inflation-sensitivity" value="0" min="0" max="3" step="0.1">
+              <span class="hint">Financing rate = base + sensitivity × regime inflation. 1.0 passes state inflation through fully.</span>
+            </label>
+            <label>Maintenance margin (%)
+              <input type="number" id="maintenance-margin" value="0" min="0" max="90" step="1">
+              <span class="hint">Optional liquidation threshold based on equity/assets.</span>
+            </label>
+          </div>
           <div class="two-col">
             <label>Risk-free rate (annual %)
               <input type="number" id="risk-free" value="0" min="-5" max="20" step="0.1">
@@ -324,8 +329,8 @@
       <div id="tab-growth" class="tab-panel active">
         <div id="intro" class="empty-state">
           <h2>Welcome to the Four-Quadrant Simulator</h2>
-          <p><strong>Market data</strong> is loaded from Yahoo Finance / FRED by default (with optional proxies and synthetic backfills). To use your own history, upload asset and macro <strong>CSVs</strong> in the Custom data section.</p>
-          <p>1. Load data &nbsp;·&nbsp; 2. Set the allocation &nbsp;·&nbsp; 3. Run the simulation</p>
+          <p>Market data loads automatically on start. Edit tickers in <strong>Market data</strong> settings, then <strong>Run Simulation</strong> — the app loads and simulates in one step.</p>
+          <p>1. Data loads on open &nbsp;·&nbsp; 2. Set the allocation &nbsp;·&nbsp; 3. Run the simulation</p>
         </div>
         <div id="growth-content" class="hidden">
           <div id="scenario-chips" class="chips"></div>
@@ -346,7 +351,7 @@
           </section>
           <div class="chart-grid">
             <div class="card card-wide"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
-            <div class="card card-wide"><h3>Regime Timeline (sample path)</h3><div class="chart" id="chart-timeline"></div></div>
+            <div class="card card-wide"><h3>Regime Timeline (P05 / Median / P95 paths)</h3><div class="chart" id="chart-timeline"></div></div>
           </div>
         </div>
       </div>

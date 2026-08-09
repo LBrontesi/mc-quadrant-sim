@@ -362,8 +362,17 @@ def _simulate_leveraged_portfolio_paths(
     maintenance_margin: float,
     contribution: float,
     withdrawal: float,
+    regimes: np.ndarray | None = None,
+    state_financing_rates: Mapping[str, float] | None = None,
 ) -> pd.DataFrame:
-    """Simulate leveraged holdings with explicit debt and financing costs."""
+    """Simulate leveraged holdings with explicit debt and financing costs.
+
+    ``state_financing_rates`` maps each regime state to an annual financing
+    rate (decimal). When supplied together with the per-period, per-path
+    ``regimes`` array, the monthly financing charge applied to each path
+    depends on the regime that path is currently in; otherwise the scalar
+    ``financing_rate`` is used for every path and period.
+    """
 
     periods, paths, assets = asset_growth.shape
     holdings = np.broadcast_to(
@@ -373,15 +382,25 @@ def _simulate_leveraged_portfolio_paths(
     debt = np.full(paths, initial_value * (leverage_multiple - 1.0), dtype=float)
     wealth = np.empty((periods, paths), dtype=float)
     margin_calls = np.zeros(paths, dtype=bool)
-    financing_growth = (1.0 + financing_rate) ** (1.0 / 12.0)
     cost_rate = float(transaction_cost_bps) / 10_000.0
+
+    if regimes is not None and state_financing_rates:
+        unique_states = np.unique(regimes.ravel())
+        rate_by_state = np.array(
+            [float(state_financing_rates.get(state, financing_rate)) for state in unique_states]
+        )
+        growth_lookup = (1.0 + rate_by_state) ** (1.0 / 12.0)
+        state_codes = np.searchsorted(unique_states, regimes.ravel()).reshape(regimes.shape)
+        financing_growth = growth_lookup[state_codes]
+    else:
+        financing_growth = (1.0 + financing_rate) ** (1.0 / 12.0)
 
     for period in range(periods):
         if contribution:
             holdings += contribution * leverage_multiple * target_weights
             debt += contribution * (leverage_multiple - 1.0)
         holdings *= asset_growth[period]
-        debt *= financing_growth
+        debt *= financing_growth[period] if np.ndim(financing_growth) == 2 else financing_growth
 
         asset_value = holdings.sum(axis=1)
         equity = asset_value - debt
@@ -450,6 +469,8 @@ def simulate_portfolio_paths(
     asset_expense_ratios: Mapping[str, float] | None = None,
     leverage_multiple: float = 1.0,
     financing_rate: float = 0.0,
+    financing_inflation_sensitivity: float = 0.0,
+    state_inflation: Mapping[str, float] | None = None,
     maintenance_margin: float = 0.0,
     contribution: float = 0.0,
     withdrawal: float = 0.0,
@@ -482,6 +503,8 @@ def simulate_portfolio_paths(
         raise ValueError("leverage_multiple must be at least 1.0.")
     if not np.isfinite(financing_rate) or financing_rate < 0:
         raise ValueError("financing_rate must be a finite, non-negative number.")
+    if not np.isfinite(financing_inflation_sensitivity) or financing_inflation_sensitivity < 0:
+        raise ValueError("financing_inflation_sensitivity must be a finite, non-negative number.")
     if not np.isfinite(maintenance_margin) or not 0 <= maintenance_margin < 1:
         raise ValueError("maintenance_margin must be between 0 and 1.")
     if np.isclose(leverage_multiple, 1.0) and not np.isclose(maintenance_margin, 0.0):
@@ -567,6 +590,12 @@ def simulate_portfolio_paths(
         or not np.isclose(financing_rate, 0.0)
         or not np.isclose(maintenance_margin, 0.0)
     ):
+        state_financing_rates = None
+        if not np.isclose(financing_inflation_sensitivity, 0.0) and result.states and state_inflation:
+            state_financing_rates = {
+                state: financing_rate + financing_inflation_sensitivity * float(state_inflation.get(state, 0.0))
+                for state in result.states
+            }
         return _simulate_leveraged_portfolio_paths(
             asset_growth,
             target_weights,
@@ -578,6 +607,8 @@ def simulate_portfolio_paths(
             maintenance_margin,
             contribution,
             withdrawal,
+            regimes=result.regimes if state_financing_rates else None,
+            state_financing_rates=state_financing_rates,
         )
     holdings = np.broadcast_to(
         initial_value * target_weights,

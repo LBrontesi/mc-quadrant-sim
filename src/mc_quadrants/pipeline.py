@@ -58,6 +58,7 @@ def run_scenario(
     asset_expense_ratios: Mapping[str, float] | None = None,
     leverage_multiple: float = 1.0,
     financing_rate: float = 0.0,
+    financing_inflation_sensitivity: float = 0.0,
     maintenance_margin: float = 0.0,
     contribution: float = 0.0,
     withdrawal: float = 0.0,
@@ -202,6 +203,8 @@ def run_scenario(
         asset_expense_ratios=normalized_expense_ratios,
         leverage_multiple=float(leverage_multiple),
         financing_rate=float(financing_rate),
+        financing_inflation_sensitivity=float(financing_inflation_sensitivity),
+        state_inflation=model.metadata.get("state_inflation"),
         maintenance_margin=float(maintenance_margin),
         contribution=float(contribution),
         withdrawal=float(withdrawal),
@@ -237,10 +240,23 @@ def run_scenario(
         withdrawal=float(withdrawal),
     )
     summary = summary.copy()
+    state_inflation = model.metadata.get("state_inflation", {})
+    effective_financing = float(financing_rate)
+    if float(financing_inflation_sensitivity) > 0 and state_inflation and len(result.states):
+        regime_counts = pd.Series(result.regimes.ravel()).value_counts()
+        total = max(int(regime_counts.sum()), 1)
+        effective_financing = float(
+            sum(
+                (float(financing_rate) + float(financing_inflation_sensitivity) * float(state_inflation.get(state, 0.0)))
+                * int(regime_counts.get(state, 0)) / total
+                for state in result.states
+            )
+        )
     for key, value in {
         "weighted_expense_ratio": float((weight_series.abs() * fee_series).sum()),
         "annual_fee_drag": float((weight_series.abs() * fee_series).sum() * float(leverage_multiple)),
-        "annual_financing_cost": float(max(float(leverage_multiple) - 1.0, 0.0) * float(financing_rate)),
+        "annual_financing_cost": float(max(float(leverage_multiple) - 1.0, 0.0) * effective_financing),
+        "effective_financing_rate": effective_financing,
         "leverage_multiple": float(leverage_multiple),
         "maintenance_margin": float(maintenance_margin),
         "margin_calls": int(wealth.attrs.get("margin_calls", 0)),

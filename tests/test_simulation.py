@@ -242,6 +242,34 @@ def test_leverage_charges_financing_and_preserves_equity_accounting():
     assert wealth.attrs["margin_calls"] == 0
 
 
+def test_state_dependent_financing_rate_charges_by_regime():
+    result = SimulationResult(
+        returns=np.zeros((2, 2, 1)),
+        regimes=np.array([["hi", "lo"], ["hi", "lo"]], dtype=object),
+        assets=["Stocks"],
+        states=["hi", "lo"],
+        frequency="M",
+    )
+
+    wealth = simulate_portfolio_paths(
+        result,
+        {"Stocks": 1.0},
+        rebalance_frequency=1,
+        leverage_multiple=2.0,
+        financing_rate=0.0,
+        financing_inflation_sensitivity=1.0,
+        state_inflation={"hi": 0.12, "lo": 0.0},
+    )
+
+    hi_growth = (1.0 + 0.12) ** (1 / 12)
+    expected_hi = 200.0 - 100.0 * hi_growth
+    expected_hi = 2.0 * expected_hi - expected_hi * hi_growth
+    expected_lo = 200.0 - 100.0 * 1.0
+    assert wealth.iloc[-1, 0] == pytest.approx(expected_hi)
+    assert wealth.iloc[-1, 1] == pytest.approx(expected_lo)
+    assert expected_hi < expected_lo
+
+
 def test_leverage_liquidates_when_maintenance_margin_is_breached():
     result = SimulationResult(
         returns=np.array([[[-0.60]]]),

@@ -1,13 +1,3 @@
----
-title: Four-Quadrant Monte Carlo Simulator
-emoji: 📈
-colorFrom: blue
-colorTo: green
-sdk: docker
-app_port: 7860
-pinned: false
----
-
 # MC Quadrant Simulator
 
 A starter Python project for a Monte Carlo simulator built around the classic
@@ -245,6 +235,15 @@ cost. A leverage multiple above `1.0` requires an explicit rebalancing
 frequency. Optional maintenance margin liquidates paths when equity divided by
 asset value falls below the configured threshold. The model is monthly and
 does not represent intramonth margin calls.
+
+Financing costs can be linked to the inflation of the regime each path is
+currently in. With **Inflation-linked financing sensitivity** above zero, the
+monthly financing charge on a path uses `base rate + sensitivity * regime
+inflation`, where each state's inflation is its historical average from the
+calibration macro data (percent values are converted to decimals
+automatically). Higher-inflation regimes therefore carry a higher borrowing
+cost, and the reported `effective_financing_rate` is the simulated regime-mix
+weighted average of the per-state rates.
 
 ### 7. Reported Risk Metrics
 

@@ -277,6 +277,18 @@ def calibrate_quadrant_model(
     )
     historical_returns = {state: clean_returns.loc[aligned_regimes == state].copy() for state in REGIME_ORDER}
 
+    inflation_values = pd.to_numeric(macro[inflation_col], errors="coerce")
+    if inflation_values.notna().any():
+        median_inflation = float(inflation_values.median())
+        inflation_fraction = inflation_values / 100.0 if abs(median_inflation) >= 1.0 else inflation_values
+        state_inflation = {
+            state: float(inflation_fraction[regimes == state].mean())
+            for state in REGIME_ORDER
+            if (regimes == state).any()
+        }
+    else:
+        state_inflation = {}
+
     model = ScenarioModel(
         states=REGIME_ORDER.copy(),
         transition_matrix=transition_matrix,
@@ -295,6 +307,7 @@ def calibrate_quadrant_model(
             "threshold_window": threshold_window,
             "model_kind": "quadrant",
             "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER, min_length=min_regime_duration),
+            "state_inflation": state_inflation,
         },
     )
     model.validate()

@@ -41,6 +41,7 @@ _PERCENT_METRICS = {
     "weighted_expense_ratio",
     "annual_fee_drag",
     "annual_financing_cost",
+    "effective_financing_rate",
     "maintenance_margin",
     "probability_of_loss",
     "max_drawdown_mean",
@@ -453,6 +454,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     cost_bps = float(payload.get("cost_bps", 10.0))
     leverage_multiple = float(payload.get("leverage_multiple", 1.0))
     financing_rate = float(payload.get("financing_rate", 0.0)) / 100.0
+    financing_inflation_sensitivity = float(payload.get("financing_inflation_sensitivity", 0.0))
     maintenance_margin = float(payload.get("maintenance_margin", 0.0)) / 100.0
     if rebalance_label == "legacy" and not np.isclose(cost_bps, 0.0):
         raise ValueError("Legacy rebalancing does not support transaction costs; set cost_bps to 0.")
@@ -464,6 +466,8 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("Leverage requires an explicit rebalancing frequency, not legacy accounting.")
     if not np.isfinite(financing_rate) or financing_rate < 0:
         raise ValueError("financing_rate must be a finite, non-negative percentage.")
+    if not np.isfinite(financing_inflation_sensitivity) or financing_inflation_sensitivity < 0:
+        raise ValueError("financing_inflation_sensitivity must be a finite, non-negative number.")
     if not np.isfinite(maintenance_margin) or not 0 <= maintenance_margin < 1:
         raise ValueError("maintenance_margin must be between 0 and 100 percent.")
     if leverage_multiple == 1.0 and not np.isclose(maintenance_margin, 0.0):
@@ -514,6 +518,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "asset_expense_ratios": expense_ratios,
         "leverage_multiple": leverage_multiple,
         "financing_rate": financing_rate,
+        "financing_inflation_sensitivity": financing_inflation_sensitivity,
         "maintenance_margin": maintenance_margin,
         "contribution": float(payload.get("contribution", 0.0)),
         "withdrawal": float(payload.get("withdrawal", 0.0)),
@@ -637,6 +642,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
 
     percentiles = wealth.quantile([0.05, 0.50, 0.95], axis=1).T
+    terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
+    regime_timelines: dict[str, list[str]] = {}
+    for label, target in (("p05", 0.05), ("median", 0.50), ("p95", 0.95)):
+        target_value = float(np.quantile(terminal_values, target))
+        path_index = int(np.argmin(np.abs(terminal_values - target_value)))
+        regime_timelines[label] = [str(state) for state in result.regimes[:, path_index]]
     regime_mix = (
         pd.Series(result.regimes.ravel())
         .value_counts(normalize=True)
@@ -678,6 +689,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "weighted_expense_ratio": summary_values.get("weighted_expense_ratio", 0.0),
         "annual_fee_drag": summary_values.get("annual_fee_drag", 0.0),
         "annual_financing_cost": summary_values.get("annual_financing_cost", 0.0),
+        "effective_financing_rate": summary_values.get("effective_financing_rate", 0.0),
         "leverage_multiple": summary_values.get("leverage_multiple", 1.0),
         "maintenance_margin": summary_values.get("maintenance_margin", 0.0),
         "margin_calls": summary_values.get("margin_calls", 0),
@@ -698,7 +710,8 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         },
         "terminal": wealth.iloc[-1].tolist(),
         "drawdowns": _max_drawdown_paths(wealth).tolist(),
-        "regime_timeline": [str(state) for state in result.regimes[:, 0]],
+        "regime_timeline": regime_timelines["median"],
+        "regime_timelines": regime_timelines,
         "regime_mix": [{"label": label, "share": float(share)} for label, share in regime_mix.items()],
         "transition": {
             "labels": [_state_label(state) for state in model.transition_matrix.index],

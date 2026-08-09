@@ -84,6 +84,12 @@ body {
   font-weight: 800; font-size: 16px; color: white;
   box-shadow: 0 6px 18px rgba(59, 130, 246, 0.4);
 }
+.brand-logo {
+  width: 56px; height: 56px;
+  border-radius: 12px;
+  object-fit: cover;
+  box-shadow: 0 6px 18px rgba(59, 130, 246, 0.35);
+}
 .app-header h1 { font-size: 19px; margin: 0; letter-spacing: 0.2px; }
 .subtitle { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; }
 
@@ -511,6 +517,7 @@ tr:hover td { background: rgba(59, 130, 246, 0.08); }
   .app-header h1 { font-size: 16px; }
   .subtitle { font-size: 11px; }
   .brand-mark { width: 38px; height: 38px; border-radius: 10px; }
+  .brand-logo { width: 42px; height: 42px; border-radius: 10px; }
   .header-actions { flex-direction: column; align-items: flex-end; gap: 6px; }
   .layout { padding: 10px 10px 28px; gap: 10px; }
   .panel { padding: 12px; border-radius: 12px; }

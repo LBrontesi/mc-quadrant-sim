@@ -216,6 +216,7 @@ def test_scenario_kwargs_parse_fees_and_leverage():
             "expense_ratios": "SPY:0.03",
             "leverage_multiple": 2.0,
             "financing_rate": 6.0,
+            "financing_inflation_sensitivity": 1.0,
             "maintenance_margin": 25.0,
             "rebalance": "monthly",
         }
@@ -224,7 +225,15 @@ def test_scenario_kwargs_parse_fees_and_leverage():
     assert kwargs["asset_expense_ratios"] == {"SPY": pytest.approx(0.0003)}
     assert kwargs["leverage_multiple"] == pytest.approx(2.0)
     assert kwargs["financing_rate"] == pytest.approx(0.06)
+    assert kwargs["financing_inflation_sensitivity"] == pytest.approx(1.0)
     assert kwargs["maintenance_margin"] == pytest.approx(0.25)
+
+
+def test_scenario_kwargs_rejects_negative_inflation_sensitivity():
+    with pytest.raises(ValueError, match="financing_inflation_sensitivity"):
+        api.scenario_kwargs(
+            {"weights": {"SPY": 100}, "rebalance": "monthly", "financing_inflation_sensitivity": -0.5}
+        )
 
 
 def test_simulate_response_reports_model_kind_and_validation():
@@ -261,6 +270,49 @@ def test_simulate_reports_fee_and_leverage_assumptions():
     assert response["costs"]["leverage_multiple"] == pytest.approx(1.5)
     assert response["costs"]["annual_financing_cost"] == pytest.approx(0.03)
     assert response["costs"]["weighted_expense_ratio"] > 0
+    assert response["costs"]["effective_financing_rate"] == pytest.approx(0.06)
+
+
+def test_simulate_reports_inflation_linked_financing():
+    rng = np.random.default_rng(7)
+    dates = pd.date_range("2010-01-31", periods=120, freq="ME")
+    prices = pd.DataFrame(
+        {ticker: 100 * np.exp(np.cumsum(rng.normal(0.004, 0.02, len(dates)))) for ticker in ASSET_TICKERS},
+        index=pd.Index(dates, name="Date"),
+    )
+    macro = pd.DataFrame(
+        {
+            "growth": rng.normal(0.0, 0.6, len(dates)),
+            "inflation": rng.normal(3.0, 0.4, len(dates)),
+        },
+        index=pd.Index(dates, name="Date"),
+    )
+    payload = _csv_payload(
+        csv_prices=prices.reset_index().to_csv(index=False),
+        csv_macro=macro.reset_index().to_csv(index=False),
+        leverage_multiple=2.0,
+        financing_rate=6.0,
+        financing_inflation_sensitivity=1.0,
+    )
+
+    response = api.build_simulate_response(payload)
+
+    assert response["costs"]["effective_financing_rate"] > 0.06
+    assert response["costs"]["annual_financing_cost"] > 0.06
+    assert response["summary"]["effective_financing_rate"] == pytest.approx(
+        response["costs"]["effective_financing_rate"]
+    )
+
+
+def test_simulate_inflation_linked_financing_needs_leverage_state_inflation():
+    payload = _csv_payload(
+        leverage_multiple=2.0,
+        financing_rate=6.0,
+        financing_inflation_sensitivity=1.0,
+    )
+    payload["model"] = "hmm"
+    response = api.build_simulate_response(payload)
+    assert response["costs"]["effective_financing_rate"] == pytest.approx(0.06)
 
 
 def test_simulate_csv_returns_full_result():
@@ -274,6 +326,18 @@ def test_simulate_csv_returns_full_result():
     assert len(response["transition"]["values"]) == 4
     assert response["currency"] == "USD"
     assert response["selected_tickers"] == ["SPY", "IEF", "GLD", "DBC"]
+
+
+def test_simulate_reports_regime_timelines_for_percentile_paths():
+    payload = _csv_payload(periods=24, paths=100)
+    response = api.build_simulate_response(payload)
+    timelines = response["regime_timelines"]
+    assert set(timelines) == {"p05", "median", "p95"}
+    for label, timeline in timelines.items():
+        assert len(timeline) == 24
+        assert all(isinstance(state, str) and state for state in timeline)
+    assert timelines["p05"] != timelines["p95"]
+    assert response["regime_timeline"] == timelines["median"]
 
 
 def test_simulate_csv_with_correlation_overrides():

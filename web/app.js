@@ -57,7 +57,7 @@ const FLOW_METRIC_FIELDS = [
 const COST_METRIC_FIELDS = [
   ["leverage_multiple", "Leverage"], ["weighted_expense_ratio", "Weighted ETF fee"],
   ["annual_fee_drag", "Annual fee drag"], ["annual_financing_cost", "Annual financing cost"],
-  ["margin_calls", "Margin calls"],
+  ["effective_financing_rate", "Effective financing rate"], ["margin_calls", "Margin calls"],
 ];
 
 const PERCENT_METRICS = new Set([
@@ -523,31 +523,54 @@ function histChart(container, values, bins = 45, label = "Terminal wealth", colo
   container.appendChild(svg);
 }
 
-function timelineChart(container, states) {
+function timelineChart(container, timelines) {
   container.innerHTML = "";
-  const width = 560, height = 66;
+  const width = 560;
+  const rowHeight = 26;
+  const labelWidth = 88;
+  const chipSize = 8;
+  const height = timelines.length * rowHeight + 8;
   const svg = createSvg(width, height);
-  const slot = width / states.length;
+  const slot = (width - labelWidth) / timelines[0].states.length;
   const tooltip = attachTooltip(container);
-  const uniqueStates = [...new Set(states)];
-  states.forEach((state, index) => {
-    const rect = document.createElementNS(SVG_NS, "rect");
-    rect.setAttribute("x", index * slot);
-    rect.setAttribute("y", 6);
-    rect.setAttribute("width", Math.max(slot - 1, 1));
-    rect.setAttribute("height", 34);
-    rect.setAttribute("fill", colorForState(state, uniqueStates.indexOf(state)));
-    rect.addEventListener("mouseenter", () => {
-      rect.setAttribute("opacity", "0.85");
-      tooltip.show(index * slot + slot / 2, 30, `Period ${index + 1}<br>${escapeHtml(labelForState(state))}`);
+  const allStates = [...new Set(timelines.flatMap((t) => t.states))];
+  timelines.forEach((timeline, rowIndex) => {
+    const rowTop = 4 + rowIndex * rowHeight;
+    const chip = document.createElementNS(SVG_NS, "rect");
+    chip.setAttribute("x", 2);
+    chip.setAttribute("y", rowTop + (rowHeight - 4 - chipSize) / 2);
+    chip.setAttribute("width", chipSize);
+    chip.setAttribute("height", chipSize);
+    chip.setAttribute("rx", 2);
+    chip.setAttribute("fill", timeline.color);
+    svg.appendChild(chip);
+    const label = document.createElementNS(SVG_NS, "text");
+    label.setAttribute("x", 14);
+    label.setAttribute("y", rowTop + 17);
+    label.setAttribute("font-size", "11");
+    label.setAttribute("font-weight", "700");
+    label.setAttribute("fill", "#e6ecf7");
+    label.textContent = timeline.label;
+    svg.appendChild(label);
+    timeline.states.forEach((state, index) => {
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("x", labelWidth + index * slot);
+      rect.setAttribute("y", rowTop);
+      rect.setAttribute("width", Math.max(slot - 1, 1));
+      rect.setAttribute("height", rowHeight - 4);
+      rect.setAttribute("fill", colorForState(state, allStates.indexOf(state)));
+      rect.addEventListener("mouseenter", () => {
+        rect.setAttribute("opacity", "0.85");
+        tooltip.show(labelWidth + index * slot + slot / 2, rowTop, `Period ${index + 1}<br>${escapeHtml(labelForState(state))}`);
+      });
+      rect.addEventListener("mouseleave", () => { rect.setAttribute("opacity", "1"); tooltip.hide(); });
+      svg.appendChild(rect);
     });
-    rect.addEventListener("mouseleave", () => { rect.setAttribute("opacity", "1"); tooltip.hide(); });
-    svg.appendChild(rect);
   });
   container.appendChild(svg);
   const legend = document.createElement("div");
   legend.className = "legend";
-  uniqueStates.forEach((state, index) => {
+  allStates.forEach((state, index) => {
     const item = document.createElement("span");
     item.innerHTML = `<span class="legend-dot" style="background:${colorForState(state, index)}"></span>${escapeHtml(labelForState(state))}`;
     legend.appendChild(item);
@@ -582,7 +605,7 @@ function toggleSourceGroups() {
     $("ticker-list").innerHTML = "";
     renderWeightEditor();
     $("preset-apply").disabled = true;
-    $("portfolio-status").textContent = "Data source changed — click Load Data to refresh tickers.";
+    $("portfolio-status").textContent = "Data source changed — run the simulation again to refresh.";
     resetResultsView();
   }
   updateRunAvailability();
@@ -643,6 +666,7 @@ function gatherScenario() {
     expense_ratios: $("expense-ratios").value,
     leverage_multiple: Number($("leverage-multiple").value),
     financing_rate: Number($("financing-rate").value),
+    financing_inflation_sensitivity: Number($("financing-inflation-sensitivity").value),
     maintenance_margin: Number($("maintenance-margin").value),
     risk_free_rate: Number($("risk-free").value),
     annual_inflation: Number($("annual-inflation").value),
@@ -816,9 +840,9 @@ function updateRunAvailability() {
   } else {
     status.textContent = "";
   }
-  const disabled = !state.loadResult || selected.length === 0 || total <= 0 || errors.length > 0;
-  $("run-btn").disabled = disabled;
-  $("compare-btn").disabled = disabled;
+  const hasData = Boolean(state.loadResult);
+  $("run-btn").disabled = errors.length > 0 || (hasData && (selected.length === 0 || total <= 0));
+  $("compare-btn").disabled = !state.results;
   if (state.results && state.lastSimPayload) {
     const stale = JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload);
     $("stale-results").classList.toggle("hidden", !stale);
@@ -843,7 +867,7 @@ function updateGuide() {
     step.classList.toggle("complete", completed[index]);
     step.classList.toggle("active", index === activeIndex);
   });
-  if (!loaded) guideStatus.textContent = "Next: load the market data.";
+  if (!loaded) guideStatus.textContent = "Loading market data — this happens automatically.";
   else if (!portfolioReady) guideStatus.textContent = "Next: select at least one ticker and set a positive weight.";
   else if (!methodologyReady) guideStatus.textContent = "Next: resolve the highlighted methodology setting.";
   else if (!state.results) guideStatus.textContent = "Next: click Run Simulation.";
@@ -1138,7 +1162,11 @@ function renderResults(data) {
   ]);
   histChart($("chart-terminal"), data.terminal);
   histChart($("chart-drawdowns"), data.drawdowns, 45, "Maximum drawdown", "#f97316");
-  timelineChart($("chart-timeline"), data.regime_timeline);
+  timelineChart($("chart-timeline"), [
+    { label: "P05", color: "#f97316", states: data.regime_timelines.p05 },
+    { label: "Median", color: "#3b82f6", states: data.regime_timelines.median },
+    { label: "P95", color: "#10b981", states: data.regime_timelines.p95 },
+  ]);
   barChart($("chart-regime-mix"), data.regime_mix.map((item) => ({
     label: item.label,
     value: item.share,
@@ -1205,20 +1233,17 @@ function renderResults(data) {
 /* ---------- Handlers ---------- */
 
 async function onLoad() {
-  const button = $("load-btn");
   const message = $("load-message");
-  button.disabled = true;
-  showOverlay("Loading data...");
+  showOverlay("Loading market data...");
   try {
     const payload = await gatherLoadPayload();
     await fillCsvPayload(payload);
     state.loadPayload = payload;
-    const data = await postJSON("/api/load", payload);
-    state.loadResult = data;
     state.results = null;
     state.lastSimPayload = null;
+    const data = await postJSON("/api/load", payload);
+    state.loadResult = data;
     setStatus(message, data.message);
-    notify(data.message, "success");
     renderTickerChecklist(data.tickers, data.default_tickers);
     state.weights = {};
     assetColors = {};
@@ -1231,11 +1256,10 @@ async function onLoad() {
     $("data-empty").classList.add("hidden");
     $("data-content").classList.remove("hidden");
     switchTab("tab-data");
+    updateGuide();
   } catch (error) {
     setStatus(message, error.message, true);
-    notify(error.message, "error");
   } finally {
-    button.disabled = false;
     hideOverlay();
   }
 }
@@ -1255,6 +1279,10 @@ async function onRun() {
   button.disabled = true;
   showOverlay("Running simulation...");
   try {
+    if (!state.loadResult) {
+      await onLoad();
+      if (!state.loadResult) return;
+    }
     const payload = gatherSimPayload();
     const data = await postJSON("/api/simulate", payload);
     state.lastSimPayload = payload;
@@ -1355,7 +1383,8 @@ const CONTROL_IDS = [
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
   "macro-lag", "transition-uncertainty", "periods", "paths", "seed", "distribution",
   "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "contribution", "withdrawal",
-  "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate", "maintenance-margin",
+  "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate",
+  "financing-inflation-sensitivity", "maintenance-margin",
   "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
 ];
 
@@ -1504,7 +1533,6 @@ function init() {
 
   document.querySelectorAll(".tab-btn").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 
-  $("load-btn").addEventListener("click", onLoad);
   $("run-btn").addEventListener("click", onRun);
   $("compare-btn").addEventListener("click", onCompare);
   $("download-summary").addEventListener("click", onDownloadSummary);
@@ -1537,6 +1565,7 @@ function init() {
       const badge = $("connection");
       badge.textContent = "connected";
       badge.className = "badge badge-ok";
+      onLoad();
     })
     .catch(() => {
       const badge = $("connection");
