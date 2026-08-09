@@ -217,6 +217,78 @@ function attachTooltip(container) {
   return { show, hide };
 }
 
+let revealObserver = null;
+
+function registerReveals(root = document) {
+  if (!revealObserver) return;
+  const selector = ".workspace-heading, .guide-mini, .settings-panel, .allocation-bar, .card, .metric";
+  const elements = [...(root.querySelectorAll?.(selector) || [])];
+  if (root.matches?.(selector)) elements.unshift(root);
+  elements.forEach((element) => {
+    if (element.dataset.revealReady) return;
+    element.dataset.revealReady = "true";
+    element.classList.add("reveal");
+    revealObserver.observe(element);
+  });
+}
+
+function setupExperience() {
+  const progress = $("scroll-progress-bar");
+  let scrollFrame = 0;
+  const updateScrollProgress = () => {
+    scrollFrame = 0;
+    const available = Math.max(document.documentElement.scrollHeight - window.innerHeight, 1);
+    progress.style.transform = `scaleX(${Math.min(Math.max(window.scrollY / available, 0), 1)})`;
+  };
+  window.addEventListener("scroll", () => {
+    if (!scrollFrame) scrollFrame = requestAnimationFrame(updateScrollProgress);
+  }, { passive: true });
+  updateScrollProgress();
+
+  if (!(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)) {
+    revealObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("is-visible");
+        revealObserver.unobserve(entry.target);
+      });
+    }, { threshold: 0.08, rootMargin: "0px 0px -6%" });
+    registerReveals();
+    new MutationObserver((mutations) => {
+      mutations.forEach((mutation) => mutation.addedNodes.forEach((node) => {
+        if (node.nodeType === Node.ELEMENT_NODE) registerReveals(node);
+      }));
+    }).observe($("workspace"), { childList: true, subtree: true });
+  }
+
+  const stage = $("quadrant-stage");
+  stage.addEventListener("pointermove", (event) => {
+    const bounds = stage.getBoundingClientRect();
+    stage.style.setProperty("--stage-x", `${((event.clientX - bounds.left) / bounds.width - 0.5) * 16}px`);
+    stage.style.setProperty("--stage-y", `${((event.clientY - bounds.top) / bounds.height - 0.5) * 16}px`);
+  });
+  stage.addEventListener("pointerleave", () => {
+    stage.style.setProperty("--stage-x", "0px");
+    stage.style.setProperty("--stage-y", "0px");
+  });
+
+  document.querySelectorAll("details").forEach((details) => details.addEventListener("toggle", () => {
+    if (!details.open) return;
+    details.classList.remove("details-flash");
+    requestAnimationFrame(() => details.classList.add("details-flash"));
+  }));
+
+  document.querySelectorAll(".site-nav [data-tab-target]").forEach((link) => link.addEventListener("click", () => {
+    switchTab(link.dataset.tabTarget);
+  }));
+
+  const updateHeroPaths = () => {
+    $("hero-path-count").textContent = Math.max(0, Number($("paths").value) || 0).toLocaleString();
+  };
+  $("paths").addEventListener("input", updateHeroPaths);
+  updateHeroPaths();
+}
+
 /* ---------- SVG charts ---------- */
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -226,7 +298,8 @@ function createSvg(width, height) {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("width", "100%");
-  svg.setAttribute("height", "auto");
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
   return svg;
 }
 
@@ -1770,11 +1843,12 @@ function init() {
   });
 
   restoreControls();
+  setupExperience();
   $("transition-uncertainty-output").textContent = Number($("transition-uncertainty").value).toFixed(2);
   $("macro-transition-weight-output").textContent = Number($("macro-transition-weight").value).toFixed(2);
   toggleSourceGroups();
   updateMethodologyControls();
-  applyTheme(localStorage.getItem("mcq-theme") || "dark");
+  applyTheme(localStorage.getItem("mcq-theme") || "light");
 
   fetch("/api/health")
     .then((response) => response.json())

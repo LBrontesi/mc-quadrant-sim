@@ -4,28 +4,75 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Four-Quadrant Monte Carlo Simulator</title>
-  <link rel="stylesheet" href="style.css?v=20260810">
+  <link rel="stylesheet" href="style.css?v=20260811">
 </head>
-<body>
+<body class="light">
+  <div class="scroll-progress" aria-hidden="true"><span id="scroll-progress-bar"></span></div>
   <div class="bg-glow bg-glow-1"></div>
   <div class="bg-glow bg-glow-2"></div>
 
-  <header class="app-header">
-    <div class="brand">
+  <header class="app-header" id="top">
+    <a class="brand brand-link" href="#top" aria-label="MC Quadrant — back to top">
       <img class="brand-logo" src="logo.jpg" alt="MC Quadrant Simulator logo">
       <div>
-        <h1>Four-Quadrant Monte Carlo Simulator</h1>
-        <p class="subtitle">Goldilocks · Overheating · Stagflation · Recession — regime-based portfolio simulation</p>
+        <h1>MC / Quadrant</h1>
+        <p class="subtitle">Research simulation studio</p>
       </div>
-    </div>
+    </a>
+    <nav class="site-nav" aria-label="Page sections">
+      <a href="#workspace">Model</a>
+      <a href="#results-workspace" data-tab-target="tab-growth">Results</a>
+      <a href="#results-workspace" data-tab-target="tab-data">Data</a>
+    </nav>
     <div class="header-actions">
       <button id="theme-toggle" class="btn btn-ghost">Light theme</button>
       <div id="connection" class="badge badge-muted">connecting...</div>
     </div>
   </header>
 
+  <section class="app-hero" aria-labelledby="hero-title">
+    <div class="hero-copy">
+      <span class="section-index">01 / Scenario engine</span>
+      <h2 id="hero-title">Model<br>uncertainty.<br><em>Not just<br>market paths.</em></h2>
+      <p>Explore how portfolios behave when macro regimes, parameters, inflation, and market dependence all move together.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary btn-editorial" href="#workspace">Build a scenario <span>↓</span></a>
+        <span class="hero-shortcut">⌘ / Ctrl + Enter to run</span>
+      </div>
+    </div>
+    <div class="quadrant-stage" id="quadrant-stage" aria-label="Four macroeconomic regimes">
+      <div class="orbit orbit-outer"></div>
+      <div class="orbit orbit-inner"></div>
+      <div class="quadrant-core">
+        <img src="logo.jpg" alt="" aria-hidden="true">
+        <span>MC/Q</span>
+      </div>
+      <div class="quadrant-node node-goldilocks"><span>01</span><strong>Goldilocks</strong><small>Growth ↑ · Inflation ↓</small></div>
+      <div class="quadrant-node node-overheating"><span>02</span><strong>Overheating</strong><small>Growth ↑ · Inflation ↑</small></div>
+      <div class="quadrant-node node-stagflation"><span>03</span><strong>Stagflation</strong><small>Growth ↓ · Inflation ↑</small></div>
+      <div class="quadrant-node node-recession"><span>04</span><strong>Recession</strong><small>Growth ↓ · Inflation ↓</small></div>
+    </div>
+    <div class="hero-meta">
+      <span><strong>04</strong> macro regimes</span>
+      <span><strong id="hero-path-count">10,000</strong> paths</span>
+      <span><strong>Joint</strong> macro + markets</span>
+    </div>
+  </section>
+
+  <div class="regime-ticker" aria-hidden="true">
+    <div class="regime-ticker-track">
+      <span>Goldilocks</span><i>↗</i><span>Overheating</span><i>↗</i><span>Stagflation</span><i>↘</i><span>Recession</span><i>↘</i>
+      <span>Goldilocks</span><i>↗</i><span>Overheating</span><i>↗</i><span>Stagflation</span><i>↘</i><span>Recession</span><i>↘</i>
+    </div>
+  </div>
+
   <div class="layout">
-    <main class="panel" id="main-content">
+    <div class="workspace-heading">
+      <span class="section-index">02 / Simulation studio</span>
+      <h2>Build the scenario.</h2>
+      <p>Start broad, then reveal the assumptions that matter. Every control remains auditable.</p>
+    </div>
+    <main class="panel" id="workspace">
       <details class="guide-mini">
         <summary>Getting started</summary>
         <p class="guide-intro">Run your first scenario in five steps. Real market data from Yahoo Finance / FRED is loaded by default.</p>
@@ -190,7 +237,7 @@
           </label>
         </details>
 
-        <details>
+        <details id="methodology-section">
           <summary>Model methodology</summary>
           <label>Regime model
             <select id="model-kind">
@@ -375,7 +422,7 @@
 
       <p id="scenario-status" class="status"></p>
 
-      <div class="results-toolbar">
+      <div class="results-toolbar" id="results-workspace">
       <div class="tabs" id="result-tabs">
         <button class="tab-btn active" data-tab="tab-growth">Growth</button>
         <button class="tab-btn" data-tab="tab-returns">Returns</button>
@@ -551,6 +598,6 @@
   </div>
   <div id="toast-container"></div>
 
-  <script type="module" src="app.js?v=20260810"></script>
+  <script type="module" src="app.js?v=20260811"></script>
 </body>
 </html>

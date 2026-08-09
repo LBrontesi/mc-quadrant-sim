@@ -53,6 +53,12 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert 'risk_free_rate: Number($("risk-free").value)' in javascript
     assert 'type="module" src="app.js?' in html
     assert 'id="resource-card"' in html
+    assert 'id="hero-title"' in html
+    assert 'id="quadrant-stage"' in html
+    assert 'id="scroll-progress-bar"' in html
+    assert "setupExperience" in javascript
+    assert 'setAttribute("height", "auto")' not in javascript
+    assert 'setAttribute("height", String(height))' in javascript
 
 
 def test_web_backend_serves_health_and_load_endpoints():

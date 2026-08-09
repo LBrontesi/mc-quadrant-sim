@@ -486,9 +486,10 @@ Three-Fund, Permanent, Golden Butterfly, All Seasons, Core Four, Risk Parity)
 apply PortfolioCharts-style allocations to the loaded tickers, and the
 inflation/risk-free inputs report real terms and a proper Sharpe ratio.
 Periodic contributions and withdrawals model dollar-cost averaging and
-retirement drawdowns. The web UI uses a testfol-style layout with an
-allocation editor (color-coded asset rows with weights) in the sidebar and
-tabbed result views for Growth, Returns, Drawdowns, Correlations, Monthly
+retirement drawdowns. The web UI uses an editorial research-studio layout:
+an interactive four-regime hero, warm light and charcoal dark themes, scroll
+progress, section reveals, responsive motion, and a compact allocation editor.
+Tabbed result views cover Growth, Returns, Drawdowns, Correlations, Monthly
 returns, and distribution comparison. Results include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, a monthly-return calendar, macro scatter,
