@@ -202,6 +202,21 @@ def test_cash_flow_adjusted_metrics_ignore_regular_contributions():
     assert summary["total_contributed"] == pytest.approx(20.0)
 
 
+def test_real_cash_flow_metrics_deflate_wealth_and_flows_once():
+    wealth = pd.DataFrame({"path_0": [110.0]})
+
+    summary = summarize_wealth_risk(
+        wealth,
+        periods_per_year=1,
+        annual_inflation=0.10,
+        contribution=10.0,
+    )
+
+    expected_real_return = 100.0 / 110.0 - 1.0
+    assert summary["cash_flow_adjusted_annualized_return"] == pytest.approx(expected_real_return)
+    assert summary["cash_flow_adjusted_volatility"] == pytest.approx(0.0)
+
+
 def test_expense_ratio_reduces_simulated_wealth():
     result = SimulationResult(
         returns=np.zeros((2, 1, 1)),
@@ -328,8 +343,8 @@ def test_sortino_uses_downside_deviation():
 
     summary = summarize_wealth_risk(wealth, periods_per_year=12)
 
-    annualized_return = 0.95**6 - 1.0
-    annualized_downside = 0.05 * np.sqrt(12)
+    annualized_return = -0.025 * 12
+    annualized_downside = np.sqrt((0.05**2) / 2) * np.sqrt(12)
     assert summary["sortino_ratio"] == pytest.approx(annualized_return / annualized_downside)
 
 
@@ -373,7 +388,7 @@ def test_annualized_metrics_match_known_terminal_returns():
 
     summary = summarize_wealth_risk(wealth, periods_per_year=12)
 
-    assert summary["annualized_return"] == pytest.approx((120.0 / 100.0) ** 12 - 1.0)
+    assert summary["annualized_return"] == pytest.approx(0.20 * 12)
     assert summary["annualized_volatility"] == pytest.approx((10.0 / 100.0) * np.sqrt(12))
     assert summary["sharpe_ratio"] == pytest.approx(
         summary["annualized_return"] / summary["annualized_volatility"]
@@ -417,7 +432,9 @@ def test_inflation_adjusts_wealth_to_real_terms():
 
 
 def test_inflation_compounds_per_year_not_per_period():
-    wealth = pd.DataFrame({"path_0": list(np.linspace(100.0, 110.0, 12))})
+    wealth = pd.DataFrame(
+        {"path_0": 100.0 * np.power(1.10, np.arange(1, 13, dtype=float) / 12.0)}
+    )
 
     summary = summarize_wealth_risk(wealth, periods_per_year=12, annual_inflation=0.10)
 
@@ -482,6 +499,35 @@ def test_semi_markov_sojourns_switch_less_than_markov_chain():
     assert markov.shape == (60, 40)
     assert semi.shape == (60, 40)
     assert _switches_per_path(semi) < _switches_per_path(markov)
+
+
+def test_semi_markov_honors_exact_initial_and_following_sojourn_lengths():
+    model = _persistent_model()
+    model.metadata["sojourn_durations"] = {
+        "state_a": np.array([3]),
+        "state_b": np.array([3]),
+    }
+
+    regimes = simulate_regime_paths(
+        model,
+        periods=8,
+        paths=1,
+        start_state="state_a",
+        random_seed=4,
+        duration_model="semi_markov",
+        min_regime_duration=3,
+    ).ravel()
+
+    assert regimes.tolist() == [
+        "state_a",
+        "state_a",
+        "state_a",
+        "state_b",
+        "state_b",
+        "state_b",
+        "state_a",
+        "state_a",
+    ]
 
 
 def test_semi_markov_requires_sojourn_metadata():
@@ -561,3 +607,46 @@ def test_garch_is_reproducible_and_validated():
         simulate_returns(model, periods=4, paths=2, garch=True, garch_alpha=1.5)
     with pytest.raises(ValueError, match="less than 1"):
         simulate_returns(model, periods=4, paths=2, garch=True, garch_alpha=0.3, garch_beta=0.8)
+
+
+def test_joint_macro_and_dynamic_dependence_produce_consistent_paths():
+    rng = np.random.default_rng(12)
+    dates = pd.date_range("1995-01-31", periods=120, freq="ME")
+    macro = pd.DataFrame(
+        {
+            "growth": np.tile([2.0, 2.0, -2.0, -2.0], 30) + rng.normal(0, 0.2, 120),
+            "inflation": np.tile([1.0, 4.0, 4.0, 1.0], 30) + rng.normal(0, 0.2, 120),
+        },
+        index=dates,
+    )
+    returns = pd.DataFrame(
+        rng.normal(0.004, 0.025, size=(120, 3)),
+        index=dates,
+        columns=["Stocks", "Bonds", "Gold"],
+    )
+    model = calibrate_quadrant_model(
+        returns,
+        macro,
+        growth_threshold=0.0,
+        inflation_threshold=3.0,
+        min_observations=6,
+        probabilistic_regimes=True,
+        mean_prior_strength=24.0,
+        joint_macro=True,
+    )
+
+    result = simulate_returns(
+        model,
+        periods=24,
+        paths=40,
+        random_seed=5,
+        distribution="student_t",
+        joint_macro=True,
+        dynamic_correlation=True,
+    )
+
+    assert result.returns.shape == (24, 40, 3)
+    assert result.macro_paths.shape == (24, 40, 2)
+    assert result.macro_columns == ["growth", "inflation"]
+    assert np.isfinite(result.returns).all()
+    assert np.isfinite(result.macro_paths).all()

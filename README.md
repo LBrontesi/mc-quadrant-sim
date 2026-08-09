@@ -1,7 +1,7 @@
 # MC Quadrant Simulator
 
-A starter Python project for a Monte Carlo simulator built around the classic
-four macro quadrants:
+A research-oriented Monte Carlo scenario engine built around the classic four
+macro quadrants:
 
 | Regime | Growth | Inflation | Typical interpretation |
 | --- | --- | --- | --- |
@@ -12,11 +12,12 @@ four macro quadrants:
 
 The model is designed to be calibrated from real historical data:
 
-1. Macro data is classified into one of the four quadrants.
-2. A Markov transition matrix is estimated from observed quadrant changes.
-3. Asset returns are grouped by quadrant.
-4. Each quadrant receives its own expected returns, volatility, covariance, and correlation matrix.
-5. Monte Carlo paths draw the next quadrant from the transition matrix and sample asset returns from that quadrant's distribution.
+1. Release-aware macro data is mapped to hard or probabilistic quadrants.
+2. Semi-Markov transitions and regime-conditioned macro dynamics are calibrated.
+3. Parametric return means are shrunk and covariance matrices use Ledoit-Wolf shrinkage.
+4. Optional stationary-bootstrap recalibrations measure parameter uncertainty.
+5. Growth, inflation, regimes, returns, dynamic correlations, and portfolio accounting are simulated together.
+6. Walk-forward validation compares the model with Gaussian and Student-t benchmarks.
 
 ## Methodology
 
@@ -26,6 +27,11 @@ Asset prices are converted to log returns and, for the dashboard market-data
 path, aggregated to monthly frequency. FRED industrial production and CPI are
 converted to year-over-year percentage changes. Uploaded macro CSVs are assumed
 to already contain the growth and inflation measures selected by the user.
+When the requested market-data end date falls inside an unfinished month, that
+partial month is excluded so the final observation is never labeled as a future
+month-end. CSV asset inputs explicitly distinguish price levels, log returns,
+and simple returns; simple returns compound within a month before conversion to
+the log-return representation used by calibration.
 
 Yahoo Finance inputs can optionally use historical proxy tickers to extend an
 asset before its inception. A proxy is level-scaled at the last overlapping
@@ -55,6 +61,8 @@ asset's full-sample moments alone:
 2. A factor model `r_asset = alpha + sum(beta_j * r_anchor,j) + epsilon` is
    estimated on the asset's observed overlap against a default anchor universe
    (`SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY`), which is fetched automatically.
+   The target asset is removed from this anchor matrix, preventing an identity
+   regressor from leaking the value being reconstructed into its own model.
 3. For each pre-inception month the synthetic return combines the real anchor
    returns that month with a regime-specific residual when the asset has
    enough observed history in that regime, falling back to regime moments or
@@ -88,11 +96,16 @@ return is combined with the USD-per-EUR log FX return. A current spot quote is
 appropriate for converting a displayed value, but not for simulating future FX
 risk, so the simulator requires historical FX data for foreign assets.
 
-Macro observations are classified before they are joined to asset returns. The
-dashboard defaults to a one-period macro release lag: a macro regime observed
-at period `t` is used for asset returns beginning at `t + 1`. Remaining dates
-are aligned with forward-fill. This is a conservative approximation, not a
-full real-time vintage or release-calendar database.
+Macro observations are classified before they are joined to asset returns. In
+default FRED mode, a one-period release lag is a conservative approximation;
+the values are still the latest revised vintage. Strict point-in-time mode uses
+the official FRED API's `output_type=4` initial releases, retains each
+`realtime_start` availability date, and aligns the macro row to the month when
+all inputs were public. Set `FRED_API_KEY` on the server and select **ALFRED
+initial releases**. Custom macro CSVs can provide an `AvailableDate` column for
+the same release-aware alignment. When exact availability dates are present,
+the approximate macro-release lag is automatically set to zero instead of
+delaying the information a second time.
 
 ### 2. Quadrant Classification
 
@@ -116,6 +129,12 @@ UIs default to a 12-period window. Direct calibration keeps the full-sample
 behavior unless `threshold_window` is supplied; walk-forward validation always
 uses a causal 12-period window when none is supplied.
 
+The probabilistic mode replaces discontinuous high/low decisions with logistic
+probabilities whose width is controlled by `regime_temperature`. Joint
+probabilities still use the same four labels and sum to one. Expected
+transition counts and regime return moments are then weighted by these
+probabilities rather than forcing borderline observations into a single state.
+
 ### 3. Markov Regime Model
 
 The transition matrix counts adjacent historical regime changes and adds the
@@ -128,13 +147,22 @@ Dirichlet distribution. The dashboard maps uncertainty `u` in `[0, 1]` to a
 row concentration of `max(1, 1 / u^2)`. Higher uncertainty therefore produces
 more variation around the calibrated transition probabilities.
 
+When parameter recalibration is enabled, the empirical Dirichlet control is
+not applied again. Each outer draw instead resamples paired macro/return months
+with geometrically sized stationary-bootstrap blocks and recalibrates
+thresholds, transition probabilities, durations, means, covariances, and joint
+macro dynamics. This separates uncertainty in fitted parameters from ordinary
+market-path randomness.
+
 A first-order Markov chain implies geometrically distributed regime run
 lengths, which understates how long real regimes persist. With **semi-Markov
 durations** the simulator draws each stay length from the empirical sojourn
 distribution observed in history (stored in the calibrated model's metadata),
 then transitions to a different state via the matrix with self-transitions
-renormalized away. The dashboard defaults to semi-Markov; the core API uses
-the plain chain unless `duration_model="semi_markov"` is requested.
+renormalized away. A sampled duration of three therefore produces exactly three
+periods in that state, including for the initial regime. The dashboard defaults
+to semi-Markov; the core API uses the plain chain unless
+`duration_model="semi_markov"` is requested.
 
 An alternative **HMM regime model** fits a Gaussian-emission hidden Markov
 model directly on asset returns with expectation-maximization (states learned
@@ -154,6 +182,11 @@ shrunk toward the full-sample covariance, projected to the nearest positive
 semidefinite matrix, and converted to correlations. Optional pairwise
 correlation views are blended into each regime and projected back to a valid
 correlation matrix.
+
+Expected returns can be shrunk toward the full-history mean with
+`mean_prior_strength`. This is deliberately separate from covariance shrinkage:
+regime means are typically the least stable long-horizon inputs, especially in
+sparsely observed stagflation and recession states.
 
 By default the shrinkage intensity is no longer a fixed `0.25` blend: the
 Ledoit-Wolf optimal intensity is computed from the data, so sparse regimes are
@@ -189,13 +222,28 @@ drifting away from the calibrated regime covariance. `garch_alpha` governs
 responsiveness to new shocks (default 0.10) and `garch_beta` the persistence
 of past variance (default 0.85).
 
+**Asymmetric dynamic correlation (ADCC)** evolves the correlation matrix after
+each standardized shock. `dcc_alpha` controls shock response, `dcc_beta`
+controls persistence, and `dcc_asymmetry` increases the response to joint
+negative shocks. ADCC works with Normal or Student-t returns and re-anchors to
+the relevant regime correlation after a state change.
+
+**Joint macro-financial paths** fit a regularized VAR(1) to growth and inflation,
+regime-conditioned innovation covariances, and a ridge return-factor link.
+Simulated macro values influence time-varying transition probabilities, while
+the same macro innovations affect asset returns. Inflation therefore creates a
+different purchasing-power deflator for every path instead of using one fixed
+rate. This compact model improves internal consistency but is not a structural
+macroeconomic forecast or a full yield-curve model.
+
 **Walk-forward validation** (quadrant model only, enabled by default in the
 dashboard) checks the regime model strictly out of sample: each split fits on
 data up to period `t` and scores the next observation under the one-step
-regime mixture density versus an unconditional Gaussian fitted on the same
-history. The reported advantage (log-likelihood units per period) and the
-one-step regime hit rate show whether regime conditioning actually predicts
-returns; a non-positive advantage is surfaced as a warning rather than hidden.
+regime mixture density versus unconditional Gaussian and Student-t models fitted
+on the same history. It also reports multiclass Brier scores, actual-state
+probabilities, portfolio probability-integral-transform diagnostics, 95% VaR
+breach frequency and clustering, and a Newey-West/HAC log-score comparison.
+Weak or miscalibrated results are surfaced as warnings rather than hidden.
 
 ### 6. Portfolio Accounting
 
@@ -254,27 +302,29 @@ is `initial value - average wealth in the worst 5% tail`. Maximum drawdown is
 calculated path-by-path from the initial value and each subsequent running
 peak.
 
-Annualized metrics are derived from the terminal distribution: the annualized
-return scales the mean terminal growth to one year, the annualized volatility
-scales the terminal standard deviation by the square root of time, and the
-Sharpe ratio uses a zero risk-free rate. These are approximations that assume
-independent, identically distributed monthly returns, not a full time-series
-return decomposition.
+Annualized return and volatility are derived from the simulated periodic,
+time-weighted portfolio returns: arithmetic mean is multiplied by periods per
+year and periodic standard deviation by its square root. Sharpe and Sortino use
+those same return observations and the configured risk-free rate. Contributions
+enter at the start of a period and withdrawals leave at its end, and real cash
+flows are inflation-adjusted exactly once. Terminal wealth percentiles, VaR,
+expected shortfall, and probability of loss remain terminal-distribution
+statistics.
 
 Downside-focused metrics are also reported. The Ulcer Index is the square
 root of the mean squared path drawdown, penalizing both depth and duration of
 declines. The Sortino ratio divides excess return by annualized downside
-deviation instead of total volatility. The Calmar ratio divides annualized
-return by the mean maximum drawdown. The geometric annualized return
-compounds the mean logarithmic terminal growth and is always lower than or
-equal to the arithmetic annualized return. Terminal skewness and excess
+deviation instead of total volatility. The Calmar ratio divides geometric
+annualized return by the mean maximum drawdown. Geometric annualized return
+compounds the mean logarithmic periodic return. Terminal skewness and excess
 kurtosis describe the shape of the terminal distribution.
 
 ### 8. Important Assumptions
 
-- Macro release lag is period-based and does not model data revisions or exact publication dates.
-- Regime transitions are Markovian and depend only on the current regime.
-- Parametric draws do not model volatility clustering unless optional GARCH is enabled; bootstrap methods are the better choice when preserving historical shape matters.
+- Latest-revised FRED mode still contains revision look-ahead; select ALFRED initial releases for point-in-time analysis.
+- The joint macro VAR is statistical rather than structural and does not model the complete yield curve or monetary-policy reaction function.
+- Parameter bootstrap quantifies historical estimation instability, not every possible future structural break.
+- Parametric tail and ADCC specifications remain model assumptions; empirical bootstrap remains a useful benchmark.
 - Transaction costs are charged only at modeled rebalancing events.
 - Results are scenario estimates, not forecasts or investment advice.
 
@@ -291,21 +341,18 @@ in practice:
 - Student-t and bootstrap/block-bootstrap sampling produce fat tails and
   extreme outcomes instead of assuming Gaussian returns.
 - Rebalancing with transaction costs models the friction investors actually
-  pay, and the macro release lag removes obvious look-ahead bias.
+  pay. Release alignment reduces timing bias, while ALFRED initial-release
+  mode also avoids using later macro revisions.
 - Correlation overrides allow investment views to be blended with empirical
   estimates when history is short or regimes are structurally different.
 
 **Limitations and honest approximations**
 
-- Returns are drawn from static regime distributions; volatility clustering,
-  skewness, and regime-switching within a quarter are not modeled.
-- The annualized volatility estimate scales terminal dispersion by the square
-  root of time and assumes independent monthly returns.
-- Markov probabilities and regime moments are estimated from the available
-  history; sparse regimes are blended toward the full sample.
-- Deterministic inflation and risk-free assumptions are constant, not
-  stochastic. A positive inflation assumption expresses results in real terms;
-  the default is nominal.
+- Student-t tails are symmetric and monthly paths do not model intramonth jumps.
+- Annualized volatility scales periodic dispersion by the square root of time;
+  it does not claim that monthly returns are independent or normally distributed.
+- Bond returns still come from historical price behavior rather than explicit
+  duration and yield-curve factors.
 
 **Long-term analysis features**
 
@@ -323,12 +370,11 @@ in practice:
   labeled; for example IEF stands in for long-term treasuries and SHY for
   short-term/cash holdings.
 
-**Future directions**
-
-- Regime-dependent Student-t degrees of freedom (per-regime tail shapes).
-- Bond duration and yield-curve simulation instead of price-only histories.
-- Inflation-indexed cash flows, where contributions and withdrawals grow with
-  the inflation assumption.
+The dashboard's **Methodology integrity** panel shows data-vintage quality,
+release alignment, regime assignment, parameter recalibrations, joint macro
+paths, dynamic dependence, and Student-t benchmark performance separately.
+It never treats a larger number of Monte Carlo paths as evidence that the
+calibrated model itself is more certain.
 
 ## Install
 
@@ -393,6 +439,27 @@ Open `http://127.0.0.1:7860`. Set `PORT` to use a different port. The browser
 client calls the same `/api/load`, `/api/simulate`, `/api/compare`, and
 `/api/wealth` payload contracts used by the other frontends.
 
+The server rejects simulations whose estimated working set exceeds its 384 MB
+safety budget, limits concurrent heavy jobs, caps request bodies, and exports a
+deterministic sample of at most 5,000 wealth paths instead of serializing the
+entire simulation. Production limits can be adjusted with
+`MAX_CONCURRENT_JOBS` and `MAX_REQUEST_BYTES`; the UI shows the same resource
+estimate before a run.
+
+The web interface updates its run label and estimated memory/workload as the
+horizon, path count, worker count, or asset selection changes. Configurations
+above the server budget are blocked before submission. During longer jobs it
+shows the active stage and elapsed time; after completion it collapses the
+settings, moves focus to the results, and provides an **Edit scenario** shortcut.
+The allocation/status areas, metric cards, result tabs, and charts adapt to
+mobile widths without causing page-level horizontal overflow.
+
+Frontend network and resource-planning logic live in `web/api-client.js` and
+`web/resource-planner.js`; `web/app.js` is responsible for application state,
+controls, and rendering. Static asset references are relative, including the
+logo, so they resolve when `web/index.html` is inspected directly with a
+`file://` URL. The simulation APIs still require running `web_app.py`.
+
 Open the URL printed by Streamlit (default `http://localhost:8501`). It
 supports the same Yahoo Finance/FRED and CSV sources and the same
 methodology controls, rendered with Altair charts. Charts are layout to the
@@ -403,7 +470,9 @@ shaping to the shared `mc_quadrants.api` layer, so the simulation methodology
 is identical regardless of the interface. The **Model methodology** section
 in each sidebar selects the regime model (quadrant or HMM), the regime
 duration model (Markov chain or semi-Markov), the causal threshold window,
-GARCH volatility clustering, and walk-forward validation.
+probabilistic regime membership, expected-return shrinkage, parameter
+recalibrations, joint macro paths, GARCH/ADCC dynamics, and walk-forward
+validation.
 
 The UIs load real data from Yahoo Finance/FRED by default and optionally
 accept uploaded asset and macro CSVs. Yahoo mode starts at 1990 by default and
@@ -423,8 +492,26 @@ tabbed result views for Growth, Returns, Drawdowns, Correlations, Monthly
 returns, and distribution comparison. Results include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, a monthly-return calendar, macro scatter,
-calibration diagnostics, scenario comparison, and CSV downloads. Gradio
+calibration diagnostics, scenario comparison, and bounded CSV path samples. Gradio
 charts are rendered with Plotly; Streamlit charts use Altair.
+
+## Testing And CI
+
+Run the local checks with:
+
+```bash
+uv run ruff check .
+uv run pytest -q
+uv run python -m compileall -q src tests web_app.py
+```
+
+GitHub Actions runs these checks on Python 3.10, 3.11, and 3.12 for pull
+requests and pushes to the production web branches, including `web-ui-prod`.
+It also runs a Chromium/Playwright smoke test against the real Python web
+server using uploaded CSV fixtures. That test completes a simulation, verifies
+the results UI, checks for browser console errors, and asserts that the 390 px
+mobile layout has no page-level horizontal overflow. A separate container job
+builds the Docker image, starts it, and checks `/api/health`.
 
 ## Run With Docker
 
@@ -454,6 +541,11 @@ model = calibrate_quadrant_model(
     macro_lag_periods=1,
     growth_threshold="median",
     inflation_threshold="median",
+    threshold_window=12,
+    probabilistic_regimes=True,
+    regime_temperature=0.35,
+    mean_prior_strength=24,
+    joint_macro=True,
     correlation_overrides={
         "high_growth_high_inflation": {("SPY", "IEF"): 0.35},
         "low_growth_high_inflation": {("SPY", "IEF"): 0.25},
@@ -469,6 +561,8 @@ result = simulate_returns(
     random_seed=7,
     distribution="student_t",
     degrees_of_freedom=5,
+    joint_macro=True,
+    dynamic_correlation=True,
 )
 wealth = simulate_portfolio_paths(
     result,
@@ -484,7 +578,10 @@ print(summarize_terminal_wealth(wealth))
 
 For a reusable application workflow, `mc_quadrants.pipeline.run_scenario()`
 returns the calibrated model, simulated paths, wealth, risk summary, and
-calibration diagnostics together.
+calibration diagnostics together. Set `parameter_draws=8` and
+`parameter_block_size=12` there to distribute paths across eight complete
+stationary-bootstrap recalibrations; the returned `parameter_uncertainty`
+table reports the resulting model-risk bands.
 
 ## Suggested Real Data Inputs
 
@@ -510,7 +607,9 @@ inflation above 3 percent.
 - Correlation overrides are optional. They are useful when history is sparse or when you want to blend empirical estimates with an investment view.
 - Returns can be sampled from either a Gaussian or finite-variance Student-t distribution within each quadrant. Lower Student-t degrees of freedom create heavier tails.
 - Historical and block bootstrap sampling preserve observed regime-specific return shapes and unusual outcomes.
-- A non-zero transition uncertainty setting samples the Markov matrix row-by-row from Dirichlet distributions.
+- Parameter recalibrations use paired stationary-bootstrap blocks and refit the complete parametric model; this is distinct from empirical return-path bootstrap sampling.
+- A non-zero transition uncertainty setting samples the Markov matrix row-by-row only when parameter recalibration is disabled.
 - Portfolio paths can model periodic rebalancing and transaction costs charged on traded notional. The default `rebalance_frequency=None` preserves the original weighted-log behavior.
-- Macro release lags shift regime labels before calibrating asset moments, reducing same-period look-ahead bias.
-- `pytest` runs automatically through GitHub Actions on supported Python versions.
+- ALFRED initial-release mode and custom `AvailableDate` values provide point-in-time macro alignment; the release lag remains the fallback for latest-revised FRED history.
+- Unit/integration, browser smoke, and Docker health checks run automatically
+  through GitHub Actions.

@@ -39,10 +39,12 @@ def test_walk_forward_validation_reports_predictive_metrics():
     assert result.summary["splits"] >= 10
     assert {
         "regime_log_likelihood_mean",
+        "regime_student_t_log_likelihood_mean",
         "unconditional_log_likelihood_mean",
         "advantage_mean",
         "regime_hit_rate",
     }.issubset(result.summary.index)
+    assert "advantage_vs_student_t" in result.splits
     assert (result.splits["advantage"] > 0).any()
     assert (result.splits["regime_hit"] <= 1).all()
     assert (result.splits["regime_hit"] >= 0).all()

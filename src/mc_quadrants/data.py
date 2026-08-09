@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from functools import lru_cache
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
@@ -398,8 +403,106 @@ def fetch_yahoo_prices(
     return prices.dropna(how="all").sort_index()
 
 
-def fetch_fred_macro(series: Mapping[str, str], start: str, end: str | None = None) -> pd.DataFrame:
-    """Fetch FRED series with pandas-datareader when the optional dependency is installed."""
+def fetch_fred_initial_release(
+    series: Mapping[str, str],
+    start: str,
+    end: str | None = None,
+    api_key: str | None = None,
+) -> pd.DataFrame:
+    """Fetch ALFRED initial-release observations and their availability dates.
+
+    FRED's ``output_type=4`` returns the first published value instead of the
+    latest revised history. Release dates are retained in ``frame.attrs`` so
+    callers can align information by when it became available to investors.
+    The API key is read from ``FRED_API_KEY`` when not passed explicitly.
+    """
+
+    key = str(api_key or os.environ.get("FRED_API_KEY", "")).strip()
+    if not key:
+        raise ValueError(
+            "Initial-release ALFRED data requires the server environment variable FRED_API_KEY."
+        )
+    frames: list[pd.Series] = []
+    release_frames: list[pd.Series] = []
+    for output_name, fred_code in series.items():
+        query = urlencode(
+            {
+                "series_id": fred_code,
+                "api_key": key,
+                "file_type": "json",
+                "output_type": 4,
+                "observation_start": pd.Timestamp(start).strftime("%Y-%m-%d"),
+                "observation_end": (
+                    pd.Timestamp(end).strftime("%Y-%m-%d") if end else "9999-12-31"
+                ),
+            }
+        )
+        try:
+            with urlopen(
+                f"https://api.stlouisfed.org/fred/series/observations?{query}",
+                timeout=30,
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"FRED API request failed for {fred_code}.") from exc
+        if payload.get("error_message"):
+            raise ValueError(f"FRED API error for {fred_code}: {payload['error_message']}")
+        observations = payload.get("observations", [])
+        values: dict[pd.Timestamp, float] = {}
+        releases: dict[pd.Timestamp, pd.Timestamp] = {}
+        for observation in observations:
+            raw_value = observation.get("value")
+            if raw_value in {None, "."}:
+                continue
+            observation_date = pd.Timestamp(observation["date"])
+            values[observation_date] = float(raw_value)
+            releases[observation_date] = pd.Timestamp(observation["realtime_start"])
+        frames.append(pd.Series(values, name=output_name, dtype=float))
+        release_frames.append(pd.Series(releases, name=output_name, dtype="datetime64[ns]"))
+
+    result = pd.concat(frames, axis=1).sort_index()
+    result.attrs["release_dates"] = pd.concat(release_frames, axis=1).sort_index()
+    result.attrs["data_vintage"] = "initial_release"
+    result.attrs["point_in_time"] = True
+    return result
+
+
+def align_macro_to_availability(macro: pd.DataFrame) -> pd.DataFrame:
+    """Move macro observations to the month when every input was available."""
+
+    release_dates = macro.attrs.get("release_dates")
+    if not isinstance(release_dates, pd.DataFrame) or release_dates.empty:
+        result = macro.copy()
+        result.attrs.update(macro.attrs)
+        return result
+    aligned_release_dates = release_dates.reindex(index=macro.index, columns=macro.columns)
+    availability = aligned_release_dates.max(axis=1).dropna()
+    available = macro.loc[availability.index].copy()
+    available.index = pd.DatetimeIndex(availability).to_period("M").to_timestamp("M")
+    available = available.groupby(level=0).last().sort_index()
+    available.attrs.update(macro.attrs)
+    available.attrs["observation_dates"] = pd.Series(
+        availability.index,
+        index=pd.DatetimeIndex(availability).to_period("M").to_timestamp("M"),
+    ).groupby(level=0).last()
+    available.attrs["availability_aligned"] = True
+    return available
+
+
+def fetch_fred_macro(
+    series: Mapping[str, str],
+    start: str,
+    end: str | None = None,
+    vintage: str = "latest",
+    api_key: str | None = None,
+) -> pd.DataFrame:
+    """Fetch latest FRED history or point-in-time ALFRED initial releases."""
+
+    vintage = str(vintage).lower().replace("-", "_")
+    if vintage in {"initial", "initial_release", "alfred"}:
+        return fetch_fred_initial_release(series, start, end, api_key=api_key)
+    if vintage not in {"latest", "revised", "latest_revised"}:
+        raise ValueError("vintage must be 'latest' or 'initial_release'.")
 
     try:
         from pandas_datareader import data as pdr
@@ -411,7 +514,10 @@ def fetch_fred_macro(series: Mapping[str, str], start: str, end: str | None = No
         raw = pdr.DataReader(fred_code, "fred", start, end)
         frames.append(raw.rename(columns={fred_code: output_name}))
 
-    return pd.concat(frames, axis=1).sort_index()
+    result = pd.concat(frames, axis=1).sort_index()
+    result.attrs["data_vintage"] = "latest_revised"
+    result.attrs["point_in_time"] = False
+    return result
 
 
 @lru_cache(maxsize=8)
@@ -428,6 +534,7 @@ def _load_market_data_cached(
     inflation_threshold: str | float = "median",
     threshold_window: int | None = None,
     macro_lag_periods: int = 1,
+    macro_vintage: str = "latest",
 ) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...], dict[str, dict[str, object]]]:
     start_date = pd.Timestamp(start)
     end_date = pd.Timestamp(end)
@@ -479,13 +586,27 @@ def _load_market_data_cached(
 
     returns = prices_to_returns(prices.loc[:, list(available)], method="log")
     returns = returns.resample("ME").sum(min_count=1).dropna(how="all")
+    is_current_date = end_date.normalize() >= pd.Timestamp.today().normalize()
+    if not end_date.is_month_end or is_current_date:
+        last_complete_month = end_date - pd.offsets.MonthEnd(1)
+        returns = returns.loc[returns.index <= last_complete_month]
+    if returns.empty:
+        raise ValueError("No complete monthly return observations are available for the selected dates.")
 
-    macro_levels = fetch_fred_macro(
+    macro_source = fetch_fred_macro(
         {"growth": "INDPRO", "inflation": "CPIAUCSL"},
         start=start_date.strftime("%Y-%m-%d"),
         end=end_date.strftime("%Y-%m-%d"),
-    ).resample("ME").last()
+        vintage=macro_vintage,
+    )
+    macro_attrs = dict(macro_source.attrs)
+    macro_levels = macro_source.resample("ME").last()
+    macro_levels.attrs.update(macro_attrs)
+    if isinstance(macro_attrs.get("release_dates"), pd.DataFrame):
+        macro_levels.attrs["release_dates"] = macro_attrs["release_dates"].resample("ME").last()
     macro = yoy_change(macro_levels).apply(pd.to_numeric, errors="coerce").dropna(how="any")
+    if macro.attrs.get("point_in_time"):
+        macro = align_macro_to_availability(macro)
     if macro.empty:
         raise ValueError("Not enough FRED history to calculate year-over-year growth and inflation.")
 
@@ -509,7 +630,9 @@ def _load_market_data_cached(
                 growth_threshold=growth_threshold,
                 inflation_threshold=inflation_threshold,
                 threshold_window=threshold_window,
-                macro_lag_periods=macro_lag_periods,
+                macro_lag_periods=(
+                    0 if bool(macro.attrs.get("availability_aligned", False)) else macro_lag_periods
+                ),
                 anchor_returns=anchor_returns,
                 random_seed=synthetic_seed,
                 categories=category_map,
@@ -540,6 +663,7 @@ def load_market_data(
     inflation_threshold: str | float = "median",
     threshold_window: int | None = None,
     macro_lag_periods: int = 1,
+    macro_vintage: str = "latest",
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str], dict[str, dict[str, object]]]:
     """Load Yahoo prices/FRED macro data, optionally backfilling with proxies.
 
@@ -588,6 +712,7 @@ def load_market_data(
         inflation_threshold,
         threshold_window,
         int(macro_lag_periods),
+        str(macro_vintage).lower(),
     )
     return macro.copy(), returns.copy(), list(available), synthetic_report
 
@@ -595,4 +720,14 @@ def load_market_data(
 def yoy_change(data: pd.DataFrame, periods: int = 12, scale: float = 100.0) -> pd.DataFrame:
     """Compute year-over-year percent changes for monthly-style macro data."""
 
-    return data.pct_change(periods=periods) * scale
+    result = data.pct_change(periods=periods) * scale
+    result.attrs.update(data.attrs)
+    release_dates = data.attrs.get("release_dates")
+    if isinstance(release_dates, pd.DataFrame):
+        current = release_dates.reindex(index=data.index, columns=data.columns)
+        prior = current.shift(periods)
+        combined = current.copy()
+        for column in combined.columns:
+            combined[column] = pd.concat([current[column], prior[column]], axis=1).max(axis=1)
+        result.attrs["release_dates"] = combined
+    return result

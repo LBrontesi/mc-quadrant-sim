@@ -4,11 +4,13 @@ import pytest
 
 import mc_quadrants.data as data_module
 from mc_quadrants.data import (
+    align_macro_to_availability,
     backfill_prices,
     combine_observed_and_simulated_returns,
     convert_returns_to_base_currency,
     prices_to_returns,
     simulate_pre_inception_returns,
+    yoy_change,
 )
 
 
@@ -107,3 +109,55 @@ def test_fetch_yahoo_fx_rates_normalizes_direct_pair(monkeypatch):
 
     assert rates.columns.tolist() == ["EUR"]
     assert rates["EUR"].tolist() == [1.10, 1.20]
+
+
+def test_market_data_drops_an_incomplete_final_month(monkeypatch):
+    dates = pd.date_range("2020-01-01", "2020-03-15", freq="D")
+    prices = pd.DataFrame({"SPY": np.linspace(100.0, 120.0, len(dates))}, index=dates)
+    macro_dates = pd.date_range("2018-01-01", "2020-03-01", freq="MS")
+    macro_levels = pd.DataFrame(
+        {
+            "growth": np.linspace(100.0, 130.0, len(macro_dates)),
+            "inflation": np.linspace(100.0, 125.0, len(macro_dates)),
+        },
+        index=macro_dates,
+    )
+
+    monkeypatch.setattr(data_module, "fetch_yahoo_prices", lambda *args, **kwargs: prices)
+    monkeypatch.setattr(data_module, "fetch_fred_macro", lambda *args, **kwargs: macro_levels)
+    data_module._load_market_data_cached.cache_clear()
+
+    _, returns, _, _ = data_module.load_market_data(["SPY"], "2018-01-01", "2020-03-15")
+
+    assert returns.index.max() == pd.Timestamp("2020-02-29")
+
+
+def test_yoy_macro_preserves_and_aligns_initial_release_dates():
+    dates = pd.date_range("2019-01-01", periods=15, freq="MS")
+    levels = pd.DataFrame(
+        {
+            "growth": np.linspace(100.0, 115.0, len(dates)),
+            "inflation": np.linspace(100.0, 107.0, len(dates)),
+        },
+        index=dates,
+    )
+    levels.attrs.update(
+        {
+            "release_dates": pd.DataFrame(
+                {
+                    "growth": dates + pd.Timedelta(days=45),
+                    "inflation": dates + pd.Timedelta(days=40),
+                },
+                index=dates,
+            ),
+            "data_vintage": "initial_release",
+            "point_in_time": True,
+        }
+    )
+
+    transformed = yoy_change(levels).dropna()
+    available = align_macro_to_availability(transformed)
+
+    assert available.attrs["point_in_time"] is True
+    assert available.attrs["availability_aligned"] is True
+    assert available.index[0] == pd.Timestamp("2020-02-29")

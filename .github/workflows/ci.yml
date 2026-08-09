@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "feature/**", "improvements"]
+    branches: ["main", "web-ui", "web-ui-prod", "web-ui-prod-Render", "feature/**", "improvements"]
   pull_request:
 
 jobs:
@@ -22,3 +22,43 @@ jobs:
       - run: uv run ruff check .
       - run: uv run pytest -q
       - run: uv run python -m compileall -q src tests web_app.py
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --extra dev
+      - run: uv run --with "playwright<2" playwright install --with-deps chromium
+      - name: Start web server
+        run: |
+          uv run python web_app.py > /tmp/mc-quadrant-web.log 2>&1 &
+          for attempt in {1..30}; do
+            curl -fsS http://127.0.0.1:7860/api/health && exit 0
+            sleep 1
+          done
+          cat /tmp/mc-quadrant-web.log
+          exit 1
+      - name: Run browser smoke test
+        run: uv run --with "playwright<2" python tests/browser_smoke.py
+      - name: Show server log on failure
+        if: failure()
+        run: cat /tmp/mc-quadrant-web.log
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t mc-quadrant-sim:ci .
+      - run: docker run --detach --name mc-quadrant-sim-ci -p 7860:7860 mc-quadrant-sim:ci
+      - name: Check container health
+        run: |
+          for attempt in {1..30}; do
+            curl -fsS http://127.0.0.1:7860/api/health && exit 0
+            sleep 1
+          done
+          docker logs mc-quadrant-sim-ci
+          exit 1

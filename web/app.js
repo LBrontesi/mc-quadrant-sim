@@ -1,5 +1,8 @@
 "use strict";
 
+import { postJSON } from "./api-client.js";
+import { MEMORY_LIMIT_MB, estimateSimulationResources, formatWorkUnits } from "./resource-planner.js";
+
 /* ---------- Constants ---------- */
 
 const REGIME_ORDER = [
@@ -39,8 +42,8 @@ const DEFAULT_CORRELATIONS = {
 
 const METRIC_FIELDS = [
   ["mean", "Mean terminal wealth"], ["p05", "P05"], ["p50", "Median"], ["p95", "P95"],
-  ["annualized_return", "Annualized return (wealth)"],
-  ["annualized_volatility", "Annualized volatility (wealth)"],
+  ["annualized_return", "Annualized return"],
+  ["annualized_volatility", "Annualized volatility"],
   ["sharpe_ratio", "Sharpe ratio"], ["sortino_ratio", "Sortino"], ["calmar_ratio", "Calmar"],
   ["geometric_annualized_return", "CAGR"], ["probability_of_loss", "Probability of loss"],
   ["var_95", "VaR (95%)"], ["expected_shortfall_95", "Expected shortfall (95%)"],
@@ -48,11 +51,9 @@ const METRIC_FIELDS = [
 ];
 
 const FLOW_METRIC_FIELDS = [
-  ["cash_flow_adjusted_annualized_return", "Time-weighted return"],
-  ["cash_flow_adjusted_volatility", "Time-weighted volatility"],
-  ["cash_flow_adjusted_sharpe_ratio", "Time-weighted Sharpe"],
   ["total_contributed", "Total contributions"],
   ["total_withdrawn", "Total withdrawals"],
+  ["net_external_cash_flow", "Net external cash flow"],
 ];
 const COST_METRIC_FIELDS = [
   ["leverage_multiple", "Leverage"], ["weighted_expense_ratio", "Weighted ETF fee"],
@@ -93,19 +94,6 @@ function pct(value, digits = 1) {
   return fmt(value * 100, digits) + "%";
 }
 
-async function postJSON(path, payload) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
-  if (!response.ok || data.ok === false) {
-    throw new Error(data.error || `Request failed with status ${response.status}`);
-  }
-  return data;
-}
-
 function readFile(file) {
   return new Promise((resolve, reject) => {
     if (!file) return resolve(null);
@@ -121,12 +109,26 @@ function setStatus(el, message, isError = false) {
   el.style.color = isError ? "var(--danger)" : "var(--muted)";
 }
 
-function showOverlay(message) {
+let overlayStartedAt = 0;
+let overlayTimer = null;
+
+function showOverlay(message, stage = "Preparing data and model inputs") {
   $("overlay-text").textContent = message || "Working...";
+  $("overlay-stage").textContent = stage;
+  overlayStartedAt = performance.now();
+  const updateElapsed = () => {
+    const seconds = Math.max(0, Math.round((performance.now() - overlayStartedAt) / 1000));
+    $("overlay-elapsed").textContent = `${seconds}s elapsed`;
+  };
+  updateElapsed();
+  clearInterval(overlayTimer);
+  overlayTimer = setInterval(updateElapsed, 1000);
   $("overlay").classList.remove("hidden");
 }
 
 function hideOverlay() {
+  clearInterval(overlayTimer);
+  overlayTimer = null;
   $("overlay").classList.add("hidden");
 }
 
@@ -623,6 +625,7 @@ function gatherLoadPayload() {
     payload.tickers = $("yahoo-tickers").value;
     payload.start = $("yahoo-start").value;
     payload.end = $("yahoo-end").value;
+    payload.macro_vintage = $("macro-vintage").value;
     payload.proxies = $("yahoo-proxies").value;
     payload.synthetic = Array.from(document.querySelectorAll('#synthetic-options input[type="checkbox"]:checked')).map((el) => el.value);
     payload.synthetic_seed = Number($("synthetic-seed").value);
@@ -647,6 +650,8 @@ async function fillCsvPayload(payload) {
 }
 
 function gatherScenario() {
+  const quadrantModel = $("model-kind").value === "quadrant";
+  const parametricReturns = ["normal", "student_t"].includes($("distribution").value);
   return {
     growth_threshold: thresholdPayload("growth-threshold", "growth-fixed"),
     inflation_threshold: thresholdPayload("inflation-threshold", "inflation-fixed"),
@@ -683,13 +688,61 @@ function gatherScenario() {
     min_regime_duration: Number($("min-regime-duration").value),
     garch: $("garch").checked,
     walk_forward: $("walk-forward").checked,
+    probabilistic_regimes: quadrantModel && $("probabilistic-regimes").checked,
+    regime_temperature: Number($("regime-temperature").value),
+    mean_prior_strength: Number($("mean-prior-strength").value),
+    parameter_draws: quadrantModel ? Number($("parameter-draws").value) : 0,
+    parameter_block_size: Number($("parameter-block-size").value),
+    joint_macro: quadrantModel && parametricReturns && $("joint-macro").checked,
+    macro_transition_weight: Number($("macro-transition-weight").value),
+    dynamic_correlation: parametricReturns && $("dynamic-correlation").checked,
+    dcc_alpha: Number($("dcc-alpha").value),
+    dcc_beta: Number($("dcc-beta").value),
+    dcc_asymmetry: Number($("dcc-asymmetry").value),
   };
+}
+
+function plannedAssetCount() {
+  const selected = selectedTickers().length;
+  if (selected) return selected;
+  if (state.loadResult?.tickers?.length) return state.loadResult.tickers.length;
+  return Math.max(1, String($("yahoo-tickers").value || "").split(/[,;\s]+/).filter(Boolean).length);
+}
+
+function currentResourceEstimate() {
+  return estimateSimulationResources({
+    periods: Number($("periods").value),
+    paths: Number($("paths").value),
+    assets: plannedAssetCount(),
+    workers: Number($("workers").value),
+    jointMacro: $("joint-macro").checked,
+    dynamicCorrelation: $("dynamic-correlation").checked,
+  });
+}
+
+function updateResourceEstimate() {
+  const estimate = currentResourceEstimate();
+  const card = $("resource-card");
+  const percent = Math.min(100, Math.max(2, estimate.ratio * 100));
+  card.dataset.level = estimate.level;
+  $("resource-bar").style.width = `${percent}%`;
+  $("resource-label").textContent = `${estimate.memoryMb.toFixed(0)} MB / ${MEMORY_LIMIT_MB} MB`;
+  $("resource-detail").textContent =
+    `${formatWorkUnits(estimate.workUnits)} asset-period-path operations · adaptive chunk ${estimate.chunkSize.toLocaleString()} paths.` +
+    (estimate.level === "over" ? " Reduce paths, periods, assets, or workers before running." : "");
+  const paths = Math.max(0, Number($("paths").value) || 0);
+  $("run-btn").textContent = paths ? `Run ${paths.toLocaleString()} paths` : "Run simulation";
+  return estimate;
 }
 
 function validateScenario() {
   const errors = [];
   if ($("garch").checked && $("distribution").value !== "normal") {
     errors.push("GARCH volatility clustering requires the Normal return distribution.");
+  }
+  const dccTotal = Number($("dcc-alpha").value) + Number($("dcc-beta").value) + Number($("dcc-asymmetry").value);
+  if ($("dynamic-correlation").checked && dccTotal >= 1) {
+    errors.push("Dynamic-correlation α + β + γ must be below 1.");
   }
   if ($("base-currency").value.trim().length !== 3) {
     errors.push("Portfolio currency must be a three-letter ISO code.");
@@ -705,6 +758,22 @@ function validateScenario() {
   if (leverage > 1 && margin >= 1 / leverage) {
     errors.push("Maintenance margin must be below the initial equity margin for the selected leverage.");
   }
+  const periods = Number($("periods").value);
+  const paths = Number($("paths").value);
+  const workers = Number($("workers").value);
+  if (!Number.isInteger(periods) || periods < 1 || periods > 360) {
+    errors.push("Periods must be between 1 and 360.");
+  }
+  if (!Number.isInteger(paths) || paths < 1 || paths > 120000) {
+    errors.push("Paths must be between 1 and 120,000.");
+  }
+  if (!Number.isInteger(workers) || workers < 1 || workers > 16) {
+    errors.push("Workers must be between 1 and 16.");
+  }
+  const estimate = currentResourceEstimate();
+  if (estimate.memoryMb > MEMORY_LIMIT_MB) {
+    errors.push(`Estimated memory is ${estimate.memoryMb.toFixed(0)} MB; reduce the scenario below ${MEMORY_LIMIT_MB} MB.`);
+  }
   return errors;
 }
 
@@ -715,6 +784,7 @@ function updateMethodologyControls() {
   $("quadrant-calibration").classList.toggle("hidden", isHMM);
   $("hmm-states-group").classList.toggle("hidden", !isHMM);
   $("threshold-window-group").classList.toggle("hidden", isHMM);
+  $("advanced-regime-controls").classList.toggle("hidden", isHMM);
   $("walk-forward-group").classList.toggle("hidden", isHMM);
   $("correlation-override-controls").classList.toggle("hidden", isHMM);
   $("corr-blend-group").classList.toggle("hidden", isHMM);
@@ -725,6 +795,11 @@ function updateMethodologyControls() {
   $("cost-bps").disabled = legacy;
   $("cost-bps-group").classList.toggle("methodology-muted", legacy);
   $("garch").disabled = distribution !== "normal";
+  const parametric = distribution === "normal" || distribution === "student_t";
+  $("joint-macro").disabled = !parametric || isHMM;
+  $("dynamic-correlation").disabled = !parametric;
+  $("parameter-draws").disabled = isHMM;
+  $("transition-uncertainty").disabled = Number($("parameter-draws").value) > 0;
   $("garch-hint").textContent = distribution === "normal"
     ? "GARCH requires the Normal return distribution."
     : "GARCH is disabled because the selected return distribution is not Normal.";
@@ -831,6 +906,7 @@ function updateWeightTotal() {
 }
 
 function updateRunAvailability() {
+  updateResourceEstimate();
   const selected = selectedTickers();
   const total = selected.reduce((sum, ticker) => sum + (Number(state.weights[ticker]) || 0), 0);
   const errors = validateScenario();
@@ -928,6 +1004,20 @@ function switchTab(tabId) {
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === tabId));
 }
 
+function focusResults() {
+  document.querySelectorAll(".settings-panel > details").forEach((details) => { details.open = false; });
+  const tabs = $("result-tabs");
+  tabs.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  document.querySelector(`#result-tabs .tab-btn.active`)?.focus({ preventScroll: true });
+}
+
+function editScenario() {
+  const settings = $("simulation-settings");
+  settings.open = true;
+  settings.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" });
+  $("periods").focus({ preventScroll: true });
+}
+
 /* ---------- Results rendering ---------- */
 
 function renderTables(preview) {
@@ -1004,8 +1094,92 @@ function renderScenarioChips(payload, data) {
   chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
   chips.push(payload.model === "hmm" ? `HMM · ${payload.hmm_states} states` : "Quadrant model");
   chips.push(payload.duration_model === "semi_markov" ? "Semi-Markov durations" : "Markov durations");
+  if (payload.probabilistic_regimes) chips.push("Probabilistic regimes");
+  if (Number(payload.parameter_draws) > 0) chips.push(`${payload.parameter_draws} parameter draws`);
+  if (payload.joint_macro) chips.push("Joint macro paths");
+  if (payload.dynamic_correlation) chips.push("Dynamic dependence");
+  if (data.resources?.estimated_memory_mb) chips.push(`~${Number(data.resources.estimated_memory_mb).toFixed(0)} MB server load`);
   if (Number(payload.leverage_multiple || 1) > 1) chips.push(`${Number(payload.leverage_multiple).toFixed(1)}x leverage`);
   el.innerHTML = chips.map((text) => `<span class="chip">${escapeHtml(text)}</span>`).join("");
+}
+
+function renderMethodologyReport(data) {
+  const methodology = data.methodology || {};
+  const validation = data.validation?.summary || {};
+  const validationAvailable = Boolean(data.validation?.summary);
+  const safeguards = [
+    [methodology.point_in_time, methodology.point_in_time ? "Point-in-time macro vintages" : "Latest-revised macro history"],
+    [methodology.availability_aligned, methodology.availability_aligned ? "Release-calendar aligned" : "Period-lag approximation"],
+    [methodology.regime_assignment === "probabilistic", "Probabilistic regimes"],
+    [Number(methodology.parameter_draws) > 0, `${Number(methodology.parameter_draws) || 0} parameter recalibrations`],
+    [Boolean(methodology.joint_macro), "Joint macro/market paths"],
+    [Boolean(methodology.dynamic_correlation), "Asymmetric dynamic dependence"],
+    [validationAvailable && validation.advantage_vs_student_t_mean > 0, validationAvailable
+      ? (validation.advantage_vs_student_t_mean > 0 ? "Beats Student-t benchmark" : "Student-t benchmark not beaten")
+      : "Validation unavailable"],
+  ];
+  const score = safeguards.filter(([passed]) => passed).length;
+  const scoreEl = $("methodology-score");
+  scoreEl.textContent = `${score}/${safeguards.length} safeguards`;
+  scoreEl.dataset.level = score >= 6 ? "strong" : score >= 4 ? "mixed" : "weak";
+  $("methodology-badges").innerHTML = safeguards.map(([passed, label]) =>
+    `<span class="methodology-badge ${passed ? "integrity-good" : "integrity-warn"}">${passed ? "✓" : "!"} ${escapeHtml(label)}</span>`
+  ).join("");
+}
+
+function renderParameterUncertainty(data) {
+  const uncertainty = data.parameter_uncertainty;
+  $("parameter-uncertainty-card").classList.toggle("hidden", !uncertainty);
+  if (!uncertainty) return;
+  const definitions = [
+    ["annualized_return", "Annualized return", "percent"],
+    ["annualized_volatility", "Annualized volatility", "percent"],
+    ["average_persistence", "Average persistence", "percent"],
+    ["terminal_median", "Terminal median", "currency"],
+  ];
+  $("parameter-bands").innerHTML = definitions.map(([key, label, kind]) => {
+    const band = uncertainty.bands[key];
+    if (!band) return "";
+    const formatter = kind === "percent"
+      ? (value) => pct(value, 1)
+      : (value) => formatMetricValue("p50", value, data.currency);
+    return `<div class="uncertainty-item"><span>${escapeHtml(label)}</span><strong>${formatter(band.median)}</strong>` +
+      `<small>P05 ${formatter(band.p05)} · P95 ${formatter(band.p95)}</small></div>`;
+  }).join("");
+}
+
+function renderMacroPaths(data) {
+  const macro = data.macro_paths;
+  $("macro-path-card").classList.toggle("hidden", !macro);
+  const grid = $("macro-path-grid");
+  grid.innerHTML = "";
+  if (!macro) return;
+  Object.entries(macro.series || {}).forEach(([name, series]) => {
+    const card = document.createElement("div");
+    card.className = "card";
+    const heading = document.createElement("h4");
+    heading.textContent = name;
+    const chart = document.createElement("div");
+    chart.className = "chart";
+    card.append(heading, chart);
+    grid.appendChild(card);
+    lineChart(chart, macro.periods, [
+      { name: "P05", color: "#f97316", values: series.p05 },
+      { name: "Median", color: "#3b82f6", values: series.median },
+      { name: "P95", color: "#10b981", values: series.p95 },
+    ]);
+  });
+}
+
+function renderRegimeProbabilities(data) {
+  const probabilities = (data.regime_probabilities || []).filter((item) => item.probability > 0);
+  $("probability-panel").classList.toggle("hidden", probabilities.length === 0);
+  if (!probabilities.length) return;
+  barChart($("chart-regime-probabilities"), probabilities.map((item, index) => ({
+    label: item.label,
+    value: item.probability,
+    color: colorForState(item.state, index),
+  })), { digits: 3 });
 }
 
 function escapeHtml(text) {
@@ -1063,19 +1237,12 @@ function monthlyReturnColor(returnValue, maxAbs) {
 function renderMonthlyCalendar(data) {
   const container = $("chart-monthly");
   container.innerHTML = "";
-  const medians = (data.wealth && data.wealth.median) || [];
+  const returns = data.monthly_returns || [];
   const startDate = data.start_date ? new Date(`${data.start_date}T00:00:00`) : null;
-  if (!startDate || medians.length === 0) {
+  if (!startDate || returns.length === 0) {
     container.innerHTML = "<p class='status'>No monthly data to display.</p>";
     return;
   }
-  const returns = [];
-  let previous = 100;
-  medians.forEach((median, index) => {
-    const rate = index === 0 ? median / 100 - 1 : median / previous - 1;
-    returns.push(rate);
-    previous = median;
-  });
   const byYear = {};
   returns.forEach((rate, index) => {
     const date = new Date(startDate.getFullYear(), startDate.getMonth() + index, 1);
@@ -1130,6 +1297,8 @@ function renderResults(data) {
   });
   document.querySelectorAll(".results-empty").forEach((el) => el.classList.add("hidden"));
   renderScenarioChips(state.lastSimPayload, data);
+  renderMethodologyReport(data);
+  renderParameterUncertainty(data);
   $("macro-chart-title").textContent = data.model_kind === "hmm" ? "HMM states / macro history" : "Macro quadrants";
   renderMetricGrid("metric-grid", METRIC_FIELDS, data);
   const hasCashFlows = Number(data.summary.periodic_contribution || 0) > 0 || Number(data.summary.periodic_withdrawal || 0) > 0;
@@ -1149,7 +1318,7 @@ function renderResults(data) {
     `Worst max drawdown: ${pct(data.summary.max_drawdown_worst)}`;
   const riskFree = Number(state.lastSimPayload?.risk_free_rate || 0);
   $("performance-caption").textContent =
-    `Annualized return: ${pct(data.summary.annualized_return)} | ` +
+    `Time-weighted annualized return: ${pct(data.summary.annualized_return)} | ` +
     `Annualized volatility: ${pct(data.summary.annualized_volatility)} | ` +
     `Sharpe ratio (${fmt(riskFree, 2)}% risk-free): ${fmt(data.summary.sharpe_ratio, 2)} | ` +
     `Ulcer index: ${fmt(data.summary.ulcer_index_mean, 2)} (p95 ${fmt(data.summary.ulcer_index_p95, 2)}) | ` +
@@ -1211,6 +1380,8 @@ function renderResults(data) {
   drawCorrelation();
 
   renderMonthlyCalendar(data);
+  renderMacroPaths(data);
+  renderRegimeProbabilities(data);
 
   const diagnostics = data.diagnostics;
   $("diagnostics-table").innerHTML = "<table><thead><tr>" + diagnostics.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
@@ -1221,9 +1392,10 @@ function renderResults(data) {
   if (validation) {
     const summary = validation.summary;
     $("validation-summary").textContent =
-      `Out-of-sample advantage: ${summary.advantage_mean > 0 ? "+" : ""}${fmt(summary.advantage_mean, 4)} log-likelihood units/period · ` +
-      `positive split share: ${pct(summary.advantage_positive_share)} · ` +
-      `one-step regime hit rate: ${pct(summary.regime_hit_rate, 0)} · ${summary.splits} splits.`;
+      `Advantage vs Student-t: ${summary.advantage_vs_student_t_mean > 0 ? "+" : ""}${fmt(summary.advantage_vs_student_t_mean, 4)} log-score/period · ` +
+      `HAC t-stat: ${fmt(summary.dm_t_statistic_vs_student_t, 2)} · ` +
+      `Brier: ${fmt(summary.regime_brier_score, 3)} vs ${fmt(summary.benchmark_brier_score, 3)} benchmark · ` +
+      `VaR breaches: ${pct(summary.var_95_breach_rate)} · ${summary.splits} splits.`;
     renderTable("validation-table", { columns: validation.columns, rows: validation.rows });
   }
   state.diagnostics = diagnostics;
@@ -1251,6 +1423,23 @@ async function onLoad() {
     renderWeightEditor();
     renderTables(data);
     renderCoverage(data.coverage);
+    const timing = data.data_timing || {};
+    const timingStatus = $("data-timing-status");
+    timingStatus.className = `data-timing-status ${timing.point_in_time ? "timing-good" : "timing-warning"}`;
+    timingStatus.textContent = timing.point_in_time
+      ? "✓ Point-in-time values aligned by historical availability date."
+      : "! Latest-revised values: the configured release lag reduces timing bias but cannot remove revision look-ahead.";
+    const macroLag = $("macro-lag");
+    if (timing.availability_aligned) {
+      if (!macroLag.disabled) macroLag.dataset.previousValue = macroLag.value;
+      macroLag.value = "0";
+      macroLag.disabled = true;
+      $("macro-lag-hint").textContent = "Release dates are explicit, so no additional period lag is applied.";
+    } else {
+      macroLag.disabled = false;
+      if (macroLag.dataset.previousValue) macroLag.value = macroLag.dataset.previousValue;
+      $("macro-lag-hint").textContent = "Use one period with latest-revised data; availability-dated data uses its actual release calendar.";
+    }
     renderSyntheticReport(data.synthetic);
     populatePresets(data.presets);
     $("portfolio-status").textContent = `${data.tickers.length} tickers available. Toggle assets and set weights.`;
@@ -1278,11 +1467,22 @@ async function onRun() {
   const message = $("run-message");
   const button = $("run-btn");
   button.disabled = true;
-  showOverlay("Running simulation...");
+  const estimate = currentResourceEstimate();
+  showOverlay(
+    "Running simulation...",
+    `${Number($("paths").value).toLocaleString()} paths · ${Number($("periods").value)} months · about ${estimate.memoryMb.toFixed(0)} MB`,
+  );
   try {
-    if (!state.loadResult) {
+    const currentLoadPayload = gatherLoadPayload();
+    await fillCsvPayload(currentLoadPayload);
+    const dataInputsChanged = JSON.stringify(currentLoadPayload) !== JSON.stringify(state.loadPayload);
+    if (!state.loadResult || dataInputsChanged) {
       await onLoad();
       if (!state.loadResult) return;
+      showOverlay(
+        "Running simulation...",
+        `${Number($("paths").value).toLocaleString()} paths · ${Number($("periods").value)} months · about ${estimate.memoryMb.toFixed(0)} MB`,
+      );
     }
     const payload = gatherSimPayload();
     const data = await postJSON("/api/simulate", payload);
@@ -1293,12 +1493,13 @@ async function onRun() {
     notify("Simulation complete", "success");
     renderResults(data);
     switchTab("tab-growth");
+    requestAnimationFrame(focusResults);
   } catch (error) {
     setStatus(message, error.message, true);
     notify(error.message, "error");
   } finally {
-    button.disabled = false;
     hideOverlay();
+    updateRunAvailability();
   }
 }
 
@@ -1306,7 +1507,7 @@ async function onCompare() {
   const message = $("run-message");
   const button = $("compare-btn");
   button.disabled = true;
-  showOverlay("Comparing distributions...");
+  showOverlay("Comparing distributions...", "Running Normal and Student-t scenarios with identical assumptions");
   try {
     const payload = gatherSimPayload();
     const data = await postJSON("/api/compare", payload);
@@ -1317,12 +1518,13 @@ async function onCompare() {
     $("compare-content").classList.remove("hidden");
     document.querySelectorAll("#tab-compare .results-empty").forEach((el) => el.classList.add("hidden"));
     switchTab("tab-compare");
+    requestAnimationFrame(focusResults);
   } catch (error) {
     setStatus(message, error.message, true);
     notify(error.message, "error");
   } finally {
-    button.disabled = false;
     hideOverlay();
+    updateRunAvailability();
   }
 }
 
@@ -1363,11 +1565,12 @@ async function onDownloadWealth() {
     notify("Run the current inputs before exporting results.", "error");
     return;
   }
-  showOverlay("Exporting wealth paths...");
+  showOverlay("Exporting sampled paths...", "Replaying the original seeded path chunk and retaining up to 1,000 paths");
   try {
-    const data = await postJSON("/api/wealth", state.lastSimPayload);
-    downloadCSV("wealth_paths.csv", data.csv);
-    notify("Wealth paths downloaded", "success");
+    const data = await postJSON("/api/wealth", { ...state.lastSimPayload, export_paths: 1000 });
+    downloadCSV("wealth_paths_sample.csv", data.csv);
+    const qualifier = data.sampled ? ` sampled from ${data.requested_paths.toLocaleString()}` : "";
+    notify(`${data.exported_paths.toLocaleString()} wealth paths downloaded${qualifier}`, "success");
   } catch (error) {
     notify(error.message, "error");
   } finally {
@@ -1379,7 +1582,7 @@ async function onDownloadWealth() {
 
 const CONTROL_IDS = [
   "yahoo-tickers", "yahoo-start", "yahoo-end", "yahoo-proxies", "synthetic-seed",
-  "synthetic-method", "synthetic-categories",
+  "synthetic-method", "synthetic-categories", "macro-vintage",
   "csv-growth", "csv-inflation", "base-currency", "currency-map", "corr-blend",
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
   "macro-lag", "transition-uncertainty", "periods", "paths", "workers", "seed", "distribution",
@@ -1387,6 +1590,8 @@ const CONTROL_IDS = [
   "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate",
   "financing-inflation-sensitivity", "maintenance-margin",
   "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
+  "regime-temperature", "mean-prior-strength", "parameter-draws", "parameter-block-size",
+  "macro-transition-weight", "dcc-alpha", "dcc-beta", "dcc-asymmetry",
 ];
 
 function saveControls() {
@@ -1401,6 +1606,9 @@ function saveControls() {
   data.useCorr = $("use-corr-override").checked;
   data.garch = $("garch").checked;
   data.walkForward = $("walk-forward").checked;
+  data.probabilisticRegimes = $("probabilistic-regimes").checked;
+  data.jointMacro = $("joint-macro").checked;
+  data.dynamicCorrelation = $("dynamic-correlation").checked;
   data.corrTargets = gatherCorrelationTargets();
   localStorage.setItem("mcq-controls", JSON.stringify(data));
 }
@@ -1422,6 +1630,9 @@ function restoreControls() {
     if (data.useCorr !== undefined) $("use-corr-override").checked = data.useCorr;
     if (data.garch !== undefined) $("garch").checked = data.garch;
     if (data.walkForward !== undefined) $("walk-forward").checked = data.walkForward;
+    if (data.probabilisticRegimes !== undefined) $("probabilistic-regimes").checked = data.probabilisticRegimes;
+    if (data.jointMacro !== undefined) $("joint-macro").checked = data.jointMacro;
+    if (data.dynamicCorrelation !== undefined) $("dynamic-correlation").checked = data.dynamicCorrelation;
     document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
       if (data.corrTargets && data.corrTargets[slider.dataset.state] !== undefined) slider.value = data.corrTargets[slider.dataset.state];
     });
@@ -1501,6 +1712,8 @@ function init() {
 
   const transition = $("transition-uncertainty");
   transition.addEventListener("input", () => { $("transition-uncertainty-output").textContent = Number(transition.value).toFixed(2); });
+  const macroTransition = $("macro-transition-weight");
+  macroTransition.addEventListener("input", () => { $("macro-transition-weight-output").textContent = Number(macroTransition.value).toFixed(2); });
 
   const sliderBox = $("corr-sliders");
   REGIME_ORDER.forEach((state) => {
@@ -1545,6 +1758,7 @@ function init() {
   $("theme-toggle").addEventListener("click", toggleTheme);
   $("equalize-btn").addEventListener("click", equalizeWeights);
   $("reset-btn").addEventListener("click", resetControls);
+  $("edit-scenario").addEventListener("click", editScenario);
 
   document.addEventListener("input", () => { saveControls(); updateMethodologyControls(); });
   document.addEventListener("change", () => { saveControls(); updateMethodologyControls(); });
@@ -1556,6 +1770,8 @@ function init() {
   });
 
   restoreControls();
+  $("transition-uncertainty-output").textContent = Number($("transition-uncertainty").value).toFixed(2);
+  $("macro-transition-weight-output").textContent = Number($("macro-transition-weight").value).toFixed(2);
   toggleSourceGroups();
   updateMethodologyControls();
   applyTheme(localStorage.getItem("mcq-theme") || "dark");
@@ -1566,7 +1782,12 @@ function init() {
       const badge = $("connection");
       badge.textContent = "connected";
       badge.className = "badge badge-ok";
-      onLoad();
+      if (new URLSearchParams(window.location.search).has("skipAutoLoad")) {
+        setStatus($("load-message"), "Connected. Choose custom files or run to load market data.");
+        updateRunAvailability();
+      } else {
+        onLoad();
+      }
     })
     .catch(() => {
       const badge = $("connection");

@@ -64,6 +64,49 @@ def test_pipeline_supports_garch_and_threshold_window():
     assert any("causal expanding windows" in warning for warning in scenario.diagnostics.warnings)
 
 
+def test_pipeline_does_not_double_lag_availability_aligned_macro():
+    kwargs = _scenario_kwargs({"macro_lag_periods": 2, "walk_forward": False})
+    kwargs["macro"].attrs.update(
+        {
+            "data_vintage": "user_point_in_time",
+            "point_in_time": True,
+            "availability_aligned": True,
+        }
+    )
+
+    scenario = run_scenario(**kwargs)
+
+    assert scenario.model.metadata["macro_lag_periods"] == 0
+    assert scenario.model.metadata["requested_macro_lag_periods"] == 2
+
+
+def test_pipeline_combines_parameter_macro_and_dependence_uncertainty():
+    scenario = run_scenario(
+        **_scenario_kwargs(
+            {
+                "paths": 12,
+                "periods": 6,
+                "walk_forward": False,
+                "distribution": "student_t",
+                "probabilistic_regimes": True,
+                "mean_prior_strength": 24.0,
+                "parameter_draws": 3,
+                "parameter_block_size": 6,
+                "joint_macro": True,
+                "dynamic_correlation": True,
+            }
+        )
+    )
+
+    assert scenario.parameter_uncertainty is not None
+    assert len(scenario.parameter_uncertainty) == 3
+    assert scenario.result.regimes.shape == (6, 12)
+    assert scenario.result.macro_paths.shape == (6, 12, 2)
+    assert scenario.reporting_wealth.shape == scenario.wealth.shape
+    assert scenario.model.metadata["regime_assignment"] == "probabilistic"
+    assert scenario.model.metadata["inflation_model"] == "joint_macro_path"
+
+
 def test_pipeline_runs_walk_forward_validation_on_long_history():
     rng = np.random.default_rng(2)
     dates = pd.date_range("1990-01-31", periods=240, freq="ME")

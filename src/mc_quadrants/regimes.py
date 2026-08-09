@@ -89,6 +89,99 @@ def _causal_cutoffs(values: pd.Series, threshold: ThresholdSpec, min_periods: in
     return cutoffs.reindex(values.index)
 
 
+def _threshold_series(
+    values: pd.Series,
+    threshold: ThresholdSpec,
+    threshold_window: int | None,
+) -> pd.Series:
+    """Return an index-aligned cutoff series for hard or soft classification."""
+
+    if threshold_window is not None:
+        threshold_window = int(threshold_window)
+        if threshold_window <= 0:
+            raise ValueError("threshold_window must be positive or None.")
+        return _causal_cutoffs(values, threshold, threshold_window)
+    return pd.Series(resolve_threshold(values, threshold), index=values.index, dtype=float)
+
+
+def _probability_scale(
+    values: pd.Series,
+    cutoff: pd.Series,
+    threshold_window: int | None,
+    temperature: float,
+) -> pd.Series:
+    """Estimate a causal scale for smooth high/low probabilities.
+
+    ``temperature`` is expressed in historical standard deviations. A value
+    near zero approaches hard classification, while larger values make the
+    boundary deliberately less certain.
+    """
+
+    if not np.isfinite(temperature) or temperature <= 0:
+        raise ValueError("temperature must be positive and finite.")
+    prior = values.shift(1)
+    minimum = max(int(threshold_window or 12), 2)
+    scale = prior.expanding(min_periods=minimum).std(ddof=1)
+    fallback = float(values.std(ddof=1))
+    if not np.isfinite(fallback) or fallback <= 0:
+        fallback = max(float(np.nanmedian(np.abs(values - cutoff))), 1.0)
+    scale = scale.fillna(fallback).clip(lower=max(fallback * 1e-6, 1e-9))
+    return scale * float(temperature)
+
+
+def quadrant_probabilities(
+    macro: pd.DataFrame,
+    growth_col: str = "growth",
+    inflation_col: str = "inflation",
+    growth_threshold: ThresholdSpec = "median",
+    inflation_threshold: ThresholdSpec = "median",
+    threshold_window: int | None = None,
+    temperature: float = 0.35,
+) -> pd.DataFrame:
+    """Return causal probabilities for the four growth/inflation quadrants.
+
+    The high/low decisions are logistic rather than discontinuous. Their joint
+    probabilities preserve the four familiar quadrant labels and sum to one
+    on every classified row. Missing inputs and unavailable causal cutoffs are
+    left as missing rather than silently imputed.
+    """
+
+    missing = {growth_col, inflation_col}.difference(macro.columns)
+    if missing:
+        raise KeyError(f"Macro data is missing required columns: {sorted(missing)}")
+    growth = pd.to_numeric(macro[growth_col], errors="coerce")
+    inflation = pd.to_numeric(macro[inflation_col], errors="coerce")
+    growth_cutoff = _threshold_series(growth, growth_threshold, threshold_window)
+    inflation_cutoff = _threshold_series(inflation, inflation_threshold, threshold_window)
+    growth_scale = _probability_scale(growth, growth_cutoff, threshold_window, temperature)
+    inflation_scale = _probability_scale(
+        inflation,
+        inflation_cutoff,
+        threshold_window,
+        temperature,
+    )
+
+    def logistic(values: pd.Series) -> pd.Series:
+        clipped = values.clip(lower=-35.0, upper=35.0)
+        return 1.0 / (1.0 + np.exp(-clipped))
+
+    growth_high = logistic((growth - growth_cutoff) / growth_scale)
+    inflation_high = logistic((inflation - inflation_cutoff) / inflation_scale)
+    probabilities = pd.DataFrame(
+        {
+            Regime.HIGH_GROWTH_LOW_INFLATION.value: growth_high * (1.0 - inflation_high),
+            Regime.HIGH_GROWTH_HIGH_INFLATION.value: growth_high * inflation_high,
+            Regime.LOW_GROWTH_HIGH_INFLATION.value: (1.0 - growth_high) * inflation_high,
+            Regime.LOW_GROWTH_LOW_INFLATION.value: (1.0 - growth_high) * (1.0 - inflation_high),
+        },
+        index=macro.index,
+    )
+    invalid = growth.isna() | inflation.isna() | growth_cutoff.isna() | inflation_cutoff.isna()
+    probabilities.loc[invalid] = np.nan
+    row_sums = probabilities.sum(axis=1, min_count=1)
+    return probabilities.div(row_sums, axis=0)
+
+
 def classify_quadrants(
     macro: pd.DataFrame,
     growth_col: str = "growth",
@@ -110,15 +203,8 @@ def classify_quadrants(
     if missing:
         raise KeyError(f"Macro data is missing required columns: {sorted(missing)}")
 
-    if threshold_window is not None:
-        threshold_window = int(threshold_window)
-        if threshold_window <= 0:
-            raise ValueError("threshold_window must be positive or None.")
-        growth_cutoff = _causal_cutoffs(macro[growth_col], growth_threshold, threshold_window)
-        inflation_cutoff = _causal_cutoffs(macro[inflation_col], inflation_threshold, threshold_window)
-    else:
-        growth_cutoff = resolve_threshold(macro[growth_col], growth_threshold)
-        inflation_cutoff = resolve_threshold(macro[inflation_col], inflation_threshold)
+    growth_cutoff = _threshold_series(macro[growth_col], growth_threshold, threshold_window)
+    inflation_cutoff = _threshold_series(macro[inflation_col], inflation_threshold, threshold_window)
 
     growth_high = macro[growth_col] >= growth_cutoff
     inflation_high = macro[inflation_col] >= inflation_cutoff
@@ -209,3 +295,29 @@ def estimate_transition_matrix(
         raise ValueError("At least one transition row has no observations or smoothing.")
 
     return counts.div(row_sums, axis=0)
+
+
+def estimate_probabilistic_transition_matrix(
+    probabilities: pd.DataFrame,
+    states: Iterable[str] = REGIME_ORDER,
+    smoothing: float = 1.0,
+) -> pd.DataFrame:
+    """Estimate expected transition counts from soft regime memberships."""
+
+    if not np.isfinite(smoothing) or smoothing < 0:
+        raise ValueError("smoothing must be a finite, non-negative number.")
+    state_list = list(dict.fromkeys(states))
+    missing = set(state_list).difference(probabilities.columns)
+    if missing:
+        raise KeyError(f"Regime probabilities are missing states: {sorted(missing)}")
+    clean = probabilities.loc[:, state_list].dropna().sort_index()
+    counts = np.full((len(state_list), len(state_list)), float(smoothing), dtype=float)
+    consecutive = _consecutive_periods(clean.index)
+    values = clean.to_numpy(dtype=float)
+    for position in range(max(len(values) - 1, 0)):
+        if consecutive[position]:
+            counts += np.outer(values[position], values[position + 1])
+    row_sums = counts.sum(axis=1, keepdims=True)
+    if (row_sums == 0).any():
+        raise ValueError("At least one transition row has no observations or smoothing.")
+    return pd.DataFrame(counts / row_sums, index=state_list, columns=state_list)

@@ -3,9 +3,12 @@ import pandas as pd
 import pytest
 
 from mc_quadrants.regimes import (
+    REGIME_ORDER,
     Regime,
     classify_quadrants,
+    estimate_probabilistic_transition_matrix,
     estimate_transition_matrix,
+    quadrant_probabilities,
     sojourn_durations,
 )
 
@@ -150,3 +153,28 @@ def test_transition_matrix_does_not_count_transitions_across_date_gaps():
 
     assert transition.loc[states[0], states[1]] == pytest.approx(0.75)
     assert transition.loc[states[1], states[0]] == pytest.approx(0.5)
+
+
+def test_probabilistic_quadrants_are_normalized_and_causal():
+    dates = pd.date_range("2010-01-31", periods=36, freq="ME")
+    macro = pd.DataFrame(
+        {
+            "growth": np.linspace(-2.0, 3.0, len(dates)),
+            "inflation": np.linspace(1.0, 5.0, len(dates)),
+        },
+        index=dates,
+    )
+
+    probabilities = quadrant_probabilities(
+        macro,
+        threshold_window=12,
+        temperature=0.35,
+    )
+    classified = probabilities.dropna()
+
+    assert len(classified) == 24
+    assert np.allclose(classified.sum(axis=1), 1.0)
+    assert ((classified > 0) & (classified < 1)).all().all()
+    transition = estimate_probabilistic_transition_matrix(probabilities)
+    assert list(transition.index) == REGIME_ORDER
+    assert np.allclose(transition.sum(axis=1), 1.0)

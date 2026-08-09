@@ -130,6 +130,13 @@ REBALANCE_KEYS = {
     "annual": 12,
 }
 
+MAX_PERIODS = 360
+MAX_PATHS = 120_000
+MAX_WORKERS = 16
+MAX_ESTIMATED_MEMORY_MB = 384
+DEFAULT_EXPORT_PATHS = 1_000
+MAX_EXPORT_PATHS = 5_000
+
 
 def parse_tickers(raw_tickers: str | list[str]) -> list[str]:
     raw_values = (
@@ -308,6 +315,7 @@ def load_data_source(
         inflation_threshold = _threshold_value(payload.get("inflation_threshold", "median"))
         threshold_window = int(payload.get("threshold_window", 0) or 0) or None
         macro_lag = int(payload.get("macro_lag", 1))
+        macro_vintage = str(payload.get("macro_vintage", "latest"))
         start = str(payload.get("start", "1990-01-01"))
         end = str(payload.get("end", date.today().isoformat()))
         macro, returns, available, synthetic_report = load_market_data(
@@ -323,10 +331,16 @@ def load_data_source(
             inflation_threshold=inflation_threshold,
             threshold_window=threshold_window,
             macro_lag_periods=macro_lag,
+            macro_vintage=macro_vintage,
         )
         returns.attrs["synthetic_report"] = synthetic_report
         available_list = list(available)
-        msg = f"Loaded {len(available_list)} tickers from Yahoo Finance."
+        timing_label = (
+            "ALFRED initial-release, availability-aligned macro data"
+            if bool(macro.attrs.get("point_in_time", False))
+            else "latest-revised FRED macro data"
+        )
+        msg = f"Loaded {len(available_list)} tickers from Yahoo Finance with {timing_label}."
         if historical_proxies:
             msg += f" Backfilled proxies: {', '.join(historical_proxies.values())}."
         if synthetic_assets:
@@ -349,13 +363,37 @@ def load_data_source(
             raise ValueError(f"Inflation column not found in macro CSV: {inflation_col}")
         if growth_col == inflation_col:
             raise ValueError("Growth and inflation must use different macro columns.")
-        if str(payload.get("asset_input", "Price levels")) == "Price levels":
+        asset_input = str(payload.get("asset_input", "Price levels"))
+        if asset_input == "Price levels":
             returns = prices_to_returns(asset_data, method="log")
         else:
             returns = asset_data.apply(pd.to_numeric, errors="coerce")
         if bool(payload.get("monthly", True)):
-            returns = returns.resample("ME").sum(min_count=1)
-        macro_data = macro_data.apply(pd.to_numeric, errors="coerce").resample("ME").last()
+            if asset_input == "Simple returns":
+                returns = (1.0 + returns).resample("ME").prod(min_count=1) - 1.0
+            else:
+                returns = returns.resample("ME").sum(min_count=1)
+        if asset_input == "Simple returns":
+            if (returns <= -1.0).any().any():
+                raise ValueError("Simple returns must be greater than -100%.")
+            returns = np.log1p(returns)
+        elif asset_input not in {"Price levels", "Log returns", "Returns"}:
+            raise ValueError("Asset input must be Price levels, Log returns, or Simple returns.")
+        available_date = None
+        if "AvailableDate" in macro_data.columns:
+            available_date = pd.to_datetime(macro_data.pop("AvailableDate"), errors="coerce")
+        macro_data = macro_data.apply(pd.to_numeric, errors="coerce")
+        if available_date is not None:
+            macro_data = macro_data.loc[available_date.notna()].copy()
+            macro_data.index = pd.DatetimeIndex(available_date.dropna()).to_period("M").to_timestamp("M")
+        macro_data = macro_data.resample("ME").last()
+        macro_data.attrs.update(
+            {
+                "data_vintage": "user_point_in_time" if available_date is not None else "user_supplied",
+                "point_in_time": available_date is not None,
+                "availability_aligned": available_date is not None,
+            }
+        )
         returns = _normalize_columns(returns)
         returns = returns.dropna(how="all")
         if returns.empty or not any(returns[column].notna().any() for column in returns.columns):
@@ -418,6 +456,11 @@ def build_load_response(
         "macro": _frame_preview(macro, columns=[growth_col, inflation_col]),
         "returns": _frame_preview(returns),
         "synthetic": returns.attrs.get("synthetic_report", {}),
+        "data_timing": {
+            "vintage": macro.attrs.get("data_vintage", "user_supplied"),
+            "point_in_time": bool(macro.attrs.get("point_in_time", False)),
+            "availability_aligned": bool(macro.attrs.get("availability_aligned", False)),
+        },
     }
 
 
@@ -427,17 +470,26 @@ def _threshold_value(raw: Any) -> str | float:
     return raw if raw in {"median", "mean"} else float(raw)
 
 
+def _asset_count(payload: Mapping[str, Any]) -> int:
+    selected = parse_tickers(payload.get("selected_tickers", []))
+    if selected:
+        return len(selected)
+    weights = payload.get("weights") or {}
+    if isinstance(weights, Mapping) and weights:
+        return len(weights)
+    return max(len(parse_tickers(payload.get("tickers", []))), 1)
+
+
 def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
     raw = payload.get("chunk_size")
     paths = int(payload.get("paths", 3000))
     periods = int(payload.get("periods", 120))
     if raw is None or raw == "":
-        # Keep the per-chunk transient (periods x chunk x assets) roughly
-        # constant: at 120 periods a 5000-path chunk peaks near 500MB. Longer
-        # horizons shrink the chunk so peak memory stays under free-tier limits.
-        target_chunk = 5000
-        if periods > 120:
-            target_chunk = max(1000, int(round(5000 * 120 / periods)))
+        # Hold the dominant periods x chunk x assets transient near the default
+        # eight-asset, 120-period footprint instead of scaling by horizon alone.
+        assets = _asset_count(payload)
+        target_chunk = max(500, int(round(5000 * 120 * 8 / max(periods * assets, 1))))
+        target_chunk = min(target_chunk, 5000)
         return target_chunk if paths > target_chunk else None
     chunk_size = int(raw)
     if chunk_size <= 0:
@@ -450,12 +502,76 @@ def _workers_value(payload: Mapping[str, Any]) -> int:
     if raw is None or raw == "":
         return 1
     workers = int(raw)
-    if workers < 1 or workers > 64:
-        raise ValueError("workers must be between 1 and 64.")
+    if workers < 1 or workers > MAX_WORKERS:
+        raise ValueError(f"workers must be between 1 and {MAX_WORKERS}.")
     return workers
 
 
+def simulation_resource_estimate(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Estimate the dominant in-memory arrays for one simulation request."""
+
+    periods = int(payload.get("periods", 120))
+    paths = int(payload.get("paths", 3000))
+    assets = _asset_count(payload)
+    workers = _workers_value(payload)
+    chunk_size = _chunk_size_value(payload) or paths
+    chunk_size = min(chunk_size, paths)
+    joint_macro = bool(payload.get("joint_macro", False))
+    dynamic_correlation = bool(payload.get("dynamic_correlation", False))
+
+    wealth_bytes = periods * paths * 8
+    regime_bytes = periods * paths
+    response_bytes = paths * 8 * 2
+    macro_path_bytes = periods * paths * 2 * 8 if joint_macro else 0
+    transient_per_worker = periods * chunk_size * assets * 8 * 3
+    if joint_macro:
+        transient_per_worker += periods * chunk_size * 2 * 8
+    if dynamic_correlation:
+        # Q, normalized correlations, and Cholesky factors are the dominant
+        # per-path ADCC work arrays.
+        transient_per_worker += chunk_size * assets * assets * 8 * 3
+    worker_overhead = workers * 32 * 1024**2
+    fixed_overhead = 64 * 1024**2
+    estimated_bytes = (
+        wealth_bytes
+        + regime_bytes
+        + response_bytes
+        + macro_path_bytes
+        + transient_per_worker * workers
+        + worker_overhead
+        + fixed_overhead
+    )
+    return {
+        "periods": periods,
+        "paths": paths,
+        "assets": assets,
+        "workers": workers,
+        "chunk_size": chunk_size,
+        "joint_macro": joint_macro,
+        "dynamic_correlation": dynamic_correlation,
+        "estimated_memory_mb": round(estimated_bytes / 1024**2, 1),
+        "limit_memory_mb": MAX_ESTIMATED_MEMORY_MB,
+        "work_units": periods * paths * assets,
+    }
+
+
+def _validate_simulation_size(payload: Mapping[str, Any]) -> dict[str, Any]:
+    estimate = simulation_resource_estimate(payload)
+    if estimate["periods"] < 1 or estimate["periods"] > MAX_PERIODS:
+        raise ValueError(f"periods must be between 1 and {MAX_PERIODS}.")
+    if estimate["paths"] < 1 or estimate["paths"] > MAX_PATHS:
+        raise ValueError(f"paths must be between 1 and {MAX_PATHS:,}.")
+    if estimate["estimated_memory_mb"] > MAX_ESTIMATED_MEMORY_MB:
+        raise ValueError(
+            "This scenario is estimated to need "
+            f"{estimate['estimated_memory_mb']:.0f} MB, above the "
+            f"{MAX_ESTIMATED_MEMORY_MB} MB safety budget. Reduce paths, periods, assets, or workers."
+        )
+    return estimate
+
+
 def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
+    _validate_simulation_size(payload)
     distribution = str(payload.get("distribution", "normal")).lower().replace("-", "_")
     distribution = DISTRIBUTION_KEYS.get(distribution, distribution)
     if distribution not in DISTRIBUTION_KEYS.values():
@@ -528,6 +644,35 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     garch_beta = float(payload.get("garch_beta", 0.85))
     if not 0 <= garch_alpha < 1 or not 0 <= garch_beta < 1 or garch_alpha + garch_beta >= 1:
         raise ValueError("garch_alpha and garch_beta must satisfy 0 <= alpha, beta < 1 and alpha + beta < 1.")
+    probabilistic_regimes = bool(payload.get("probabilistic_regimes", False))
+    regime_temperature = float(payload.get("regime_temperature", 0.35))
+    if not np.isfinite(regime_temperature) or regime_temperature <= 0:
+        raise ValueError("regime_temperature must be positive and finite.")
+    mean_prior_strength = float(payload.get("mean_prior_strength", 0.0))
+    if not np.isfinite(mean_prior_strength) or mean_prior_strength < 0:
+        raise ValueError("mean_prior_strength must be finite and non-negative.")
+    parameter_draws = int(payload.get("parameter_draws", 0))
+    parameter_block_size = int(payload.get("parameter_block_size", 12))
+    if not 0 <= parameter_draws <= 100:
+        raise ValueError("parameter_draws must be between 0 and 100.")
+    if parameter_block_size < 1:
+        raise ValueError("parameter_block_size must be positive.")
+    joint_macro = bool(payload.get("joint_macro", False))
+    macro_transition_weight = float(payload.get("macro_transition_weight", 0.35))
+    if not 0 <= macro_transition_weight <= 1:
+        raise ValueError("macro_transition_weight must be between 0 and 1.")
+    dynamic_correlation = bool(payload.get("dynamic_correlation", False))
+    dcc_alpha = float(payload.get("dcc_alpha", 0.04))
+    dcc_beta = float(payload.get("dcc_beta", 0.94))
+    dcc_asymmetry = float(payload.get("dcc_asymmetry", 0.01))
+    if min(dcc_alpha, dcc_beta, dcc_asymmetry) < 0 or dcc_alpha + dcc_beta + dcc_asymmetry >= 1:
+        raise ValueError("DCC parameters must be non-negative and sum to less than 1.")
+    if model_kind == "hmm" and (parameter_draws or joint_macro or probabilistic_regimes):
+        raise ValueError(
+            "Probabilistic quadrants, parameter bootstrap, and joint macro paths require the quadrant model."
+        )
+    if distribution in {"bootstrap", "block_bootstrap"} and (joint_macro or dynamic_correlation):
+        raise ValueError("Joint macro paths and dynamic correlation require a parametric return distribution.")
     return {
         "growth_threshold": _threshold_value(payload.get("growth_threshold", "median")),
         "inflation_threshold": _threshold_value(payload.get("inflation_threshold", "median")),
@@ -562,6 +707,17 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "garch_alpha": garch_alpha,
         "garch_beta": garch_beta,
         "walk_forward": bool(payload.get("walk_forward", True)),
+        "probabilistic_regimes": probabilistic_regimes,
+        "regime_temperature": regime_temperature,
+        "mean_prior_strength": mean_prior_strength,
+        "parameter_draws": parameter_draws,
+        "parameter_block_size": parameter_block_size,
+        "joint_macro": joint_macro,
+        "macro_transition_weight": macro_transition_weight,
+        "dynamic_correlation": dynamic_correlation,
+        "dcc_alpha": dcc_alpha,
+        "dcc_beta": dcc_beta,
+        "dcc_asymmetry": dcc_asymmetry,
         "chunk_size": _chunk_size_value(payload),
         "workers": _workers_value(payload),
     }
@@ -608,6 +764,29 @@ def _wealth_percentiles(wealth: pd.DataFrame) -> pd.DataFrame:
     values = wealth.to_numpy(dtype=float)
     quantiles = np.quantile(values, [0.05, 0.50, 0.95], axis=1)
     return pd.DataFrame(quantiles.T, columns=[0.05, 0.50, 0.95])
+
+
+def _median_period_returns(wealth: pd.DataFrame, payload: Mapping[str, Any]) -> list[float]:
+    """Calculate cross-sectional median time-weighted return for each period."""
+
+    values = wealth.to_numpy(dtype=float)
+    annual_inflation = float(payload.get("annual_inflation", 0.0)) / 100.0
+    contribution = float(payload.get("contribution", 0.0))
+    withdrawal = float(payload.get("withdrawal", 0.0))
+    medians: list[float] = []
+    for period in range(len(values)):
+        previous = 100.0 if period == 0 else values[period - 1]
+        previous_deflator = (1.0 + annual_inflation) ** (-period / 12.0)
+        current_deflator = (1.0 + annual_inflation) ** (-(period + 1) / 12.0)
+        denominator = previous * previous_deflator + contribution * previous_deflator
+        numerator = values[period] * current_deflator + withdrawal * current_deflator
+        with np.errstate(divide="ignore", invalid="ignore"):
+            returns = numerator / denominator - 1.0
+        returns = np.asarray(returns, dtype=float)
+        returns[(denominator <= 0) | (numerator < 0)] = np.nan
+        finite = returns[np.isfinite(returns)]
+        medians.append(float(np.median(finite)) if finite.size else 0.0)
+    return medians
 
 
 def _max_drawdown_paths(wealth: pd.DataFrame, initial_value: float = 100.0) -> np.ndarray:
@@ -674,6 +853,44 @@ def _validation_response(walk_forward: Any) -> dict[str, Any] | None:
     }
 
 
+def _parameter_uncertainty_response(frame: pd.DataFrame | None) -> dict[str, Any] | None:
+    if frame is None or frame.empty:
+        return None
+    metric_columns = [column for column in frame.columns if column != "draw"]
+    bands = {
+        str(column): {
+            "p05": float(frame[column].quantile(0.05)),
+            "median": float(frame[column].quantile(0.50)),
+            "p95": float(frame[column].quantile(0.95)),
+        }
+        for column in metric_columns
+    }
+    return {
+        "draws": int(len(frame)),
+        "bands": bands,
+        "columns": [str(column) for column in frame.columns],
+        "rows": [
+            [_json_value(value) for value in record]
+            for record in frame.itertuples(index=False, name=None)
+        ],
+    }
+
+
+def _macro_path_response(result: Any) -> dict[str, Any] | None:
+    if result.macro_paths is None or not result.macro_columns:
+        return None
+    response: dict[str, Any] = {"periods": list(range(1, len(result.macro_paths) + 1)), "series": {}}
+    for index, column in enumerate(result.macro_columns):
+        values = result.macro_paths[:, :, index]
+        quantiles = np.quantile(values, [0.05, 0.50, 0.95], axis=1)
+        response["series"][str(column)] = {
+            "p05": quantiles[0].tolist(),
+            "median": quantiles[1].tolist(),
+            "p95": quantiles[2].tolist(),
+        }
+    return response
+
+
 def _simulation_start_date(macro: pd.DataFrame) -> str | None:
     if macro is None or macro.empty:
         return None
@@ -685,11 +902,10 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     scenario, selected_tickers, macro = run_scenario_payload(payload)
     model = scenario.model
     result = scenario.result
-    wealth = scenario.wealth
+    wealth = scenario.reporting_wealth if scenario.reporting_wealth is not None else scenario.wealth
     summary = scenario.summary
     growth_col = scenario.model.metadata.get("growth_col", "growth")
     inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
-    wealth_shape = wealth.shape
     percentiles = _wealth_percentiles(wealth)
     terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
     regime_timelines: dict[str, list[str]] = {}
@@ -755,7 +971,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "ok": True,
         "summary": summary_values,
         "currency": scenario.model.metadata.get("base_currency", "USD"),
-        "terms": "real" if scenario_kwargs(payload)["annual_inflation"] > 0 else "nominal",
+        "terms": (
+            "real"
+            if scenario_kwargs(payload)["annual_inflation"] > 0
+            or model.metadata.get("inflation_model") == "joint_macro_path"
+            else "nominal"
+        ),
         "warnings": list(scenario.diagnostics.warnings),
         "costs": costs,
         "wealth": {
@@ -764,6 +985,10 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "median": percentiles[0.50].tolist(),
             "p95": percentiles[0.95].tolist(),
         },
+        "monthly_returns": _median_period_returns(
+            wealth,
+            {**dict(payload), "annual_inflation": 0.0},
+        ),
         "terminal": terminal_values.tolist(),
         "drawdowns": _max_drawdown_paths(wealth).tolist(),
         "regime_timeline": regime_timelines["median"],
@@ -783,6 +1008,30 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             for state in model.states
         },
         "validation": _validation_response(scenario.walk_forward),
+        "parameter_uncertainty": _parameter_uncertainty_response(scenario.parameter_uncertainty),
+        "regime_probabilities": [
+            {
+                "state": state,
+                "label": _state_label(state),
+                "probability": float(
+                    model.metadata.get("latest_regime_probabilities", {}).get(state, 0.0)
+                ),
+            }
+            for state in model.states
+        ],
+        "macro_paths": _macro_path_response(result),
+        "methodology": {
+            "data_vintage": model.metadata.get("data_vintage", "user_supplied"),
+            "point_in_time": bool(model.metadata.get("point_in_time", False)),
+            "availability_aligned": bool(model.metadata.get("availability_aligned", False)),
+            "macro_lag_periods": int(model.metadata.get("macro_lag_periods", 0)),
+            "regime_assignment": model.metadata.get("regime_assignment", "hard"),
+            "mean_prior_strength": float(model.metadata.get("mean_prior_strength", 0.0)),
+            "parameter_draws": int(payload.get("parameter_draws", 0)),
+            "joint_macro": bool(payload.get("joint_macro", False)),
+            "dynamic_correlation": bool(payload.get("dynamic_correlation", False)),
+            "inflation_model": model.metadata.get("inflation_model", "deterministic"),
+        },
         "model_kind": scenario.model.metadata.get("model_kind", "quadrant"),
         "diagnostics": {
             "columns": [str(column) for column in diagnostics.columns],
@@ -792,6 +1041,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             ],
         },
         "selected_tickers": selected_tickers,
+        "resources": simulation_resource_estimate(payload),
         "start_date": _simulation_start_date(macro),
         "message": (
             f"Simulation complete: {len(wealth)} periods x {wealth.shape[1]} paths. "
@@ -801,10 +1051,36 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def build_wealth_csv(payload: Mapping[str, Any]) -> dict[str, Any]:
-    scenario, selected_tickers, _ = run_scenario_payload(payload)
-    wealth = scenario.wealth.copy()
+    requested_paths = int(payload.get("paths", DEFAULT_EXPORT_PATHS))
+    if requested_paths < 1 or requested_paths > MAX_PATHS:
+        raise ValueError(f"paths must be between 1 and {MAX_PATHS:,}.")
+    export_paths = int(payload.get("export_paths", DEFAULT_EXPORT_PATHS))
+    export_paths = max(1, min(export_paths, requested_paths, MAX_EXPORT_PATHS))
+    original_chunk_size = _chunk_size_value(payload) or requested_paths
+    # Re-run at least the original first chunk so seeded vectorized draws line
+    # up exactly with the completed simulation, then retain only the bounded
+    # number of columns requested for the CSV.
+    replayed_paths = min(
+        requested_paths,
+        max(export_paths, min(original_chunk_size, MAX_EXPORT_PATHS)),
+    )
+    export_payload = dict(payload)
+    export_payload["paths"] = replayed_paths
+    export_payload["workers"] = 1
+    export_payload["walk_forward"] = False
+    scenario, selected_tickers, _ = run_scenario_payload(export_payload)
+    source_wealth = scenario.reporting_wealth if scenario.reporting_wealth is not None else scenario.wealth
+    wealth = source_wealth.iloc[:, :export_paths].copy()
     wealth.insert(0, "period", range(1, len(wealth) + 1))
-    return {"ok": True, "csv": wealth.to_csv(index=False), "tickers": selected_tickers}
+    return {
+        "ok": True,
+        "csv": wealth.to_csv(index=False),
+        "tickers": selected_tickers,
+        "exported_paths": export_paths,
+        "requested_paths": requested_paths,
+        "replayed_paths": replayed_paths,
+        "sampled": export_paths < requested_paths,
+    }
 
 
 def build_compare_response(payload: Mapping[str, Any]) -> dict[str, Any]:

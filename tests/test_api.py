@@ -1,3 +1,4 @@
+import io
 import json
 
 import numpy as np
@@ -145,6 +146,7 @@ def test_simulate_reports_real_terms_with_inflation():
     assert response["ok"] is True
     assert response["terms"] == "real"
     assert response["summary"]["sharpe_ratio"] == response["summary"]["sharpe_ratio"]
+    assert response["resources"]["estimated_memory_mb"] > 0
 
 
 def test_scenario_kwargs_include_long_term_fields():
@@ -318,6 +320,57 @@ def test_scenario_kwargs_rejects_invalid_workers():
         api.scenario_kwargs({"weights": {"SPY": 100}, "workers": 0})
 
 
+def test_resource_guard_scales_with_scenario_dimensions():
+    compact = api.simulation_resource_estimate(
+        {"weights": {"SPY": 100}, "periods": 12, "paths": 1000, "workers": 1}
+    )
+    larger = api.simulation_resource_estimate(
+        {
+            "weights": {ticker: 1 for ticker in ASSET_TICKERS},
+            "selected_tickers": ASSET_TICKERS,
+            "periods": 120,
+            "paths": 100000,
+            "workers": 1,
+        }
+    )
+
+    assert larger["estimated_memory_mb"] > compact["estimated_memory_mb"]
+    assert larger["work_units"] == 120 * 100000 * len(ASSET_TICKERS)
+    advanced = api.simulation_resource_estimate(
+        {
+            "weights": {ticker: 1 for ticker in ASSET_TICKERS},
+            "selected_tickers": ASSET_TICKERS,
+            "periods": 120,
+            "paths": 100000,
+            "workers": 1,
+            "joint_macro": True,
+            "dynamic_correlation": True,
+        }
+    )
+    assert advanced["estimated_memory_mb"] > larger["estimated_memory_mb"]
+    with pytest.raises(ValueError, match="safety budget"):
+        api.scenario_kwargs(
+            {
+                "weights": {ticker: 1 for ticker in ASSET_TICKERS},
+                "selected_tickers": ASSET_TICKERS,
+                "periods": 360,
+                "paths": 120000,
+                "workers": 4,
+            }
+        )
+
+
+def test_wealth_export_is_bounded_sample():
+    response = api.build_wealth_csv(_csv_payload(paths=50, export_paths=7))
+    exported = pd.read_csv(io.StringIO(response["csv"]))
+
+    assert response["exported_paths"] == 7
+    assert response["requested_paths"] == 50
+    assert response["replayed_paths"] == 50
+    assert response["sampled"] is True
+    assert exported.shape == (12, 8)  # period plus seven sampled paths
+
+
 def test_simulate_inflation_linked_financing_needs_leverage_state_inflation():
     payload = _csv_payload(
         leverage_multiple=2.0,
@@ -336,10 +389,36 @@ def test_simulate_csv_returns_full_result():
     for key in ("mean", "p05", "p50", "p95", "annualized_return", "annualized_volatility", "sharpe_ratio"):
         assert key in summary
     assert response["wealth"]["periods"] == list(range(1, 13))
+    assert len(response["monthly_returns"]) == 12
+    assert np.isfinite(response["monthly_returns"]).all()
     assert len(response["terminal"]) == 50
     assert len(response["transition"]["values"]) == 4
     assert response["currency"] == "USD"
     assert response["selected_tickers"] == ["SPY", "IEF", "GLD", "DBC"]
+
+
+def test_simulate_response_separates_model_and_market_uncertainty():
+    response = api.build_simulate_response(
+        _csv_payload(
+            paths=24,
+            distribution="student_t",
+            probabilistic_regimes=True,
+            mean_prior_strength=24,
+            parameter_draws=3,
+            parameter_block_size=8,
+            joint_macro=True,
+            dynamic_correlation=True,
+            walk_forward=False,
+        )
+    )
+
+    assert response["parameter_uncertainty"]["draws"] == 3
+    assert response["macro_paths"]["series"]["inflation"]
+    assert response["methodology"]["regime_assignment"] == "probabilistic"
+    assert response["methodology"]["joint_macro"] is True
+    assert response["methodology"]["dynamic_correlation"] is True
+    assert response["terms"] == "real"
+    assert sum(item["probability"] for item in response["regime_probabilities"]) == pytest.approx(1.0)
 
 
 def test_simulate_reports_regime_timelines_for_percentile_paths():
@@ -424,6 +503,23 @@ def test_csv_source_load_and_simulate():
     assert response["ok"] is True
     assert response["selected_tickers"] == ["SPY", "BONDS"]
     assert len(response["wealth"]["periods"]) == 3
+
+
+def test_csv_simple_returns_are_compounded_monthly_and_converted_to_log_returns():
+    payload = _csv_payload(
+        asset_input="Simple returns",
+        monthly=True,
+        csv_prices=(
+            "Date,SPY\n"
+            "2020-01-01,0.10\n"
+            "2020-01-31,-0.05\n"
+            "2020-02-29,0.02\n"
+        ),
+    )
+
+    _, returns, _, _, _, _ = api.load_data_source(payload)
+
+    assert returns.loc[pd.Timestamp("2020-01-31"), "SPY"] == pytest.approx(np.log(1.10 * 0.95))
 
 
 def test_threshold_value_parsing():

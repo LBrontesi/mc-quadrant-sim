@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
+from multiprocessing import get_context
 from typing import Any
 
 import numpy as np
@@ -17,8 +18,14 @@ from mc_quadrants.diagnostics import (
 )
 from mc_quadrants.hmm import fit_hmm_model
 from mc_quadrants.regimes import classify_quadrants
-from mc_quadrants.simulation import simulate_portfolio_paths, simulate_returns, summarize_wealth_risk
+from mc_quadrants.simulation import (
+    inflation_adjust_wealth,
+    simulate_portfolio_paths,
+    simulate_returns,
+    summarize_wealth_risk,
+)
 from mc_quadrants.types import ScenarioModel, SimulationResult
+from mc_quadrants.uncertainty import bootstrap_quadrant_models, summarize_parameter_models
 from mc_quadrants.validation import WalkForwardResult, walk_forward_validation
 
 
@@ -33,6 +40,8 @@ class SimulationRun:
     summary: pd.Series
     diagnostics: CalibrationDiagnostics
     walk_forward: WalkForwardResult | None = None
+    reporting_wealth: pd.DataFrame | None = None
+    parameter_uncertainty: pd.DataFrame | None = None
 
 
 _CHUNK_WORKER_STATE: dict[str, Any] = {}
@@ -43,7 +52,9 @@ def _init_chunk_worker(state: dict[str, Any]) -> None:
     _CHUNK_WORKER_STATE.update(state)
 
 
-def _run_chunk(args: tuple[int, int, int]) -> tuple[int, np.ndarray, np.ndarray]:
+def _run_chunk(
+    args: tuple[int, int, int],
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray | None]:
     """Simulate one path chunk in a worker process.
 
     Returns ``(start, wealth_values, regime_codes)`` for the chunk so the
@@ -68,6 +79,12 @@ def _run_chunk(args: tuple[int, int, int]) -> tuple[int, np.ndarray, np.ndarray]
         garch=state["garch"],
         garch_alpha=state["garch_alpha"],
         garch_beta=state["garch_beta"],
+        joint_macro=state["joint_macro"],
+        macro_transition_weight=state["macro_transition_weight"],
+        dynamic_correlation=state["dynamic_correlation"],
+        dcc_alpha=state["dcc_alpha"],
+        dcc_beta=state["dcc_beta"],
+        dcc_asymmetry=state["dcc_asymmetry"],
     )
     chunk_wealth = simulate_portfolio_paths(
         chunk_result,
@@ -91,7 +108,7 @@ def _run_chunk(args: tuple[int, int, int]) -> tuple[int, np.ndarray, np.ndarray]
     for period in range(state["periods"]):
         column = chunk_result.regimes[period]
         regime_codes[period] = [state_codes[state_name] for state_name in column]
-    return start, wealth_values, regime_codes
+    return start, wealth_values, regime_codes, chunk_result.macro_paths
 
 
 def _chunk_specs(total: int, chunk_size: int, random_seed: int) -> list[tuple[int, int, int]]:
@@ -116,6 +133,12 @@ def _simulate_chunked(
     garch: bool,
     garch_alpha: float,
     garch_beta: float,
+    joint_macro: bool,
+    macro_transition_weight: float,
+    dynamic_correlation: bool,
+    dcc_alpha: float,
+    dcc_beta: float,
+    dcc_asymmetry: float,
     chunk_size: int | None,
     weight_series: pd.Series,
     initial_value: float,
@@ -163,6 +186,12 @@ def _simulate_chunked(
             garch=garch,
             garch_alpha=garch_alpha,
             garch_beta=garch_beta,
+            joint_macro=joint_macro,
+            macro_transition_weight=macro_transition_weight,
+            dynamic_correlation=dynamic_correlation,
+            dcc_alpha=dcc_alpha,
+            dcc_beta=dcc_beta,
+            dcc_asymmetry=dcc_asymmetry,
         )
         chunk_wealth = simulate_portfolio_paths(
             chunk_result,
@@ -189,6 +218,16 @@ def _simulate_chunked(
     chunk_size = max(1, int(chunk_size))
     state_codes = {state: index for index, state in enumerate(model.states)}
     regime_codes = np.empty((periods, total), dtype=np.int8)
+    macro_columns = (
+        list(model.metadata.get("macro_dynamics", {}).get("columns", []))
+        if joint_macro
+        else []
+    )
+    macro_paths = (
+        np.empty((periods, total, len(macro_columns)), dtype=float)
+        if macro_columns
+        else None
+    )
     wealth = pd.DataFrame(
         np.nan,
         index=pd.RangeIndex(periods),
@@ -211,6 +250,12 @@ def _simulate_chunked(
             "garch": bool(garch),
             "garch_alpha": float(garch_alpha),
             "garch_beta": float(garch_beta),
+            "joint_macro": bool(joint_macro),
+            "macro_transition_weight": float(macro_transition_weight),
+            "dynamic_correlation": bool(dynamic_correlation),
+            "dcc_alpha": float(dcc_alpha),
+            "dcc_beta": float(dcc_beta),
+            "dcc_asymmetry": float(dcc_asymmetry),
             "weights": weight_series.to_dict(),
             "initial_value": float(initial_value),
             "return_kind": return_kind,
@@ -226,15 +271,32 @@ def _simulate_chunked(
             "withdrawal": float(withdrawal),
             "state_codes": state_codes,
         }
-        with ProcessPoolExecutor(
-            max_workers=int(workers),
-            initializer=_init_chunk_worker,
-            initargs=(worker_state,),
-        ) as executor:
-            for start, chunk_wealth_values, chunk_regime_codes in executor.map(_run_chunk, specs):
-                count = chunk_wealth_values.shape[1]
-                wealth.iloc[:, start:start + count] = chunk_wealth_values
-                regime_codes[:, start:start + count] = chunk_regime_codes
+        try:
+            with ProcessPoolExecutor(
+                max_workers=int(workers),
+                mp_context=get_context("spawn"),
+                initializer=_init_chunk_worker,
+                initargs=(worker_state,),
+            ) as executor:
+                for start, chunk_wealth_values, chunk_regime_codes, chunk_macro in executor.map(
+                    _run_chunk, specs
+                ):
+                    count = chunk_wealth_values.shape[1]
+                    wealth.iloc[:, start:start + count] = chunk_wealth_values
+                    regime_codes[:, start:start + count] = chunk_regime_codes
+                    if macro_paths is not None and chunk_macro is not None:
+                        macro_paths[:, start:start + count, :] = chunk_macro
+        except (NotImplementedError, PermissionError):
+            for start, count, seed in specs:
+                chunk_result, chunk_wealth = _single(count, seed)
+                wealth.iloc[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
+                for period in range(periods):
+                    column = chunk_result.regimes[period]
+                    regime_codes[period, start:start + count] = [
+                        state_codes[state] for state in column
+                    ]
+                if macro_paths is not None and chunk_result.macro_paths is not None:
+                    macro_paths[:, start:start + count, :] = chunk_result.macro_paths
     else:
         for start, count, seed in specs:
             chunk_result, chunk_wealth = _single(count, seed)
@@ -242,6 +304,8 @@ def _simulate_chunked(
             for period in range(periods):
                 column = chunk_result.regimes[period]
                 regime_codes[period, start:start + count] = [state_codes[state] for state in column]
+            if macro_paths is not None and chunk_result.macro_paths is not None:
+                macro_paths[:, start:start + count, :] = chunk_result.macro_paths
 
     combined = SimulationResult(
         returns=np.empty((periods, 0, len(model.assets)), dtype=float),
@@ -252,6 +316,8 @@ def _simulate_chunked(
         distribution=distribution,
         degrees_of_freedom=(float(degrees_of_freedom) if distribution == "student_t" else None),
         transition_concentration=transition_concentration,
+        macro_paths=macro_paths,
+        macro_columns=macro_columns,
     )
     return combined, wealth
 
@@ -301,6 +367,17 @@ def run_scenario(
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
     walk_forward: bool = True,
+    probabilistic_regimes: bool = False,
+    regime_temperature: float = 0.35,
+    mean_prior_strength: float = 0.0,
+    parameter_draws: int = 0,
+    parameter_block_size: int = 12,
+    joint_macro: bool = False,
+    macro_transition_weight: float = 0.35,
+    dynamic_correlation: bool = False,
+    dcc_alpha: float = 0.04,
+    dcc_beta: float = 0.94,
+    dcc_asymmetry: float = 0.01,
     chunk_size: int | None = None,
     return_kind: str = "log",
     workers: int = 1,
@@ -320,9 +397,19 @@ def run_scenario(
     transition_uncertainty = float(transition_uncertainty)
     if not 0 <= transition_uncertainty <= 1:
         raise ValueError("transition_uncertainty must be between 0 and 1.")
-    macro_lag_periods = int(macro_lag_periods)
-    if macro_lag_periods < 0:
+    requested_macro_lag_periods = int(macro_lag_periods)
+    if requested_macro_lag_periods < 0:
         raise ValueError("macro_lag_periods must be non-negative.")
+    macro_lag_periods = (
+        0 if bool(macro.attrs.get("availability_aligned", False)) else requested_macro_lag_periods
+    )
+    parameter_draws = int(parameter_draws)
+    if parameter_draws < 0 or parameter_draws > 100:
+        raise ValueError("parameter_draws must be between 0 and 100.")
+    if parameter_draws > int(paths):
+        raise ValueError("parameter_draws cannot exceed simulated paths.")
+    if parameter_draws and model_kind == "hmm":
+        raise ValueError("Parameter bootstrap is currently available for the quadrant model only.")
     available_columns = {str(column).strip().upper(): column for column in returns.columns}
     selected = [
         available_columns.get(str(ticker).strip().upper(), str(ticker).strip()) for ticker in selected_tickers
@@ -372,7 +459,12 @@ def run_scenario(
             override_weight=override_weight,
             macro_lag_periods=macro_lag_periods,
             threshold_window=threshold_window,
+            probabilistic_regimes=probabilistic_regimes,
+            regime_temperature=regime_temperature,
+            mean_prior_strength=mean_prior_strength,
+            joint_macro=joint_macro,
         )
+        model.metadata["requested_macro_lag_periods"] = requested_macro_lag_periods
         regimes = classify_quadrants(
             macro,
             growth_col=growth_col,
@@ -396,45 +488,153 @@ def run_scenario(
             diagnostics.warnings.append(
                 f"Transition probabilities are sampled with uncertainty {transition_uncertainty:.2f}."
             )
+        if parameter_draws > 0:
+            diagnostics.warnings.append(
+                f"Parameter uncertainty uses {parameter_draws} stationary-bootstrap recalibrations."
+            )
+        if not bool(model.metadata.get("point_in_time", False)):
+            diagnostics.warnings.append(
+                "Macro history is revised rather than point-in-time; select ALFRED initial-release data "
+                "for strict pseudo-live calibration."
+            )
         model.metadata["base_currency"] = str(base_currency).strip().upper()
         model.metadata["fx_quote"] = fx_quote
         model.metadata["initial_value"] = float(initial_value)
         if asset_currencies:
             model.metadata["asset_currencies"] = dict(asset_currencies)
 
-    result, wealth = _simulate_chunked(
-        model,
-        periods=int(periods),
-        paths=int(paths),
-        random_seed=int(random_seed),
-        start_state=start_state,
-        distribution=distribution,
-        degrees_of_freedom=float(degrees_of_freedom),
-        block_size=int(block_size),
-        transition_concentration=(
-            None if transition_uncertainty == 0.0 else max(1.0, 1.0 / transition_uncertainty**2)
-        ),
-        duration_model=duration_model,
-        min_regime_duration=int(min_regime_duration),
-        garch=garch,
-        garch_alpha=float(garch_alpha),
-        garch_beta=float(garch_beta),
-        chunk_size=chunk_size,
-        weight_series=pd.Series(normalized_weights, dtype=float),
-        initial_value=initial_value,
-        rebalance_frequency=rebalance_frequency,
-        transaction_cost_bps=float(transaction_cost_bps),
-        expense_ratios=pd.Series(normalized_expense_ratios, dtype=float),
-        leverage_multiple=float(leverage_multiple),
-        financing_rate=float(financing_rate),
-        financing_inflation_sensitivity=float(financing_inflation_sensitivity),
-        state_inflation=model.metadata.get("state_inflation"),
-        maintenance_margin=float(maintenance_margin),
-        contribution=float(contribution),
-        withdrawal=float(withdrawal),
-        return_kind=return_kind,
-        workers=workers,
-    )
+    parameter_models: list[ScenarioModel] = []
+    parameter_summary: pd.DataFrame | None = None
+    if parameter_draws:
+        parameter_models = bootstrap_quadrant_models(
+            scenario_returns,
+            macro,
+            draws=parameter_draws,
+            block_size=int(parameter_block_size),
+            random_seed=int(random_seed) + 10_000,
+            growth_col=growth_col,
+            inflation_col=inflation_col,
+            growth_threshold=growth_threshold,
+            inflation_threshold=inflation_threshold,
+            correlation_overrides=correlation_overrides,
+            override_weight=override_weight,
+            macro_lag_periods=macro_lag_periods,
+            threshold_window=threshold_window,
+            min_regime_duration=int(min_regime_duration),
+            probabilistic_regimes=probabilistic_regimes,
+            regime_temperature=float(regime_temperature),
+            mean_prior_strength=float(mean_prior_strength),
+            joint_macro=joint_macro,
+        )
+        parameter_summary = summarize_parameter_models(parameter_models, normalized_weights)
+
+    simulation_models = parameter_models or [model]
+    quotient, remainder = divmod(int(paths), len(simulation_models))
+    model_path_counts = [quotient + (1 if index < remainder else 0) for index in range(len(simulation_models))]
+    simulation_runs: list[tuple[SimulationResult, pd.DataFrame]] = []
+    for draw, (simulation_model, draw_paths) in enumerate(zip(simulation_models, model_path_counts)):
+        draw_result, draw_wealth = _simulate_chunked(
+                simulation_model,
+                periods=int(periods),
+                paths=draw_paths,
+                random_seed=int(random_seed) + draw * 100_003,
+                start_state=start_state,
+                distribution=distribution,
+                degrees_of_freedom=float(degrees_of_freedom),
+                block_size=int(block_size),
+                transition_concentration=(
+                    None
+                    if transition_uncertainty == 0.0 or parameter_models
+                    else max(1.0, 1.0 / transition_uncertainty**2)
+                ),
+                duration_model=duration_model,
+                min_regime_duration=int(min_regime_duration),
+                garch=garch,
+                garch_alpha=float(garch_alpha),
+                garch_beta=float(garch_beta),
+                joint_macro=joint_macro,
+                macro_transition_weight=float(macro_transition_weight),
+                dynamic_correlation=dynamic_correlation,
+                dcc_alpha=float(dcc_alpha),
+                dcc_beta=float(dcc_beta),
+                dcc_asymmetry=float(dcc_asymmetry),
+                chunk_size=chunk_size,
+                weight_series=pd.Series(normalized_weights, dtype=float),
+                initial_value=initial_value,
+                rebalance_frequency=rebalance_frequency,
+                transaction_cost_bps=float(transaction_cost_bps),
+                expense_ratios=pd.Series(normalized_expense_ratios, dtype=float),
+                leverage_multiple=float(leverage_multiple),
+                financing_rate=float(financing_rate),
+                financing_inflation_sensitivity=float(financing_inflation_sensitivity),
+                state_inflation=simulation_model.metadata.get("state_inflation"),
+                maintenance_margin=float(maintenance_margin),
+                contribution=float(contribution),
+                withdrawal=float(withdrawal),
+                return_kind=return_kind,
+                workers=workers,
+            )
+        if parameter_models and draw_result.returns.shape[1]:
+            draw_result = SimulationResult(
+                returns=np.empty((int(periods), 0, len(model.assets)), dtype=float),
+                regimes=draw_result.regimes,
+                assets=draw_result.assets,
+                states=draw_result.states,
+                frequency=draw_result.frequency,
+                distribution=draw_result.distribution,
+                degrees_of_freedom=draw_result.degrees_of_freedom,
+                transition_concentration=draw_result.transition_concentration,
+                macro_paths=draw_result.macro_paths,
+                macro_columns=draw_result.macro_columns,
+            )
+        simulation_runs.append((draw_result, draw_wealth))
+
+    if len(simulation_runs) == 1:
+        result, wealth = simulation_runs[0]
+    else:
+        wealth = pd.concat([run_wealth for _, run_wealth in simulation_runs], axis=1, ignore_index=True)
+        wealth.columns = [f"path_{index}" for index in range(wealth.shape[1])]
+        wealth.attrs["margin_calls"] = int(
+            sum(run_wealth.attrs.get("margin_calls", 0) for _, run_wealth in simulation_runs)
+        )
+        regimes_combined = np.concatenate(
+            [run_result.regimes for run_result, _ in simulation_runs], axis=1
+        )
+        macro_parts = [
+            run_result.macro_paths
+            for run_result, _ in simulation_runs
+            if run_result.macro_paths is not None
+        ]
+        result = SimulationResult(
+            returns=np.empty((int(periods), 0, len(model.assets)), dtype=float),
+            regimes=regimes_combined,
+            assets=model.assets,
+            states=model.states.copy(),
+            frequency=model.frequency,
+            distribution=distribution,
+            degrees_of_freedom=(
+                float(degrees_of_freedom) if distribution == "student_t" else None
+            ),
+            macro_paths=(np.concatenate(macro_parts, axis=1) if macro_parts else None),
+            macro_columns=(simulation_runs[0][0].macro_columns if macro_parts else []),
+        )
+        if parameter_summary is not None:
+            terminal_offset = 0
+            terminal_metrics: list[dict[str, float]] = []
+            for draw_paths in model_path_counts:
+                terminal = wealth.iloc[-1, terminal_offset:terminal_offset + draw_paths].to_numpy(dtype=float)
+                terminal_metrics.append(
+                    {
+                        "terminal_p05": float(np.quantile(terminal, 0.05)),
+                        "terminal_median": float(np.quantile(terminal, 0.50)),
+                        "terminal_p95": float(np.quantile(terminal, 0.95)),
+                    }
+                )
+                terminal_offset += draw_paths
+            parameter_summary = pd.concat(
+                [parameter_summary.reset_index(drop=True), pd.DataFrame(terminal_metrics)],
+                axis=1,
+            )
     walk_forward_result = None
     if walk_forward and model_kind == "quadrant":
         try:
@@ -447,6 +647,9 @@ def run_scenario(
                 inflation_threshold=inflation_threshold,
                 macro_lag_periods=macro_lag_periods,
                 threshold_window=threshold_window,
+                probabilistic_regimes=probabilistic_regimes,
+                regime_temperature=float(regime_temperature),
+                mean_prior_strength=float(mean_prior_strength),
             )
             diagnostics.warnings.extend(walk_forward_result.warnings)
         except ValueError:
@@ -457,6 +660,22 @@ def run_scenario(
         raise ValueError("Portfolio weights must have a non-zero sum.")
     weight_series = weight_series / weight_total
     fee_series = pd.Series(normalized_expense_ratios, dtype=float).reindex(selected).fillna(0.0)
+    inflation_paths = None
+    if result.macro_paths is not None and inflation_col in result.macro_columns:
+        inflation_index = result.macro_columns.index(inflation_col)
+        inflation_paths = result.macro_paths[:, :, inflation_index]
+        dynamics = model.metadata.get("macro_dynamics", {})
+        if bool(dynamics.get("inflation_is_percent", False)):
+            inflation_paths = inflation_paths / 100.0
+        inflation_paths = np.clip(inflation_paths, -0.10, 0.50)
+        model.metadata["inflation_model"] = "joint_macro_path"
+    else:
+        model.metadata["inflation_model"] = "deterministic"
+    reporting_wealth = inflation_adjust_wealth(
+        wealth,
+        annual_inflation=annual_inflation,
+        inflation_paths=inflation_paths,
+    )
     summary = summarize_wealth_risk(
         wealth,
         initial_value=initial_value,
@@ -464,6 +683,7 @@ def run_scenario(
         annual_inflation=annual_inflation,
         contribution=float(contribution),
         withdrawal=float(withdrawal),
+        inflation_paths=inflation_paths,
     )
     summary = summary.copy()
     state_inflation = model.metadata.get("state_inflation", {})
@@ -494,6 +714,23 @@ def run_scenario(
         "margin_calls": int(wealth.attrs.get("margin_calls", 0)),
     }.items():
         summary[key] = value
+    if parameter_summary is not None:
+        terminal_offset = 0
+        real_terminal_metrics: list[dict[str, float]] = []
+        for draw_paths in model_path_counts:
+            terminal = reporting_wealth.iloc[
+                -1, terminal_offset:terminal_offset + draw_paths
+            ].to_numpy(dtype=float)
+            real_terminal_metrics.append(
+                {
+                    "terminal_p05": float(np.quantile(terminal, 0.05)),
+                    "terminal_median": float(np.quantile(terminal, 0.50)),
+                    "terminal_p95": float(np.quantile(terminal, 0.95)),
+                }
+            )
+            terminal_offset += draw_paths
+        for column in ("terminal_p05", "terminal_median", "terminal_p95"):
+            parameter_summary[column] = [row[column] for row in real_terminal_metrics]
     return SimulationRun(
         model=model,
         regimes=regimes,
@@ -502,6 +739,8 @@ def run_scenario(
         summary=summary,
         diagnostics=diagnostics,
         walk_forward=walk_forward_result,
+        reporting_wealth=reporting_wealth,
+        parameter_uncertainty=parameter_summary,
     )
 
 

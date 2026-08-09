@@ -15,7 +15,10 @@ from mc_quadrants.regimes import (
     REGIME_ORDER,
     ThresholdSpec,
     classify_quadrants,
+    estimate_probabilistic_transition_matrix,
     estimate_transition_matrix,
+    quadrant_probabilities,
+    resolve_threshold,
     sojourn_durations,
 )
 from mc_quadrants.types import RegimeMoments, ScenarioModel
@@ -156,6 +159,7 @@ def estimate_regime_moments(
     correlation_overrides: CorrelationOverrides | None = None,
     override_weight: float = 1.0,
     regime_lag_periods: int = 0,
+    mean_prior_strength: float = 0.0,
 ) -> dict[str, RegimeMoments]:
     """Estimate asset mean/covariance/correlation separately for each regime.
 
@@ -167,6 +171,8 @@ def estimate_regime_moments(
         raise ValueError("returns must not be empty.")
     if min_observations <= 0:
         raise ValueError("min_observations must be positive.")
+    if not np.isfinite(mean_prior_strength) or mean_prior_strength < 0:
+        raise ValueError("mean_prior_strength must be finite and non-negative.")
 
     state_list = states or REGIME_ORDER
     clean_returns, aligned_regimes = _clean_aligned_returns(
@@ -199,6 +205,10 @@ def estimate_regime_moments(
             local_mean = global_mean
             local_covariance = global_covariance
 
+        if observations > 0 and mean_prior_strength > 0:
+            mean_weight = observations / (observations + float(mean_prior_strength))
+            local_mean = mean_weight * local_mean + (1.0 - mean_weight) * global_mean
+
         local_covariance = local_covariance.reindex(
             index=clean_returns.columns, columns=clean_returns.columns
         )
@@ -227,6 +237,206 @@ def estimate_regime_moments(
     return moments
 
 
+def _align_probabilities_to_returns(
+    probabilities: pd.DataFrame,
+    returns: pd.DataFrame,
+    lag_periods: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Align causal macro state probabilities to complete return observations."""
+
+    if lag_periods < 0:
+        raise ValueError("lag_periods must be non-negative.")
+    clean_returns = returns.sort_index().dropna(how="any")
+    shifted = probabilities.sort_index().shift(lag_periods).dropna(how="all")
+    aligned = shifted.reindex(clean_returns.index, method="ffill")
+    valid = aligned.notna().all(axis=1)
+    clean_returns = clean_returns.loc[valid]
+    aligned = aligned.loc[valid]
+    if clean_returns.empty:
+        raise ValueError("No overlapping return and probabilistic regime observations after alignment.")
+    return clean_returns, aligned
+
+
+def estimate_weighted_regime_moments(
+    returns: pd.DataFrame,
+    probabilities: pd.DataFrame,
+    states: list[str],
+    min_observations: int = 12,
+    shrinkage: float | None = None,
+    correlation_overrides: CorrelationOverrides | None = None,
+    override_weight: float = 1.0,
+    regime_lag_periods: int = 0,
+    mean_prior_strength: float = 24.0,
+) -> dict[str, RegimeMoments]:
+    """Estimate parametric moments using soft state-membership weights."""
+
+    clean_returns, aligned = _align_probabilities_to_returns(
+        probabilities,
+        returns,
+        lag_periods=regime_lag_periods,
+    )
+    values = clean_returns.to_numpy(dtype=float)
+    global_mean = clean_returns.mean()
+    global_covariance = clean_returns.cov()
+    moments: dict[str, RegimeMoments] = {}
+    for state in states:
+        weights = aligned[state].to_numpy(dtype=float)
+        weight_sum = float(weights.sum())
+        effective = int(round(weight_sum))
+        if weight_sum <= 1e-9:
+            local_mean = global_mean
+            local_covariance = global_covariance
+            weighted_observations = values
+        else:
+            weighted_mean = np.average(values, axis=0, weights=weights)
+            centered = values - weighted_mean
+            denominator = weight_sum - float(np.square(weights).sum()) / weight_sum
+            if denominator > 1e-9:
+                covariance_values = (centered.T * weights) @ centered / denominator
+                local_covariance = pd.DataFrame(
+                    covariance_values,
+                    index=clean_returns.columns,
+                    columns=clean_returns.columns,
+                )
+            else:
+                local_covariance = global_covariance
+            reliability = weight_sum / max(weight_sum + float(mean_prior_strength), 1e-9)
+            local_mean = pd.Series(weighted_mean, index=clean_returns.columns)
+            local_mean = reliability * local_mean + (1.0 - reliability) * global_mean
+            weighted_observations = values * np.sqrt(np.maximum(weights, 0.0))[:, None]
+        covariance = _blend_covariance(
+            local_covariance,
+            global_covariance,
+            shrinkage,
+            observations=weighted_observations if len(weighted_observations) > 1 else None,
+        )
+        state_overrides = correlation_overrides.get(state) if correlation_overrides else None
+        covariance, correlation = _apply_correlation_overrides(
+            covariance,
+            state_overrides,
+            override_weight=override_weight,
+        )
+        moments[state] = RegimeMoments(
+            mean=local_mean.reindex(clean_returns.columns),
+            covariance=covariance,
+            correlation=correlation,
+            observations=effective,
+        )
+    return moments
+
+
+def _weighted_covariance(values: np.ndarray, weights: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+    weight_sum = float(weights.sum())
+    if weight_sum <= 1.0:
+        return fallback.copy()
+    mean = np.average(values, axis=0, weights=weights)
+    centered = values - mean
+    denominator = weight_sum - float(np.square(weights).sum()) / weight_sum
+    if denominator <= 1e-9:
+        return fallback.copy()
+    return nearest_psd((centered.T * weights) @ centered / denominator)
+
+
+def _fit_joint_macro_dynamics(
+    macro: pd.DataFrame,
+    returns: pd.DataFrame,
+    regimes: pd.Series,
+    probabilities: pd.DataFrame | None,
+    moments: dict[str, RegimeMoments],
+    growth_col: str,
+    inflation_col: str,
+    growth_threshold: ThresholdSpec,
+    inflation_threshold: ThresholdSpec,
+    temperature: float,
+    ridge: float = 1e-3,
+) -> dict[str, object]:
+    """Fit a compact regime-conditioned macro VAR and return-factor link."""
+
+    columns = [growth_col, inflation_col]
+    macro_clean = macro.loc[:, columns].apply(pd.to_numeric, errors="coerce").dropna().sort_index()
+    if len(macro_clean) < 24:
+        raise ValueError("Joint macro dynamics require at least 24 complete macro observations.")
+    macro_values = macro_clean.to_numpy(dtype=float)
+    global_mean = macro_values.mean(axis=0)
+    x = macro_values[:-1] - global_mean
+    y = macro_values[1:] - global_mean
+    coefficient = np.linalg.solve(x.T @ x + ridge * np.eye(len(columns)), x.T @ y)
+    eigenvalues = np.linalg.eigvals(coefficient)
+    radius = float(np.max(np.abs(eigenvalues))) if len(eigenvalues) else 0.0
+    if radius >= 0.98:
+        coefficient *= 0.98 / radius
+    residuals = y - x @ coefficient
+    global_residual_covariance = nearest_psd(np.atleast_2d(np.cov(residuals, rowvar=False)))
+
+    if probabilities is not None:
+        macro_membership = probabilities.reindex(macro_clean.index, method="ffill")
+    else:
+        hard = regimes.reindex(macro_clean.index, method="ffill")
+        macro_membership = pd.DataFrame(
+            {state: (hard == state).astype(float) for state in REGIME_ORDER},
+            index=macro_clean.index,
+        )
+    state_centers: dict[str, list[float]] = {}
+    state_covariances: dict[str, list[list[float]]] = {}
+    for state in REGIME_ORDER:
+        weights = macro_membership[state].fillna(0.0).to_numpy(dtype=float)
+        if weights.sum() > 1e-9:
+            center = np.average(macro_values, axis=0, weights=weights)
+        else:
+            center = global_mean
+        residual_weights = weights[1:]
+        covariance = _weighted_covariance(
+            residuals,
+            residual_weights,
+            global_residual_covariance,
+        )
+        state_centers[state] = center.tolist()
+        state_covariances[state] = covariance.tolist()
+
+    macro_changes = macro_clean.diff().dropna()
+    aligned_changes = macro_changes.reindex(returns.index, method="ffill")
+    joint = returns.join(aligned_changes.add_prefix("__macro_"), how="inner").dropna()
+    return_values = joint.loc[:, returns.columns].to_numpy(dtype=float)
+    change_values = joint.loc[:, [f"__macro_{column}" for column in columns]].to_numpy(dtype=float)
+    centered_returns = return_values - return_values.mean(axis=0)
+    betas = np.linalg.solve(
+        change_values.T @ change_values + ridge * np.eye(len(columns)),
+        change_values.T @ centered_returns,
+    )
+    explained = betas.T @ global_residual_covariance @ betas
+    total_variance = np.maximum(np.diag(np.atleast_2d(np.cov(return_values, rowvar=False))), 1e-12)
+    explained_share = np.max(np.diag(explained) / total_variance)
+    if np.isfinite(explained_share) and explained_share > 0.25:
+        betas *= np.sqrt(0.25 / explained_share)
+
+    residual_covariances: dict[str, list[list[float]]] = {}
+    for state in REGIME_ORDER:
+        macro_effect = betas.T @ np.asarray(state_covariances[state], dtype=float) @ betas
+        residual_covariances[state] = nearest_psd(
+            moments[state].covariance.to_numpy(dtype=float) - macro_effect
+        ).tolist()
+
+    thresholds = [
+        resolve_threshold(macro_clean[growth_col], growth_threshold),
+        resolve_threshold(macro_clean[inflation_col], inflation_threshold),
+    ]
+    scales = np.maximum(macro_clean.std(ddof=1).to_numpy(dtype=float) * temperature, 1e-6)
+    inflation_scale_hint = float(macro_clean[inflation_col].abs().quantile(0.90))
+    return {
+        "columns": columns,
+        "latest": macro_values[-1].tolist(),
+        "global_mean": global_mean.tolist(),
+        "var_coefficient": coefficient.tolist(),
+        "state_centers": state_centers,
+        "state_innovation_covariances": state_covariances,
+        "return_betas": betas.tolist(),
+        "return_residual_covariances": residual_covariances,
+        "thresholds": thresholds,
+        "probability_scales": scales.tolist(),
+        "inflation_is_percent": inflation_scale_hint >= 0.50,
+    }
+
+
 def calibrate_quadrant_model(
     returns: pd.DataFrame,
     macro: pd.DataFrame,
@@ -243,6 +453,10 @@ def calibrate_quadrant_model(
     frequency: str = "M",
     threshold_window: int | None = None,
     min_regime_duration: int = 1,
+    probabilistic_regimes: bool = False,
+    regime_temperature: float = 0.35,
+    mean_prior_strength: float = 0.0,
+    joint_macro: bool = False,
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
 
@@ -254,21 +468,50 @@ def calibrate_quadrant_model(
         inflation_threshold=inflation_threshold,
         threshold_window=threshold_window,
     )
-    transition_matrix = estimate_transition_matrix(
-        regimes,
-        states=REGIME_ORDER,
-        smoothing=transition_smoothing,
-    )
-    moments = estimate_regime_moments(
-        returns=returns,
-        regimes=regimes,
-        states=REGIME_ORDER,
-        min_observations=min_observations,
-        shrinkage=shrinkage,
-        correlation_overrides=correlation_overrides,
-        override_weight=override_weight,
-        regime_lag_periods=macro_lag_periods,
-    )
+    probabilities = None
+    if probabilistic_regimes:
+        probabilities = quadrant_probabilities(
+            macro,
+            growth_col=growth_col,
+            inflation_col=inflation_col,
+            growth_threshold=growth_threshold,
+            inflation_threshold=inflation_threshold,
+            threshold_window=threshold_window,
+            temperature=regime_temperature,
+        )
+        transition_matrix = estimate_probabilistic_transition_matrix(
+            probabilities,
+            states=REGIME_ORDER,
+            smoothing=transition_smoothing,
+        )
+        moments = estimate_weighted_regime_moments(
+            returns=returns,
+            probabilities=probabilities,
+            states=REGIME_ORDER,
+            min_observations=min_observations,
+            shrinkage=shrinkage,
+            correlation_overrides=correlation_overrides,
+            override_weight=override_weight,
+            regime_lag_periods=macro_lag_periods,
+            mean_prior_strength=mean_prior_strength,
+        )
+    else:
+        transition_matrix = estimate_transition_matrix(
+            regimes,
+            states=REGIME_ORDER,
+            smoothing=transition_smoothing,
+        )
+        moments = estimate_regime_moments(
+            returns=returns,
+            regimes=regimes,
+            states=REGIME_ORDER,
+            min_observations=min_observations,
+            shrinkage=shrinkage,
+            correlation_overrides=correlation_overrides,
+            override_weight=override_weight,
+            regime_lag_periods=macro_lag_periods,
+            mean_prior_strength=mean_prior_strength,
+        )
 
     clean_returns, aligned_regimes = _clean_aligned_returns(
         returns,
@@ -279,8 +522,8 @@ def calibrate_quadrant_model(
 
     inflation_values = pd.to_numeric(macro[inflation_col], errors="coerce")
     if inflation_values.notna().any():
-        median_inflation = float(inflation_values.median())
-        inflation_fraction = inflation_values / 100.0 if abs(median_inflation) >= 1.0 else inflation_values
+        inflation_scale_hint = float(inflation_values.abs().quantile(0.90))
+        inflation_fraction = inflation_values / 100.0 if inflation_scale_hint >= 0.50 else inflation_values
         state_inflation = {
             state: float(inflation_fraction[regimes == state].mean())
             for state in REGIME_ORDER
@@ -289,26 +532,51 @@ def calibrate_quadrant_model(
     else:
         state_inflation = {}
 
+    metadata: dict[str, object] = {
+        "growth_col": growth_col,
+        "inflation_col": inflation_col,
+        "growth_threshold": growth_threshold,
+        "inflation_threshold": inflation_threshold,
+        "macro_lag_periods": macro_lag_periods,
+        "min_observations": min_observations,
+        "shrinkage": shrinkage,
+        "mean_prior_strength": mean_prior_strength,
+        "transition_smoothing": transition_smoothing,
+        "threshold_window": threshold_window,
+        "model_kind": "quadrant",
+        "regime_assignment": "probabilistic" if probabilistic_regimes else "hard",
+        "regime_temperature": regime_temperature,
+        "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER, min_length=min_regime_duration),
+        "state_inflation": state_inflation,
+        "data_vintage": macro.attrs.get("data_vintage", "user_supplied"),
+        "point_in_time": bool(macro.attrs.get("point_in_time", False)),
+        "availability_aligned": bool(macro.attrs.get("availability_aligned", False)),
+    }
+    if probabilities is not None:
+        latest_probabilities = probabilities.dropna().iloc[-1]
+        metadata["latest_regime_probabilities"] = latest_probabilities.to_dict()
+        metadata["historical_regime_probabilities"] = probabilities
+    if joint_macro:
+        metadata["macro_dynamics"] = _fit_joint_macro_dynamics(
+            macro,
+            returns,
+            regimes,
+            probabilities,
+            moments,
+            growth_col,
+            inflation_col,
+            growth_threshold,
+            inflation_threshold,
+            regime_temperature,
+        )
+
     model = ScenarioModel(
         states=REGIME_ORDER.copy(),
         transition_matrix=transition_matrix,
         moments=moments,
         frequency=frequency,
         historical_returns=historical_returns,
-        metadata={
-            "growth_col": growth_col,
-            "inflation_col": inflation_col,
-            "growth_threshold": growth_threshold,
-            "inflation_threshold": inflation_threshold,
-            "macro_lag_periods": macro_lag_periods,
-            "min_observations": min_observations,
-            "shrinkage": shrinkage,
-            "transition_smoothing": transition_smoothing,
-            "threshold_window": threshold_window,
-            "model_kind": "quadrant",
-            "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER, min_length=min_regime_duration),
-            "state_inflation": state_inflation,
-        },
+        metadata=metadata,
     )
     model.validate()
     return model

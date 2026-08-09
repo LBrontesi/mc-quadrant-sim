@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Four-Quadrant Monte Carlo Simulator</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=20260810">
 </head>
 <body>
   <div class="bg-glow bg-glow-1"></div>
@@ -12,7 +12,7 @@
 
   <header class="app-header">
     <div class="brand">
-      <img class="brand-logo" src="/logo.jpg" alt="MC Quadrant Simulator logo">
+      <img class="brand-logo" src="logo.jpg" alt="MC Quadrant Simulator logo">
       <div>
         <h1>Four-Quadrant Monte Carlo Simulator</h1>
         <p class="subtitle">Goldilocks · Overheating · Stagflation · Recession — regime-based portfolio simulation</p>
@@ -40,7 +40,7 @@
           </li>
           <li id="guide-methodology" class="guide-step">
             <span class="guide-number">3</span>
-            <div><strong>Review assumptions</strong><span>Defaults use quadrant regimes, semi-Markov durations, and walk-forward validation.</span></div>
+            <div><strong>Review assumptions</strong><span>Defaults use probabilistic quadrants, parameter recalibration, joint macro paths, dynamic dependence, and walk-forward validation.</span></div>
           </li>
           <li id="guide-run" class="guide-step">
             <span class="guide-number">4</span>
@@ -77,6 +77,13 @@
               <label>Start <input type="date" id="yahoo-start" value="1990-01-01"></label>
               <label>End <input type="date" id="yahoo-end"></label>
             </div>
+            <label>Macroeconomic data timing
+              <select id="macro-vintage">
+                <option value="latest" selected>Latest revised FRED + release lag</option>
+                <option value="initial_release">ALFRED initial releases (point-in-time)</option>
+              </select>
+              <span class="hint">Point-in-time mode removes revision look-ahead and requires <code>FRED_API_KEY</code> on the server.</span>
+            </label>
             <label>Historical proxies (optional)
               <input type="text" id="yahoo-proxies" placeholder="SPY:^GSPC, GLD:GC=F">
               <span class="hint">ASSET:PROXY pairs, levels are scaled during the overlap.</span>
@@ -109,14 +116,15 @@
           <label>Macro CSV <input type="file" id="csv-macro" accept=".csv"></label>
           <div class="radio-row">
             <label class="pill"><input type="radio" name="asset-input" value="Price levels" checked> Price levels</label>
-            <label class="pill"><input type="radio" name="asset-input" value="Returns"> Returns</label>
+            <label class="pill"><input type="radio" name="asset-input" value="Log returns"> Log returns</label>
+            <label class="pill"><input type="radio" name="asset-input" value="Simple returns"> Simple returns</label>
           </div>
           <label class="check-inline"><input type="checkbox" id="csv-monthly" checked> Monthly asset returns</label>
           <div class="two-col">
             <label>Growth column <input type="text" id="csv-growth" value="growth"></label>
             <label>Inflation column <input type="text" id="csv-inflation" value="inflation"></label>
           </div>
-          <span class="hint">Both files need a <code>Date</code> column.</span>
+          <span class="hint">Both files need a <code>Date</code> column. Add <code>AvailableDate</code> to the macro CSV for release-aware alignment.</span>
         </details>
 
         <details id="correlation-section">
@@ -173,6 +181,7 @@
               <option value="2">2</option>
               <option value="3">3</option>
             </select>
+            <span id="macro-lag-hint" class="hint">Use one period with latest-revised data; availability-dated data uses its actual release calendar.</span>
           </label>
           <label>Transition uncertainty
             <input type="range" id="transition-uncertainty" min="0" max="1" step="0.05" value="0">
@@ -202,31 +211,75 @@
             </label>
             <label id="min-duration-group">Min regime months
               <input type="number" id="min-regime-duration" value="3" min="1" max="24" step="1">
-              <span class="hint">Regimes forced to last at least this many months. Single-month flips are filtered from calibration.</span>
+              <span class="hint">Simulated sojourns last at least this many months; shorter historical runs are excluded from the empirical duration pool.</span>
             </label>
           </div>
           <label id="threshold-window-group">Causal threshold window
             <input type="number" id="threshold-window" value="12" min="0" step="1">
             <span class="hint">Prior observations required before classification; 0 uses full-sample thresholds for calibration.</span>
           </label>
+          <div id="advanced-regime-controls" class="methodology-stack">
+            <label class="check-inline"><input type="checkbox" id="probabilistic-regimes" checked> Probabilistic quadrant membership</label>
+            <div class="two-col">
+              <label>Boundary uncertainty
+                <input type="number" id="regime-temperature" value="0.35" min="0.05" max="2" step="0.05">
+                <span class="hint">Logistic boundary width in historical standard deviations.</span>
+              </label>
+              <label>Expected-return prior strength
+                <input type="number" id="mean-prior-strength" value="24" min="0" max="120" step="6">
+                <span class="hint">Shrinks sparse regime means toward the full-history estimate.</span>
+              </label>
+            </div>
+            <div class="two-col">
+              <label>Parameter recalibrations
+                <input type="number" id="parameter-draws" value="8" min="0" max="100" step="1">
+                <span class="hint">Stationary-bootstrap outer draws; 0 treats estimates as fixed.</span>
+              </label>
+              <label>Calibration block months
+                <input type="number" id="parameter-block-size" value="12" min="2" max="60" step="1">
+              </label>
+            </div>
+            <label class="check-inline"><input type="checkbox" id="joint-macro" checked> Joint growth, inflation, regime and return paths</label>
+            <label>Macro influence on transitions
+              <input type="range" id="macro-transition-weight" min="0" max="1" step="0.05" value="0.35">
+              <output id="macro-transition-weight-output">0.35</output>
+            </label>
+            <label class="check-inline"><input type="checkbox" id="dynamic-correlation" checked> Asymmetric dynamic correlation (ADCC)</label>
+            <details class="nested-settings">
+              <summary>Dynamic-correlation parameters</summary>
+              <div class="three-col">
+                <label>Shock α <input type="number" id="dcc-alpha" value="0.04" min="0" max="0.5" step="0.01"></label>
+                <label>Persistence β <input type="number" id="dcc-beta" value="0.94" min="0" max="0.99" step="0.01"></label>
+                <label>Downside γ <input type="number" id="dcc-asymmetry" value="0.01" min="0" max="0.5" step="0.01"></label>
+              </div>
+            </details>
+          </div>
           <label class="check-inline" id="garch-group"><input type="checkbox" id="garch"> GARCH(1,1) volatility clustering</label>
           <span class="hint" id="garch-hint">GARCH requires the Normal return distribution.</span>
           <label class="check-inline" id="walk-forward-group"><input type="checkbox" id="walk-forward" checked> Walk-forward validation</label>
           <span class="hint">Validation is an out-of-sample regime-signal check against an unconditional benchmark.</span>
         </details>
 
-        <details>
+        <details id="simulation-settings">
           <summary>Simulation</summary>
           <div class="two-col">
             <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12">
               <span class="hint">Longer horizons use more memory; lower paths to compensate.</span>
             </label>
-            <label>Paths <input type="number" id="paths" value="100000" min="1000" max="120000" step="1000">
-              <span class="hint">100k needs ~490MB at 120 periods.</span>
+            <label>Paths <input type="number" id="paths" value="10000" min="1000" max="120000" step="1000">
+              <span class="hint">Adaptive chunking scales with the horizon and selected assets.</span>
             </label>
             <label>Parallel workers <input type="number" id="workers" value="1" min="1" max="16" step="1">
               <span class="hint">Simulate path chunks in parallel. Each worker adds memory; use more on paid instances.</span>
             </label>
+          </div>
+          <div id="resource-card" class="resource-card" data-level="good">
+            <div class="resource-heading">
+              <strong>Estimated server load</strong>
+              <span id="resource-label">Calculating...</span>
+            </div>
+            <div class="resource-track" aria-hidden="true"><span id="resource-bar"></span></div>
+            <p id="resource-detail" class="hint"></p>
           </div>
           <div class="two-col">
             <label>Random seed <input type="number" id="seed" value="7" min="1" step="1"></label>
@@ -238,8 +291,8 @@
           </div>
           <label>Return distribution
             <select id="distribution">
-              <option value="normal" selected>Normal</option>
-              <option value="student_t">Student-t</option>
+              <option value="normal">Normal</option>
+              <option value="student_t" selected>Student-t</option>
               <option value="bootstrap">Historical bootstrap</option>
               <option value="block_bootstrap">Block bootstrap</option>
             </select>
@@ -322,6 +375,7 @@
 
       <p id="scenario-status" class="status"></p>
 
+      <div class="results-toolbar">
       <div class="tabs" id="result-tabs">
         <button class="tab-btn active" data-tab="tab-growth">Growth</button>
         <button class="tab-btn" data-tab="tab-returns">Returns</button>
@@ -331,6 +385,8 @@
         <button class="tab-btn" data-tab="tab-compare">Compare</button>
         <button class="tab-btn" data-tab="tab-diagnostics">Diagnostics</button>
         <button class="tab-btn" data-tab="tab-data">Data</button>
+      </div>
+        <button id="edit-scenario" class="btn btn-ghost btn-sm" type="button">Edit scenario</button>
       </div>
 
       <div id="tab-growth" class="tab-panel active">
@@ -342,13 +398,22 @@
         <div id="growth-content" class="hidden">
           <div id="scenario-chips" class="chips"></div>
           <p id="stale-results" class="warning hidden">Inputs changed since this result was produced. Run the simulation again before interpreting or exporting it.</p>
+          <section class="card methodology-report">
+            <div class="card-heading-row"><h3>Methodology integrity</h3><span id="methodology-score" class="integrity-score">—</span></div>
+            <div id="methodology-badges" class="methodology-badges"></div>
+          </section>
+          <section id="parameter-uncertainty-card" class="card hidden">
+            <h3>Parameter uncertainty</h3>
+            <p class="caption">Variation across complete stationary-bootstrap recalibrations, separate from market-path dispersion.</p>
+            <div id="parameter-bands" class="uncertainty-grid"></div>
+          </section>
           <h3 class="section-title">Portfolio metrics</h3>
           <div class="metric-grid" id="metric-grid"></div>
           <p class="caption" id="risk-caption"></p>
           <p class="caption" id="performance-caption"></p>
           <section id="cash-flow-performance" class="card hidden">
-            <h3>Investment performance excluding external cash flows</h3>
-            <p class="caption">Time-weighted metrics remove the effect of regular contributions and withdrawals. Terminal wealth metrics above still include those cash flows.</p>
+            <h3>Cash-flow schedule</h3>
+            <p class="caption">Annualized performance above is time-weighted and excludes external cash-flow effects. Terminal wealth still includes these contributions and withdrawals.</p>
             <div class="metric-grid" id="flow-metric-grid"></div>
           </section>
           <section id="cost-assumptions" class="card hidden">
@@ -372,6 +437,11 @@
             <div class="card"><h3 id="macro-chart-title">Macro Quadrants / model states</h3><div class="chart" id="chart-macro"></div></div>
             <div class="card"><h3>Historical Observations</h3><div class="chart" id="chart-observations"></div></div>
           </div>
+          <section id="macro-path-card" class="card hidden">
+            <h3>Joint macroeconomic paths</h3>
+            <p class="caption">P05, median and P95 paths generated jointly with regimes and asset returns.</p>
+            <div id="macro-path-grid" class="chart-grid"></div>
+          </section>
         </div>
       </div>
 
@@ -398,8 +468,8 @@
         <div class="results-empty empty-state">Run a simulation to see monthly returns.</div>
         <div id="monthly-content" class="hidden">
           <div class="card card-wide">
-            <h3>Monthly Returns (median path)</h3>
-            <p class="caption">Monthly returns of the median simulation path, by calendar year and month.</p>
+            <h3>Median Monthly Returns</h3>
+            <p class="caption">Cross-sectional median time-weighted return in each simulated month; this is not a single stitched path.</p>
             <div class="chart" id="chart-monthly"></div>
           </div>
         </div>
@@ -425,6 +495,10 @@
               <p class="caption" id="validation-summary"></p>
               <div class="table-wrap" id="validation-table"></div>
             </div>
+            <div id="probability-panel" class="hidden">
+              <h3>Current quadrant probabilities</h3>
+              <div class="chart compact-chart" id="chart-regime-probabilities"></div>
+            </div>
             <h3>Calibration Diagnostics</h3>
             <div class="table-wrap" id="diagnostics-table"></div>
             <p class="warning" id="warnings-box"></p>
@@ -437,6 +511,7 @@
         <div id="data-content" class="hidden">
           <section class="card">
             <h3>Data Coverage</h3>
+            <p id="data-timing-status" class="data-timing-status"></p>
             <div class="table-wrap" id="coverage-table"></div>
           </section>
           <section class="card">
@@ -460,7 +535,7 @@
           <section class="card actions">
             <button id="download-summary" class="btn">Download risk summary</button>
             <button id="download-diagnostics" class="btn">Download diagnostics</button>
-            <button id="download-wealth" class="btn">Download wealth paths</button>
+            <button id="download-wealth" class="btn">Download sampled paths</button>
             <button id="download-json" class="btn">Download results (JSON)</button>
           </section>
         </div>
@@ -471,9 +546,11 @@
   <div id="overlay" class="overlay hidden">
     <div class="spinner"></div>
     <div id="overlay-text">Working...</div>
+    <div id="overlay-stage" class="overlay-stage">Preparing data and model inputs</div>
+    <div id="overlay-elapsed" class="overlay-elapsed">0s elapsed</div>
   </div>
   <div id="toast-container"></div>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js?v=20260810"></script>
 </body>
 </html>

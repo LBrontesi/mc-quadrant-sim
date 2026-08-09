@@ -112,6 +112,16 @@ def test_categorize_asset_applies_overrides():
     assert categorize_asset("UNKNOWN") == "UNCATEGORIZED"
 
 
+def test_factor_model_excludes_the_asset_being_backfilled():
+    macro, returns, _ = _dataset()
+    self_only_anchor = returns[["DBMF"]]
+
+    _, report = _run((macro, returns, self_only_anchor))
+
+    assert report["DBMF"]["factor_r2"] is None
+    assert report["DBMF"]["grade"] != "A"
+
+
 def test_backward_price_levels_reconstructs_anchor():
     returns = pd.Series(
         [0.10, -0.05, 0.02],

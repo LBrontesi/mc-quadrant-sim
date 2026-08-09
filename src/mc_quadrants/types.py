@@ -100,6 +100,8 @@ class SimulationResult:
     distribution: str = "normal"
     degrees_of_freedom: float | None = None
     transition_concentration: float | None = None
+    macro_paths: np.ndarray | None = None
+    macro_columns: list[str] = field(default_factory=list)
 
     def returns_frame(self) -> pd.DataFrame:
         periods, paths, _ = self.returns.shape

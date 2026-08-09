@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
-from mc_quadrants.matrix import nearest_psd
+from mc_quadrants.matrix import covariance_to_correlation, nearest_psd
 from mc_quadrants.types import ScenarioModel, SimulationResult
 
 
@@ -125,6 +125,8 @@ def simulate_regime_paths(
     model.validate()
     if periods <= 0 or paths <= 0:
         raise ValueError("periods and paths must be positive.")
+    if min_regime_duration <= 0:
+        raise ValueError("min_regime_duration must be positive.")
 
     rng = _rng(random_seed)
     states = model.states
@@ -166,7 +168,21 @@ def simulate_regime_paths(
         return simulated
 
     simulated = np.empty((periods, paths), dtype=object)
-    remaining = np.zeros(paths, dtype=int)
+    remaining = np.empty(paths, dtype=int)
+    for state_index in range(len(states)):
+        mask = current == state_index
+        if mask.any():
+            remaining[mask] = [
+                _sample_sojourn(
+                    rng,
+                    state_index,
+                    sojourns,
+                    states,
+                    transition,
+                    min_regime_duration,
+                )
+                for _ in range(int(mask.sum()))
+            ]
     for period in range(periods):
         simulated[period] = [states[index] for index in current]
         remaining -= 1
@@ -183,8 +199,169 @@ def simulate_regime_paths(
                 dtype=int,
             )
             current[mask] = following
-            remaining[mask] = next_sojourns - 1
+            remaining[mask] = next_sojourns
     return simulated
+
+
+def _macro_quadrant_probabilities(values: np.ndarray, dynamics: Mapping[str, object]) -> np.ndarray:
+    thresholds = np.asarray(dynamics["thresholds"], dtype=float)
+    scales = np.maximum(np.asarray(dynamics["probability_scales"], dtype=float), 1e-9)
+    standardized = np.clip((values - thresholds) / scales, -35.0, 35.0)
+    high = 1.0 / (1.0 + np.exp(-standardized))
+    growth_high = high[:, 0]
+    inflation_high = high[:, 1]
+    return np.column_stack(
+        [
+            growth_high * (1.0 - inflation_high),
+            growth_high * inflation_high,
+            (1.0 - growth_high) * inflation_high,
+            (1.0 - growth_high) * (1.0 - inflation_high),
+        ]
+    )
+
+
+def simulate_joint_regime_macro_paths(
+    model: ScenarioModel,
+    periods: int,
+    paths: int,
+    start_state: str | None = None,
+    random_seed: int | None = None,
+    transition_concentration: float | None = None,
+    duration_model: str = "markov",
+    min_regime_duration: int = 3,
+    macro_transition_weight: float = 0.35,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Simulate mutually consistent macro paths and time-varying regimes."""
+
+    dynamics = model.metadata.get("macro_dynamics")
+    if not isinstance(dynamics, Mapping):
+        raise ValueError("joint_macro requires calibrated macro dynamics.")
+    if not 0 <= macro_transition_weight <= 1:
+        raise ValueError("macro_transition_weight must be between 0 and 1.")
+    duration_model = str(duration_model).lower()
+    if duration_model not in {"markov", "semi_markov"}:
+        raise ValueError("duration_model must be 'markov' or 'semi_markov'.")
+
+    rng = _rng(random_seed)
+    states = model.states
+    if len(states) != 4:
+        raise ValueError("joint_macro currently requires the four-quadrant state model.")
+    transition = model.transition_matrix.loc[states, states].to_numpy(dtype=float)
+    if transition_concentration is not None:
+        transition = _sample_transition_matrix(rng, transition, transition_concentration)
+    if start_state is None:
+        current = rng.choice(
+            len(states),
+            size=paths,
+            p=stationary_distribution(
+                pd.DataFrame(transition, index=states, columns=states)
+            ).to_numpy(dtype=float),
+        )
+    else:
+        if start_state not in states:
+            raise ValueError(f"Unknown start_state: {start_state}")
+        current = np.full(paths, states.index(start_state), dtype=int)
+
+    coefficient = np.asarray(dynamics["var_coefficient"], dtype=float)
+    centers = {
+        state: np.asarray(dynamics["state_centers"][state], dtype=float) for state in states
+    }
+    covariances = {
+        state: nearest_psd(
+            np.asarray(dynamics["state_innovation_covariances"][state], dtype=float)
+        )
+        for state in states
+    }
+    current_macro = np.broadcast_to(
+        np.asarray(dynamics["latest"], dtype=float),
+        (paths, len(dynamics["columns"])),
+    ).copy()
+    regime_paths = np.empty((periods, paths), dtype=object)
+    macro_paths = np.empty((periods, paths, current_macro.shape[1]), dtype=float)
+    macro_shocks = np.empty_like(macro_paths)
+
+    sojourns = model.metadata.get("sojourn_durations")
+    remaining = np.zeros(paths, dtype=int)
+    if duration_model == "semi_markov":
+        if not isinstance(sojourns, dict):
+            raise ValueError("semi_markov requires calibrated sojourn durations.")
+        for state_index in range(len(states)):
+            mask = current == state_index
+            remaining[mask] = [
+                _sample_sojourn(
+                    rng,
+                    state_index,
+                    sojourns,
+                    states,
+                    transition,
+                    min_regime_duration,
+                )
+                for _ in range(int(mask.sum()))
+            ]
+
+    for period in range(periods):
+        regime_paths[period] = [states[index] for index in current]
+        next_macro = np.empty_like(current_macro)
+        for state_index, state in enumerate(states):
+            mask = current == state_index
+            if not mask.any():
+                continue
+            shocks = rng.multivariate_normal(
+                np.zeros(current_macro.shape[1]),
+                covariances[state],
+                size=int(mask.sum()),
+            )
+            center = centers[state]
+            next_macro[mask] = center + (current_macro[mask] - center) @ coefficient + shocks
+            macro_shocks[period, mask] = shocks
+        current_macro = next_macro
+        macro_paths[period] = current_macro
+
+        macro_probabilities = _macro_quadrant_probabilities(current_macro, dynamics)
+        if duration_model == "semi_markov":
+            remaining -= 1
+        following = current.copy()
+        for state_index in range(len(states)):
+            mask = current == state_index
+            if duration_model == "semi_markov":
+                mask &= remaining <= 0
+            if not mask.any():
+                continue
+            path_indexes = np.flatnonzero(mask)
+            base = np.broadcast_to(transition[state_index], (len(path_indexes), len(states)))
+            macro_probability = macro_probabilities[path_indexes]
+            combined = np.power(np.maximum(base, 1e-12), 1.0 - macro_transition_weight)
+            combined *= np.power(np.maximum(macro_probability, 1e-12), macro_transition_weight)
+            if duration_model == "semi_markov":
+                combined[:, state_index] = 0.0
+            combined /= combined.sum(axis=1, keepdims=True)
+            uniforms = rng.random(len(path_indexes))
+            cumulative = np.cumsum(combined, axis=1)
+            selected = (uniforms[:, None] > cumulative).sum(axis=1)
+            following[path_indexes] = np.minimum(selected, len(states) - 1)
+            if duration_model == "semi_markov":
+                remaining[path_indexes] = [
+                    _sample_sojourn(
+                        rng,
+                        int(next_state),
+                        sojourns,
+                        states,
+                        transition,
+                        min_regime_duration,
+                    )
+                    for next_state in following[path_indexes]
+                ]
+        current = following
+    return regime_paths, macro_paths, macro_shocks
+
+
+def _normalize_correlation_stack(values: np.ndarray) -> np.ndarray:
+    diagonal = np.sqrt(np.clip(np.diagonal(values, axis1=1, axis2=2), 1e-10, None))
+    correlations = values / (diagonal[:, :, None] * diagonal[:, None, :])
+    correlations = np.clip(correlations, -0.9999, 0.9999)
+    indexes = np.arange(correlations.shape[1])
+    correlations[:, indexes, indexes] = 1.0
+    return correlations
 
 
 def simulate_returns(
@@ -202,6 +379,12 @@ def simulate_returns(
     garch: bool = False,
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
+    joint_macro: bool = False,
+    macro_transition_weight: float = 0.35,
+    dynamic_correlation: bool = False,
+    dcc_alpha: float = 0.04,
+    dcc_beta: float = 0.94,
+    dcc_asymmetry: float = 0.01,
 ) -> SimulationResult:
     """Simulate regime-dependent multivariate asset returns.
 
@@ -241,17 +424,40 @@ def simulate_returns(
         raise ValueError("garch_alpha + garch_beta must be less than 1.")
     if garch and distribution != "normal":
         raise ValueError("GARCH volatility clustering requires distribution='normal'.")
+    if joint_macro and distribution in {"bootstrap", "block_bootstrap"}:
+        raise ValueError("Joint macro simulation requires a parametric return distribution.")
+    if dynamic_correlation and distribution in {"bootstrap", "block_bootstrap"}:
+        raise ValueError("Dynamic correlation requires a parametric return distribution.")
+    if not 0 <= dcc_alpha < 1 or not 0 <= dcc_beta < 1 or not 0 <= dcc_asymmetry < 1:
+        raise ValueError("DCC parameters must be between 0 and 1.")
+    if dcc_alpha + dcc_beta + dcc_asymmetry >= 1:
+        raise ValueError("dcc_alpha + dcc_beta + dcc_asymmetry must be less than 1.")
 
-    regime_paths = simulate_regime_paths(
-        model,
-        periods=periods,
-        paths=paths,
-        start_state=start_state,
-        random_seed=random_seed,
-        transition_concentration=transition_concentration,
-        duration_model=duration_model,
-        min_regime_duration=min_regime_duration,
-    )
+    macro_paths: np.ndarray | None = None
+    macro_shocks: np.ndarray | None = None
+    if joint_macro:
+        regime_paths, macro_paths, macro_shocks = simulate_joint_regime_macro_paths(
+            model,
+            periods=periods,
+            paths=paths,
+            start_state=start_state,
+            random_seed=random_seed,
+            transition_concentration=transition_concentration,
+            duration_model=duration_model,
+            min_regime_duration=min_regime_duration,
+            macro_transition_weight=macro_transition_weight,
+        )
+    else:
+        regime_paths = simulate_regime_paths(
+            model,
+            periods=periods,
+            paths=paths,
+            start_state=start_state,
+            random_seed=random_seed,
+            transition_concentration=transition_concentration,
+            duration_model=duration_model,
+            min_regime_duration=min_regime_duration,
+        )
     rng = _rng(None if random_seed is None else random_seed + 1)
     assets = model.assets
     returns = np.empty((periods, paths, len(assets)), dtype=float)
@@ -259,17 +465,37 @@ def simulate_returns(
     bootstrap_offsets = np.full((len(model.states), paths), block_size, dtype=int)
     previous_state_indices = np.full(paths, -1, dtype=int)
 
+    macro_dynamics = model.metadata.get("macro_dynamics") if joint_macro else None
+    macro_betas = (
+        np.asarray(macro_dynamics["return_betas"], dtype=float)
+        if isinstance(macro_dynamics, Mapping)
+        else None
+    )
+
+    def state_covariance(state: str) -> np.ndarray:
+        if isinstance(macro_dynamics, Mapping):
+            residuals = macro_dynamics.get("return_residual_covariances")
+            if isinstance(residuals, Mapping) and state in residuals:
+                return nearest_psd(np.asarray(residuals[state], dtype=float))
+        return nearest_psd(
+            model.moments[state].covariance.reindex(index=assets, columns=assets).to_numpy(dtype=float)
+        )
+
     garch_levels: dict[str, np.ndarray] | None = None
     garch_omega: dict[str, np.ndarray] | None = None
     conditional_variance: np.ndarray | None = None
     if garch:
-        garch_levels = {
-            state: np.diag(model.moments[state].covariance.to_numpy(dtype=float)) for state in model.states
-        }
+        garch_levels = {state: np.diag(state_covariance(state)) for state in model.states}
         garch_omega = {
             state: (1.0 - garch_alpha - garch_beta) * level for state, level in garch_levels.items()
         }
         conditional_variance = np.empty((paths, len(assets)), dtype=float)
+
+    dcc_q: np.ndarray | None = None
+    previous_standardized: np.ndarray | None = None
+    if dynamic_correlation:
+        dcc_q = np.empty((paths, len(assets), len(assets)), dtype=float)
+        previous_standardized = np.zeros((paths, len(assets)), dtype=float)
 
     for period in range(periods):
         for state_index, state in enumerate(model.states):
@@ -302,36 +528,88 @@ def simulate_returns(
             else:
                 moments = model.moments[state]
                 mean = moments.mean.reindex(assets).to_numpy(dtype=float)
-                covariance = moments.covariance.reindex(index=assets, columns=assets).to_numpy(dtype=float)
-                covariance = nearest_psd(covariance)
-                if garch:
+                covariance = state_covariance(state)
+                macro_effect = (
+                    macro_shocks[period, path_indices] @ macro_betas
+                    if macro_shocks is not None and macro_betas is not None
+                    else 0.0
+                )
+                reanchored = (period == 0) | (previous_state_indices[path_indices] != state_index)
+                if dynamic_correlation:
+                    covariance_frame = pd.DataFrame(covariance, index=assets, columns=assets)
+                    base_correlation = covariance_to_correlation(covariance_frame).to_numpy(dtype=float)
+                    if reanchored.any():
+                        dcc_q[path_indices[reanchored]] = base_correlation
+                    continuing = ~reanchored
+                    if continuing.any():
+                        continuing_paths = path_indices[continuing]
+                        previous = previous_standardized[continuing_paths]
+                        negative = np.minimum(previous, 0.0)
+                        outer = previous[:, :, None] * previous[:, None, :]
+                        negative_outer = negative[:, :, None] * negative[:, None, :]
+                        dcc_q[continuing_paths] = (
+                            (1.0 - dcc_alpha - dcc_beta - dcc_asymmetry) * base_correlation
+                            + dcc_alpha * outer
+                            + dcc_beta * dcc_q[continuing_paths]
+                            + dcc_asymmetry * negative_outer
+                        )
+                    correlations = _normalize_correlation_stack(dcc_q[path_indices])
+                    identity = np.eye(len(assets))[None, :, :] * 1e-10
+                    cholesky = np.linalg.cholesky(correlations + identity)
+                    standardized = np.einsum(
+                        "nij,nj->ni",
+                        cholesky,
+                        rng.standard_normal((len(path_indices), len(assets))),
+                    )
+                    if distribution == "student_t":
+                        standardized *= np.sqrt(
+                            (degrees_of_freedom - 2.0)
+                            / rng.chisquare(degrees_of_freedom, size=len(path_indices))
+                        )[:, None]
+                    if garch:
+                        levels = garch_levels[state]
+                        omega = garch_omega[state]
+                        if reanchored.any():
+                            conditional_variance[path_indices[reanchored]] = levels
+                        scale = np.sqrt(conditional_variance[path_indices])
+                        residual_draws = standardized * scale
+                        conditional_variance[path_indices] = (
+                            omega
+                            + garch_alpha * residual_draws**2
+                            + garch_beta * conditional_variance[path_indices]
+                        )
+                    else:
+                        residual_draws = standardized * np.sqrt(np.diag(covariance))
+                    draws = mean + macro_effect + residual_draws
+                    previous_standardized[path_indices] = standardized
+                elif garch:
                     levels = garch_levels[state]
                     omega = garch_omega[state]
-                    reanchored = (period == 0) | (previous_state_indices[path_indices] != state_index)
                     if reanchored.any():
                         conditional_variance[path_indices[reanchored]] = levels
-                    correlation = moments.correlation.reindex(index=assets, columns=assets).to_numpy(
-                        dtype=float
-                    )
-                    correlation = nearest_psd(correlation)
+                    correlation = covariance_to_correlation(
+                        pd.DataFrame(covariance, index=assets, columns=assets)
+                    ).to_numpy(dtype=float)
                     innovations = rng.multivariate_normal(
                         np.zeros(len(assets)),
                         correlation,
                         size=mask.sum(),
                     )
                     scale = np.sqrt(conditional_variance[path_indices])
-                    draws = mean + innovations * scale
+                    draws = mean + macro_effect + innovations * scale
                     conditional_variance[path_indices] = (
                         omega
                         + garch_alpha * (innovations * scale) ** 2
                         + garch_beta * conditional_variance[path_indices]
                     )
                 elif distribution == "normal":
-                    draws = rng.multivariate_normal(mean, covariance, size=mask.sum())
+                    draws = mean + macro_effect + rng.multivariate_normal(
+                        np.zeros(len(assets)), covariance, size=mask.sum()
+                    )
                 else:
-                    draws = _sample_multivariate_t(
+                    draws = mean + macro_effect + _sample_multivariate_t(
                         rng,
-                        mean,
+                        np.zeros(len(assets)),
                         covariance,
                         size=mask.sum(),
                         degrees_of_freedom=float(degrees_of_freedom),
@@ -348,6 +626,8 @@ def simulate_returns(
         distribution=distribution,
         degrees_of_freedom=(float(degrees_of_freedom) if distribution == "student_t" else None),
         transition_concentration=transition_concentration,
+        macro_paths=macro_paths,
+        macro_columns=(list(macro_dynamics["columns"]) if isinstance(macro_dynamics, Mapping) else []),
     )
 
 
@@ -649,6 +929,52 @@ def summarize_terminal_wealth(wealth: pd.DataFrame) -> pd.Series:
     return summarize_wealth_risk(wealth)
 
 
+def inflation_deflators(
+    periods: int,
+    paths: int,
+    periods_per_year: float = 12.0,
+    annual_inflation: float = 0.0,
+    inflation_paths: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return cumulative nominal-to-real deflators for every simulated path."""
+
+    if inflation_paths is None:
+        period = np.arange(1, periods + 1, dtype=float)
+        scalar = (1.0 + annual_inflation) ** (-period / periods_per_year)
+        return np.broadcast_to(scalar[:, None], (periods, paths)).copy()
+    rates = np.asarray(inflation_paths, dtype=float)
+    if rates.shape != (periods, paths):
+        raise ValueError("inflation_paths must have shape (periods, paths).")
+    if not np.isfinite(rates).all() or (rates <= -1.0).any():
+        raise ValueError("inflation_paths must contain finite annual rates greater than -100%.")
+    periodic_growth = np.power(1.0 + rates, 1.0 / periods_per_year)
+    return 1.0 / np.cumprod(periodic_growth, axis=0)
+
+
+def inflation_adjust_wealth(
+    wealth: pd.DataFrame,
+    periods_per_year: float = 12.0,
+    annual_inflation: float = 0.0,
+    inflation_paths: np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Convert nominal wealth paths to path-consistent purchasing power."""
+
+    deflators = inflation_deflators(
+        len(wealth),
+        wealth.shape[1],
+        periods_per_year=periods_per_year,
+        annual_inflation=annual_inflation,
+        inflation_paths=inflation_paths,
+    )
+    adjusted = pd.DataFrame(
+        wealth.to_numpy(dtype=float) * deflators,
+        index=wealth.index,
+        columns=wealth.columns,
+    )
+    adjusted.attrs.update(wealth.attrs)
+    return adjusted
+
+
 def summarize_wealth_risk(
     wealth: pd.DataFrame,
     initial_value: float = 100.0,
@@ -658,6 +984,7 @@ def summarize_wealth_risk(
     annual_inflation: float = 0.0,
     contribution: float = 0.0,
     withdrawal: float = 0.0,
+    inflation_paths: np.ndarray | None = None,
 ) -> pd.Series:
     """Calculate terminal, loss-tail, drawdown, and annualized metrics.
 
@@ -689,22 +1016,33 @@ def summarize_wealth_risk(
     if not np.isfinite(wealth_values).all():
         raise ValueError("wealth must contain only finite values.")
 
-    if annual_inflation > 0:
-        period = np.arange(1, len(wealth) + 1, dtype=float)
-        deflator = (1.0 + annual_inflation) ** (-period / periods_per_year)
-        wealth_values = wealth_values * deflator[:, None]
-
     periods, paths = wealth_values.shape
+    deflator = inflation_deflators(
+        periods,
+        paths,
+        periods_per_year=periods_per_year,
+        annual_inflation=annual_inflation,
+        inflation_paths=inflation_paths,
+    )
+    wealth_values = wealth_values * deflator
     terminal = wealth_values[-1]
     tail_probability = 1.0 - confidence
     lower_tail = float(np.quantile(terminal, tail_probability))
     tail = terminal[terminal <= lower_tail]
-    annualization = periods_per_year / periods
+    contribution_deflator = np.vstack([np.ones((1, paths)), deflator[:-1]])
+    withdrawal_deflator = deflator
+    real_contributions = contribution * contribution_deflator
+    real_withdrawals = withdrawal * withdrawal_deflator
 
     # Compute per-path drawdown and downside metrics in blocks so the full
     # (periods x paths) matrix never needs to be copied multiple times.
     max_drawdown = np.empty(paths, dtype=float)
     ulcer = np.empty(paths, dtype=float)
+    return_sum = 0.0
+    return_squares = 0.0
+    return_count = 0
+    log_return_sum = 0.0
+    log_return_count = 0
     downside_sum = 0.0
     downside_count = 0
     block = max(1, int(4096))
@@ -716,15 +1054,27 @@ def summarize_wealth_risk(
         max_drawdown[start:start + values.shape[1]] = -drawdown.min(axis=0)
         ulcer[start:start + values.shape[1]] = np.sqrt(np.mean(drawdown**2, axis=0))
 
-        period_returns = values[1:] / values[:-1] - 1.0
-        period_returns = period_returns[np.isfinite(period_returns)]
-        downside = period_returns - risk_free_rate / periods_per_year
+        previous = np.vstack([np.full(values.shape[1], initial_value), values[:-1]])
+        denominator = previous + real_contributions[:, start:start + values.shape[1]]
+        numerator = values + real_withdrawals[:, start:start + values.shape[1]]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            period_returns = numerator / denominator - 1.0
+        period_returns[(denominator <= 0) | (numerator < 0)] = np.nan
+        finite_returns = period_returns[np.isfinite(period_returns)]
+        return_sum += float(finite_returns.sum())
+        return_squares += float(np.square(finite_returns).sum())
+        return_count += int(finite_returns.size)
+        valid_log_returns = finite_returns[finite_returns > -1.0]
+        log_return_sum += float(np.log1p(valid_log_returns).sum())
+        log_return_count += int(valid_log_returns.size)
+        downside = finite_returns - risk_free_rate / periods_per_year
         downside_sum += float(np.sum(np.where(downside < 0, downside**2, 0.0)))
         downside_count += int(downside.size)
 
-    mean_terminal = float(terminal.mean())
-    annualized_return = (mean_terminal / initial_value) ** annualization - 1.0
-    annualized_volatility = (float(terminal.std(ddof=0)) / initial_value) * np.sqrt(annualization)
+    mean_period_return = return_sum / return_count if return_count else 0.0
+    period_variance = max(return_squares / return_count - mean_period_return**2, 0.0) if return_count else 0.0
+    annualized_return = float(mean_period_return * periods_per_year)
+    annualized_volatility = float(np.sqrt(period_variance) * np.sqrt(periods_per_year))
     sharpe_ratio = (
         float((annualized_return - risk_free_rate) / annualized_volatility)
         if annualized_volatility > 0
@@ -736,8 +1086,14 @@ def summarize_wealth_risk(
         float((annualized_return - risk_free_rate) / annualized_downside) if annualized_downside > 0 else 0.0
     )
     mean_max_drawdown = float(max_drawdown.mean())
-    calmar_ratio = float(annualized_return / mean_max_drawdown) if mean_max_drawdown > 0 else 0.0
-    geometric_annualized_return = float(np.exp(np.log(terminal / initial_value).mean() * annualization) - 1.0)
+    geometric_annualized_return = (
+        float(np.exp(log_return_sum / log_return_count * periods_per_year) - 1.0)
+        if log_return_count
+        else 0.0
+    )
+    calmar_ratio = (
+        float(geometric_annualized_return / mean_max_drawdown) if mean_max_drawdown > 0 else 0.0
+    )
     skewness = pd.Series(terminal).skew()
     kurtosis = pd.Series(terminal).kurt()
     summary = {
@@ -766,60 +1122,11 @@ def summarize_wealth_risk(
 
     if contribution or withdrawal:
         period_count = periods
-        period_index = np.arange(1, period_count + 1, dtype=float)
-        deflator = (1.0 + annual_inflation) ** (-period_index / periods_per_year)
-        real_contributions = contribution * deflator
-        real_withdrawals = withdrawal * deflator
-
-        path_growth = np.full(paths, np.nan, dtype=float)
-        valid_squares = 0.0
-        valid_sum = 0.0
-        valid_count = 0
-        for start in range(0, paths, block):
-            values = wealth_values[:, start:start + block]
-            previous = np.vstack([np.full(values.shape[1], initial_value), values[:-1]])
-            previous *= np.concatenate(([1.0], deflator[:-1]))[:, None]
-            current = values * deflator[:, None]
-            denominator = previous + real_contributions[:, None]
-            numerator = current + real_withdrawals[:, None]
-            with np.errstate(divide="ignore", invalid="ignore"):
-                period_returns_with_flows = numerator / denominator - 1.0
-            period_returns_with_flows[(denominator <= 0) | (current <= 0)] = np.nan
-
-            finite_returns = period_returns_with_flows[np.isfinite(period_returns_with_flows)]
-            valid_squares += float(np.sum(finite_returns**2))
-            valid_sum += float(np.sum(finite_returns))
-            valid_count += int(finite_returns.size)
-
-            for column in range(values.shape[1]):
-                path_returns = period_returns_with_flows[:, column]
-                if np.isfinite(path_returns).all() and np.all(1.0 + path_returns > 0):
-                    path_growth[start + column] = np.exp(np.log1p(path_returns).sum())
-        valid_growth = path_growth[np.isfinite(path_growth)]
-        if valid_growth.size:
-            flow_adjusted_return = float(
-                np.mean(np.power(valid_growth, periods_per_year / period_count) - 1.0)
-            )
-        else:
-            flow_adjusted_return = np.nan
-        flow_adjusted_volatility = (
-            float(np.sqrt(valid_squares / valid_count - (valid_sum / valid_count) ** 2) * np.sqrt(periods_per_year))
-            if valid_count
-            else np.nan
-        )
-        mean_period_return = (
-            float(valid_sum / valid_count) if valid_count else np.nan
-        )
-        flow_adjusted_sharpe = (
-            float((mean_period_return * periods_per_year - risk_free_rate) / flow_adjusted_volatility)
-            if np.isfinite(flow_adjusted_volatility) and flow_adjusted_volatility > 0
-            else 0.0
-        )
         summary.update(
             {
-                "cash_flow_adjusted_annualized_return": flow_adjusted_return,
-                "cash_flow_adjusted_volatility": flow_adjusted_volatility,
-                "cash_flow_adjusted_sharpe_ratio": flow_adjusted_sharpe,
+                "cash_flow_adjusted_annualized_return": annualized_return,
+                "cash_flow_adjusted_volatility": annualized_volatility,
+                "cash_flow_adjusted_sharpe_ratio": sharpe_ratio,
                 "total_contributed": float(contribution * period_count),
                 "total_withdrawn": float(withdrawal * period_count),
                 "net_external_cash_flow": float((contribution - withdrawal) * period_count),

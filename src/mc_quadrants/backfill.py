@@ -138,7 +138,7 @@ def _grade(history_months: int, r2: float | None, covered_regimes: int) -> str:
         return "C"
     if r2 is None:
         return "C"
-    if r2 >= 0.5 and covered_regimes >= 2:
+    if r2 >= 0.5 and covered_regimes == len(REGIME_ORDER):
         return "A"
     if r2 >= 0.25 and covered_regimes >= 1:
         return "B"
@@ -219,6 +219,11 @@ def simulate_regime_conditioned_pre_inception_returns(
 
     for asset in assets:
         observed = returns[asset].dropna().sort_index()
+        model_anchors = (
+            anchor_returns.drop(columns=[asset], errors="ignore")
+            if anchor_returns is not None
+            else None
+        )
         category = category_label(categorize_asset(asset, overrides=categories))
         if observed.empty or len(observed) < min_observations:
             report[asset] = _report_entry(
@@ -241,11 +246,11 @@ def simulate_regime_conditioned_pre_inception_returns(
                 regime_mean[state] = float(values.mean())
                 regime_std[state] = float(values.std(ddof=1)) if len(values) > 1 else 0.0
 
-        beta, r2, residual_vol, _ = _fit_factor_model(observed, anchor_returns, min_observations)
+        beta, r2, residual_vol, _ = _fit_factor_model(observed, model_anchors, min_observations)
         residual_by_regime: dict[str, tuple[float, float]] = {}
         full_residual_vol = 0.0
         if beta is not None:
-            aligned = anchor_returns.loc[observed.index].dropna()
+            aligned = model_anchors.loc[observed.index].dropna()
             if len(aligned) >= min_observations:
                 y = observed.loc[aligned.index].to_numpy(dtype=float)
                 design = np.column_stack([np.ones(len(y)), aligned.to_numpy(dtype=float)])
@@ -270,11 +275,11 @@ def simulate_regime_conditioned_pre_inception_returns(
             state = str(state)
             if (
                 beta is not None
-                and anchor_returns is not None
-                and date in anchor_returns.index
-                and anchor_returns.loc[date].notna().all()
+                and model_anchors is not None
+                and date in model_anchors.index
+                and model_anchors.loc[date].notna().all()
             ):
-                factor_part = float(beta[0] + beta[1:] @ anchor_returns.loc[date].to_numpy(dtype=float))
+                factor_part = float(beta[0] + beta[1:] @ model_anchors.loc[date].to_numpy(dtype=float))
                 if state in residual_by_regime:
                     mean, std = residual_by_regime[state]
                 else:
