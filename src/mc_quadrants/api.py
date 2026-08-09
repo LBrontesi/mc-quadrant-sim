@@ -431,7 +431,7 @@ def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
     raw = payload.get("chunk_size")
     if raw is None or raw == "":
         paths = int(payload.get("paths", 3000))
-        return 10000 if paths > 10000 else None
+        return 5000 if paths > 5000 else None
     chunk_size = int(raw)
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive or empty (no chunking).")
