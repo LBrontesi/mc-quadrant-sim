@@ -218,8 +218,12 @@
         <details>
           <summary>Simulation</summary>
           <div class="two-col">
-            <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12"></label>
-            <label>Paths <input type="number" id="paths" value="100000" min="1000" max="120000" step="1000"></label>
+            <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12">
+              <span class="hint">Longer horizons use more memory; lower paths to compensate.</span>
+            </label>
+            <label>Paths <input type="number" id="paths" value="100000" min="1000" max="120000" step="1000">
+              <span class="hint">100k needs ~490MB at 120 periods.</span>
+            </label>
           </div>
           <div class="two-col">
             <label>Random seed <input type="number" id="seed" value="7" min="1" step="1"></label>

@@ -429,9 +429,16 @@ def _threshold_value(raw: Any) -> str | float:
 
 def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
     raw = payload.get("chunk_size")
+    paths = int(payload.get("paths", 3000))
+    periods = int(payload.get("periods", 120))
     if raw is None or raw == "":
-        paths = int(payload.get("paths", 3000))
-        return 5000 if paths > 5000 else None
+        # Keep the per-chunk transient (periods x chunk x assets) roughly
+        # constant: at 120 periods a 5000-path chunk peaks near 500MB. Longer
+        # horizons shrink the chunk so peak memory stays under free-tier limits.
+        target_chunk = 5000
+        if periods > 120:
+            target_chunk = max(1000, int(round(5000 * 120 / periods)))
+        return target_chunk if paths > target_chunk else None
     chunk_size = int(raw)
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive or empty (no chunking).")
