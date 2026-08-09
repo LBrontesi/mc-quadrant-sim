@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -34,6 +35,72 @@ class SimulationRun:
     walk_forward: WalkForwardResult | None = None
 
 
+_CHUNK_WORKER_STATE: dict[str, Any] = {}
+
+
+def _init_chunk_worker(state: dict[str, Any]) -> None:
+    """Initialize a worker process with the shared simulation state."""
+    _CHUNK_WORKER_STATE.update(state)
+
+
+def _run_chunk(args: tuple[int, int, int]) -> tuple[int, np.ndarray, np.ndarray]:
+    """Simulate one path chunk in a worker process.
+
+    Returns ``(start, wealth_values, regime_codes)`` for the chunk so the
+    caller can scatter the results into the preallocated arrays. Each chunk
+    draws its own RNG from ``random_seed + chunk_index``, so results are
+    identical whether chunks run sequentially or in parallel.
+    """
+    start, count, seed = args
+    state = _CHUNK_WORKER_STATE
+    chunk_result = simulate_returns(
+        state["model"],
+        periods=state["periods"],
+        paths=count,
+        start_state=state["start_state"],
+        random_seed=seed,
+        distribution=state["distribution"],
+        degrees_of_freedom=state["degrees_of_freedom"],
+        block_size=state["block_size"],
+        transition_concentration=state["transition_concentration"],
+        duration_model=state["duration_model"],
+        min_regime_duration=state["min_regime_duration"],
+        garch=state["garch"],
+        garch_alpha=state["garch_alpha"],
+        garch_beta=state["garch_beta"],
+    )
+    chunk_wealth = simulate_portfolio_paths(
+        chunk_result,
+        weights=state["weights"],
+        initial_value=state["initial_value"],
+        return_kind=state["return_kind"],
+        rebalance_frequency=state["rebalance_frequency"],
+        transaction_cost_bps=state["transaction_cost_bps"],
+        asset_expense_ratios=state["expense_ratios"],
+        leverage_multiple=state["leverage_multiple"],
+        financing_rate=state["financing_rate"],
+        financing_inflation_sensitivity=state["financing_inflation_sensitivity"],
+        state_inflation=state["state_inflation"],
+        maintenance_margin=state["maintenance_margin"],
+        contribution=state["contribution"],
+        withdrawal=state["withdrawal"],
+    )
+    wealth_values = chunk_wealth.to_numpy(dtype=float)
+    regime_codes = np.empty((state["periods"], count), dtype=np.int8)
+    state_codes = state["state_codes"]
+    for period in range(state["periods"]):
+        column = chunk_result.regimes[period]
+        regime_codes[period] = [state_codes[state_name] for state_name in column]
+    return start, wealth_values, regime_codes
+
+
+def _chunk_specs(total: int, chunk_size: int, random_seed: int) -> list[tuple[int, int, int]]:
+    return [
+        (start, min(chunk_size, total - start), int(random_seed) + start // chunk_size)
+        for start in range(0, total, chunk_size)
+    ]
+
+
 def _simulate_chunked(
     model: ScenarioModel,
     periods: int,
@@ -63,6 +130,7 @@ def _simulate_chunked(
     contribution: float,
     withdrawal: float,
     return_kind: str,
+    workers: int = 1,
 ) -> tuple[SimulationResult, pd.DataFrame]:
     """Simulate returns and portfolio wealth, chunking the path dimension.
 
@@ -72,6 +140,11 @@ def _simulate_chunked(
     regime paths, bounding peak memory to roughly one chunk plus the wealth
     frame. The regime arrays are concatenated so the caller sees the same
     ``SimulationResult`` shape as a one-shot run.
+
+    With ``workers > 1`` the chunks run in a ``ProcessPoolExecutor``. Each chunk
+    draws its RNG from ``random_seed + chunk_index``, so results are bit-for-bit
+    identical to the sequential path while wall time drops roughly with the
+    worker count (processes, not threads, so the GIL is bypassed).
     """
 
     def _single(paths_now: int, seed: int) -> tuple[SimulationResult, pd.DataFrame]:
@@ -122,14 +195,53 @@ def _simulate_chunked(
         columns=[f"path_{i}" for i in range(total)],
         dtype=float,
     )
-    for start in range(0, total, chunk_size):
-        count = min(chunk_size, total - start)
-        seed = int(random_seed) + start // chunk_size
-        chunk_result, chunk_wealth = _single(count, seed)
-        wealth.iloc[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
-        for period in range(periods):
-            column = chunk_result.regimes[period]
-            regime_codes[period, start:start + count] = [state_codes[state] for state in column]
+    specs = _chunk_specs(total, chunk_size, random_seed)
+
+    if workers is not None and workers > 1:
+        worker_state = {
+            "model": model,
+            "periods": periods,
+            "start_state": start_state,
+            "distribution": distribution,
+            "degrees_of_freedom": float(degrees_of_freedom),
+            "block_size": int(block_size),
+            "transition_concentration": transition_concentration,
+            "duration_model": duration_model,
+            "min_regime_duration": int(min_regime_duration),
+            "garch": bool(garch),
+            "garch_alpha": float(garch_alpha),
+            "garch_beta": float(garch_beta),
+            "weights": weight_series.to_dict(),
+            "initial_value": float(initial_value),
+            "return_kind": return_kind,
+            "rebalance_frequency": rebalance_frequency,
+            "transaction_cost_bps": float(transaction_cost_bps),
+            "expense_ratios": expense_ratios.to_dict(),
+            "leverage_multiple": float(leverage_multiple),
+            "financing_rate": float(financing_rate),
+            "financing_inflation_sensitivity": float(financing_inflation_sensitivity),
+            "state_inflation": dict(state_inflation) if state_inflation else None,
+            "maintenance_margin": float(maintenance_margin),
+            "contribution": float(contribution),
+            "withdrawal": float(withdrawal),
+            "state_codes": state_codes,
+        }
+        with ProcessPoolExecutor(
+            max_workers=int(workers),
+            initializer=_init_chunk_worker,
+            initargs=(worker_state,),
+        ) as executor:
+            for start, chunk_wealth_values, chunk_regime_codes in executor.map(_run_chunk, specs):
+                count = chunk_wealth_values.shape[1]
+                wealth.iloc[:, start:start + count] = chunk_wealth_values
+                regime_codes[:, start:start + count] = chunk_regime_codes
+    else:
+        for start, count, seed in specs:
+            chunk_result, chunk_wealth = _single(count, seed)
+            wealth.iloc[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
+            for period in range(periods):
+                column = chunk_result.regimes[period]
+                regime_codes[period, start:start + count] = [state_codes[state] for state in column]
 
     combined = SimulationResult(
         returns=np.empty((periods, 0, len(model.assets)), dtype=float),
@@ -191,6 +303,7 @@ def run_scenario(
     walk_forward: bool = True,
     chunk_size: int | None = None,
     return_kind: str = "log",
+    workers: int = 1,
 ) -> SimulationRun:
     """Calibrate and simulate one fully specified investment scenario.
 
@@ -320,6 +433,7 @@ def run_scenario(
         contribution=float(contribution),
         withdrawal=float(withdrawal),
         return_kind=return_kind,
+        workers=workers,
     )
     walk_forward_result = None
     if walk_forward and model_kind == "quadrant":

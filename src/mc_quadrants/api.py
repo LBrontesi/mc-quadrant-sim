@@ -445,6 +445,16 @@ def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
     return chunk_size
 
 
+def _workers_value(payload: Mapping[str, Any]) -> int:
+    raw = payload.get("workers")
+    if raw is None or raw == "":
+        return 1
+    workers = int(raw)
+    if workers < 1 or workers > 64:
+        raise ValueError("workers must be between 1 and 64.")
+    return workers
+
+
 def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     distribution = str(payload.get("distribution", "normal")).lower().replace("-", "_")
     distribution = DISTRIBUTION_KEYS.get(distribution, distribution)
@@ -553,6 +563,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "garch_beta": garch_beta,
         "walk_forward": bool(payload.get("walk_forward", True)),
         "chunk_size": _chunk_size_value(payload),
+        "workers": _workers_value(payload),
     }
 
 

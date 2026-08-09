@@ -224,6 +224,9 @@
             <label>Paths <input type="number" id="paths" value="100000" min="1000" max="120000" step="1000">
               <span class="hint">100k needs ~490MB at 120 periods.</span>
             </label>
+            <label>Parallel workers <input type="number" id="workers" value="1" min="1" max="16" step="1">
+              <span class="hint">Simulate path chunks in parallel. Each worker adds memory; use more on paid instances.</span>
+            </label>
           </div>
           <div class="two-col">
             <label>Random seed <input type="number" id="seed" value="7" min="1" step="1"></label>

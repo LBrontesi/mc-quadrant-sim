@@ -304,6 +304,20 @@ def test_simulate_reports_inflation_linked_financing():
     )
 
 
+def test_simulate_parallel_workers_match_sequential():
+    seq = api.build_simulate_response(_csv_payload(periods=12, paths=100, chunk_size=25, workers=1))
+    par = api.build_simulate_response(_csv_payload(periods=12, paths=100, chunk_size=25, workers=4))
+    for key in ("mean", "p05", "p50", "p95", "annualized_return", "effective_financing_rate"):
+        assert par["summary"][key] == pytest.approx(seq["summary"][key], abs=1e-12)
+    assert np.array_equal(par["terminal"], seq["terminal"])
+    assert par["regime_timelines"] == seq["regime_timelines"]
+
+
+def test_scenario_kwargs_rejects_invalid_workers():
+    with pytest.raises(ValueError, match="workers"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "workers": 0})
+
+
 def test_simulate_inflation_linked_financing_needs_leverage_state_inflation():
     payload = _csv_payload(
         leverage_multiple=2.0,
