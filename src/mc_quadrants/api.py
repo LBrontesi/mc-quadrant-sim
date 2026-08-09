@@ -427,6 +427,17 @@ def _threshold_value(raw: Any) -> str | float:
     return raw if raw in {"median", "mean"} else float(raw)
 
 
+def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
+    raw = payload.get("chunk_size")
+    if raw is None or raw == "":
+        paths = int(payload.get("paths", 3000))
+        return 10000 if paths > 10000 else None
+    chunk_size = int(raw)
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive or empty (no chunking).")
+    return chunk_size
+
+
 def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     distribution = str(payload.get("distribution", "normal")).lower().replace("-", "_")
     distribution = DISTRIBUTION_KEYS.get(distribution, distribution)
@@ -534,6 +545,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "garch_alpha": garch_alpha,
         "garch_beta": garch_beta,
         "walk_forward": bool(payload.get("walk_forward", True)),
+        "chunk_size": _chunk_size_value(payload),
     }
 
 
@@ -573,18 +585,37 @@ def run_scenario_payload(payload: Mapping[str, Any]) -> tuple[Any, list[str], pd
     return scenario, selected_tickers, macro
 
 
+def _wealth_percentiles(wealth: pd.DataFrame) -> pd.DataFrame:
+    """Compute per-period wealth percentiles without copying the full matrix."""
+    values = wealth.to_numpy(dtype=float)
+    quantiles = np.quantile(values, [0.05, 0.50, 0.95], axis=1)
+    return pd.DataFrame(quantiles.T, columns=[0.05, 0.50, 0.95])
+
+
 def _max_drawdown_paths(wealth: pd.DataFrame, initial_value: float = 100.0) -> np.ndarray:
-    wealth_with_initial = pd.concat(
-        [pd.DataFrame([[initial_value] * wealth.shape[1]], columns=wealth.columns), wealth],
-        ignore_index=True,
-    )
-    running_max = wealth_with_initial.cummax(axis=0)
-    return -(wealth_with_initial / running_max - 1.0).min(axis=0).to_numpy(dtype=float)
+    drawdowns = np.empty(wealth.shape[1], dtype=float)
+    block = max(1, int(4096))
+    for start in range(0, wealth.shape[1], block):
+        chunk = wealth.iloc[:, start:start + block].to_numpy(dtype=float)
+        chunk_with_initial = np.vstack([np.full(chunk.shape[1], initial_value), chunk])
+        running_max = np.maximum.accumulate(chunk_with_initial, axis=0)
+        drawdowns[start:start + chunk.shape[1]] = -(chunk_with_initial / running_max - 1.0).min(axis=0)
+    return drawdowns
+
+
+def _regime_counts(result: Any) -> dict[str, int]:
+    regimes = result.regimes
+    if regimes.dtype.kind in "iu":
+        codes = regimes.ravel()
+        hist = np.bincount(codes, minlength=len(result.states))
+        return {str(state): int(count) for state, count in zip(result.states, hist)}
+    values, counts = np.unique(regimes.ravel(), return_counts=True)
+    return {str(state): int(count) for state, count in zip(values, counts)}
 
 
 def _simulated_regime_summary(result: Any) -> pd.DataFrame:
-    counts = pd.Series(result.regimes.ravel(), dtype="string").value_counts()
-    total = max(int(counts.sum()), 1)
+    counts = _regime_counts(result)
+    total = max(sum(counts.values()), 1)
     return pd.DataFrame(
         {
             "regime": result.states,
@@ -640,19 +671,26 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     summary = scenario.summary
     growth_col = scenario.model.metadata.get("growth_col", "growth")
     inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
-
-    percentiles = wealth.quantile([0.05, 0.50, 0.95], axis=1).T
+    wealth_shape = wealth.shape
+    percentiles = _wealth_percentiles(wealth)
     terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
     regime_timelines: dict[str, list[str]] = {}
     for label, target in (("p05", 0.05), ("median", 0.50), ("p95", 0.95)):
         target_value = float(np.quantile(terminal_values, target))
         path_index = int(np.argmin(np.abs(terminal_values - target_value)))
-        regime_timelines[label] = [str(state) for state in result.regimes[:, path_index]]
+        column = result.regimes[:, path_index]
+        if result.regimes.dtype.kind in "iu":
+            states = np.asarray(result.states, dtype=object)
+            regime_timelines[label] = [str(state) for state in states[column]]
+        else:
+            regime_timelines[label] = [str(state) for state in column]
+    regime_counts = _regime_counts(result)
+    regime_total = max(sum(regime_counts.values()), 1)
     regime_mix = (
-        pd.Series(result.regimes.ravel())
-        .value_counts(normalize=True)
+        pd.Series(regime_counts, dtype=float)
         .reindex(model.states)
         .fillna(0.0)
+        .div(regime_total)
         .rename(index={state: _state_label(state) for state in model.states})
     )
     scatter = macro[[growth_col, inflation_col]].copy()
@@ -708,7 +746,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "median": percentiles[0.50].tolist(),
             "p95": percentiles[0.95].tolist(),
         },
-        "terminal": wealth.iloc[-1].tolist(),
+        "terminal": terminal_values.tolist(),
         "drawdowns": _max_drawdown_paths(wealth).tolist(),
         "regime_timeline": regime_timelines["median"],
         "regime_timelines": regime_timelines,

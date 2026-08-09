@@ -692,20 +692,36 @@ def summarize_wealth_risk(
     if annual_inflation > 0:
         period = np.arange(1, len(wealth) + 1, dtype=float)
         deflator = (1.0 + annual_inflation) ** (-period / periods_per_year)
-        wealth = wealth.mul(deflator, axis=0)
+        wealth_values = wealth_values * deflator[:, None]
 
-    terminal = wealth.iloc[-1]
+    periods, paths = wealth_values.shape
+    terminal = wealth_values[-1]
     tail_probability = 1.0 - confidence
-    lower_tail = float(terminal.quantile(tail_probability))
+    lower_tail = float(np.quantile(terminal, tail_probability))
     tail = terminal[terminal <= lower_tail]
-    wealth_with_initial = pd.concat(
-        [pd.DataFrame([np.full(wealth.shape[1], initial_value)], columns=wealth.columns), wealth],
-        ignore_index=True,
-    )
-    running_max = wealth_with_initial.cummax(axis=0)
-    drawdown = wealth_with_initial / running_max - 1.0
-    max_drawdown = -drawdown.min(axis=0)
-    annualization = periods_per_year / len(wealth)
+    annualization = periods_per_year / periods
+
+    # Compute per-path drawdown and downside metrics in blocks so the full
+    # (periods x paths) matrix never needs to be copied multiple times.
+    max_drawdown = np.empty(paths, dtype=float)
+    ulcer = np.empty(paths, dtype=float)
+    downside_sum = 0.0
+    downside_count = 0
+    block = max(1, int(4096))
+    for start in range(0, paths, block):
+        values = wealth_values[:, start:start + block]
+        values_with_initial = np.vstack([np.full(values.shape[1], initial_value), values])
+        running_max = np.maximum.accumulate(values_with_initial, axis=0)
+        drawdown = values_with_initial / running_max - 1.0
+        max_drawdown[start:start + values.shape[1]] = -drawdown.min(axis=0)
+        ulcer[start:start + values.shape[1]] = np.sqrt(np.mean(drawdown**2, axis=0))
+
+        period_returns = values[1:] / values[:-1] - 1.0
+        period_returns = period_returns[np.isfinite(period_returns)]
+        downside = period_returns - risk_free_rate / periods_per_year
+        downside_sum += float(np.sum(np.where(downside < 0, downside**2, 0.0)))
+        downside_count += int(downside.size)
+
     mean_terminal = float(terminal.mean())
     annualized_return = (mean_terminal / initial_value) ** annualization - 1.0
     annualized_volatility = (float(terminal.std(ddof=0)) / initial_value) * np.sqrt(annualization)
@@ -714,13 +730,7 @@ def summarize_wealth_risk(
         if annualized_volatility > 0
         else 0.0
     )
-    ulcer = np.sqrt((drawdown**2).mean(axis=0))
-
-    period_returns = (wealth / wealth.shift(1) - 1.0).to_numpy(dtype=float).ravel()
-    period_returns = period_returns[np.isfinite(period_returns)]
-    downside = period_returns - risk_free_rate / periods_per_year
-    downside_squared = np.where(downside < 0, downside**2, 0.0)
-    downside_deviation = float(np.sqrt(downside_squared.mean())) if downside_squared.size else 0.0
+    downside_deviation = float(np.sqrt(downside_sum / downside_count)) if downside_count else 0.0
     annualized_downside = downside_deviation * np.sqrt(periods_per_year)
     sortino_ratio = (
         float((annualized_return - risk_free_rate) / annualized_downside) if annualized_downside > 0 else 0.0
@@ -728,14 +738,14 @@ def summarize_wealth_risk(
     mean_max_drawdown = float(max_drawdown.mean())
     calmar_ratio = float(annualized_return / mean_max_drawdown) if mean_max_drawdown > 0 else 0.0
     geometric_annualized_return = float(np.exp(np.log(terminal / initial_value).mean() * annualization) - 1.0)
-    skewness = terminal.skew()
-    kurtosis = terminal.kurt()
+    skewness = pd.Series(terminal).skew()
+    kurtosis = pd.Series(terminal).kurt()
     summary = {
-        "mean": terminal.mean(),
-        "std": terminal.std(ddof=0),
-        "p05": terminal.quantile(0.05),
-        "p50": terminal.quantile(0.50),
-        "p95": terminal.quantile(0.95),
+        "mean": float(terminal.mean()),
+        "std": float(terminal.std(ddof=0)),
+        "p05": float(np.quantile(terminal, 0.05)),
+        "p50": float(np.quantile(terminal, 0.50)),
+        "p95": float(np.quantile(terminal, 0.95)),
         "annualized_return": float(annualized_return),
         "annualized_volatility": float(annualized_volatility),
         "geometric_annualized_return": geometric_annualized_return,
@@ -746,36 +756,46 @@ def summarize_wealth_risk(
         "var_95": initial_value - lower_tail,
         "expected_shortfall_95": initial_value - float(tail.mean()),
         "max_drawdown_mean": mean_max_drawdown,
-        "max_drawdown_p95": float(max_drawdown.quantile(0.95)),
+        "max_drawdown_p95": float(np.quantile(max_drawdown, 0.95)),
         "max_drawdown_worst": float(max_drawdown.max()),
         "ulcer_index_mean": float(ulcer.mean()),
-        "ulcer_index_p95": float(ulcer.quantile(0.95)),
+        "ulcer_index_p95": float(np.quantile(ulcer, 0.95)),
         "terminal_skewness": float(skewness) if np.isfinite(skewness) else 0.0,
         "terminal_kurtosis": float(kurtosis) if np.isfinite(kurtosis) else 0.0,
     }
 
     if contribution or withdrawal:
-        period_count = len(wealth)
+        period_count = periods
         period_index = np.arange(1, period_count + 1, dtype=float)
         deflator = (1.0 + annual_inflation) ** (-period_index / periods_per_year)
         real_contributions = contribution * deflator
         real_withdrawals = withdrawal * deflator
-        previous = np.vstack([np.full(wealth.shape[1], initial_value), wealth_values[:-1]])
-        previous *= np.concatenate(([1.0], deflator[:-1]))[:, None]
-        current = wealth_values * deflator[:, None]
-        denominator = previous + real_contributions[:, None]
-        numerator = current + real_withdrawals[:, None]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            period_returns_with_flows = numerator / denominator - 1.0
-        period_returns_with_flows[(denominator <= 0) | (current <= 0)] = np.nan
 
-        path_growth = np.full(wealth.shape[1], np.nan, dtype=float)
-        for path in range(wealth.shape[1]):
-            path_returns = period_returns_with_flows[:, path]
-            if np.isfinite(path_returns).all() and np.all(1.0 + path_returns > 0):
-                path_growth[path] = np.exp(np.log1p(path_returns).sum())
+        path_growth = np.full(paths, np.nan, dtype=float)
+        valid_squares = 0.0
+        valid_sum = 0.0
+        valid_count = 0
+        for start in range(0, paths, block):
+            values = wealth_values[:, start:start + block]
+            previous = np.vstack([np.full(values.shape[1], initial_value), values[:-1]])
+            previous *= np.concatenate(([1.0], deflator[:-1]))[:, None]
+            current = values * deflator[:, None]
+            denominator = previous + real_contributions[:, None]
+            numerator = current + real_withdrawals[:, None]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                period_returns_with_flows = numerator / denominator - 1.0
+            period_returns_with_flows[(denominator <= 0) | (current <= 0)] = np.nan
+
+            finite_returns = period_returns_with_flows[np.isfinite(period_returns_with_flows)]
+            valid_squares += float(np.sum(finite_returns**2))
+            valid_sum += float(np.sum(finite_returns))
+            valid_count += int(finite_returns.size)
+
+            for column in range(values.shape[1]):
+                path_returns = period_returns_with_flows[:, column]
+                if np.isfinite(path_returns).all() and np.all(1.0 + path_returns > 0):
+                    path_growth[start + column] = np.exp(np.log1p(path_returns).sum())
         valid_growth = path_growth[np.isfinite(path_growth)]
-        valid_period_returns = period_returns_with_flows[np.isfinite(period_returns_with_flows)]
         if valid_growth.size:
             flow_adjusted_return = float(
                 np.mean(np.power(valid_growth, periods_per_year / period_count) - 1.0)
@@ -783,12 +803,12 @@ def summarize_wealth_risk(
         else:
             flow_adjusted_return = np.nan
         flow_adjusted_volatility = (
-            float(np.std(valid_period_returns, ddof=0) * np.sqrt(periods_per_year))
-            if valid_period_returns.size
+            float(np.sqrt(valid_squares / valid_count - (valid_sum / valid_count) ** 2) * np.sqrt(periods_per_year))
+            if valid_count
             else np.nan
         )
         mean_period_return = (
-            float(np.mean(valid_period_returns)) if valid_period_returns.size else np.nan
+            float(valid_sum / valid_count) if valid_count else np.nan
         )
         flow_adjusted_sharpe = (
             float((mean_period_return * periods_per_year - risk_free_rate) / flow_adjusted_volatility)

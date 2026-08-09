@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from mc_quadrants.calibration import CorrelationOverrides, calibrate_quadrant_model
@@ -31,6 +32,116 @@ class SimulationRun:
     summary: pd.Series
     diagnostics: CalibrationDiagnostics
     walk_forward: WalkForwardResult | None = None
+
+
+def _simulate_chunked(
+    model: ScenarioModel,
+    periods: int,
+    paths: int,
+    random_seed: int,
+    start_state: str | None,
+    distribution: str,
+    degrees_of_freedom: float,
+    block_size: int,
+    transition_concentration: float | None,
+    duration_model: str,
+    min_regime_duration: int,
+    garch: bool,
+    garch_alpha: float,
+    garch_beta: float,
+    chunk_size: int | None,
+    weight_series: pd.Series,
+    initial_value: float,
+    rebalance_frequency: int | None,
+    transaction_cost_bps: float,
+    expense_ratios: pd.Series,
+    leverage_multiple: float,
+    financing_rate: float,
+    financing_inflation_sensitivity: float,
+    state_inflation: Mapping[str, float] | None,
+    maintenance_margin: float,
+    contribution: float,
+    withdrawal: float,
+    return_kind: str,
+) -> tuple[SimulationResult, pd.DataFrame]:
+    """Simulate returns and portfolio wealth, chunking the path dimension.
+
+    ``simulate_returns`` materializes a ``(periods, paths, assets)`` array, so a
+    single 100k-path run can require multiple gigabytes. This helper simulates
+    ``chunk_size`` paths at a time and only keeps the accumulated wealth and
+    regime paths, bounding peak memory to roughly one chunk plus the wealth
+    frame. The regime arrays are concatenated so the caller sees the same
+    ``SimulationResult`` shape as a one-shot run.
+    """
+
+    def _single(paths_now: int, seed: int) -> tuple[SimulationResult, pd.DataFrame]:
+        chunk_result = simulate_returns(
+            model,
+            periods=periods,
+            paths=paths_now,
+            start_state=start_state,
+            random_seed=seed,
+            distribution=distribution,
+            degrees_of_freedom=degrees_of_freedom,
+            block_size=block_size,
+            transition_concentration=transition_concentration,
+            duration_model=duration_model,
+            min_regime_duration=min_regime_duration,
+            garch=garch,
+            garch_alpha=garch_alpha,
+            garch_beta=garch_beta,
+        )
+        chunk_wealth = simulate_portfolio_paths(
+            chunk_result,
+            weights=weight_series.to_dict(),
+            initial_value=initial_value,
+            return_kind=return_kind,
+            rebalance_frequency=rebalance_frequency,
+            transaction_cost_bps=transaction_cost_bps,
+            asset_expense_ratios=expense_ratios.to_dict(),
+            leverage_multiple=leverage_multiple,
+            financing_rate=financing_rate,
+            financing_inflation_sensitivity=financing_inflation_sensitivity,
+            state_inflation=state_inflation,
+            maintenance_margin=maintenance_margin,
+            contribution=contribution,
+            withdrawal=withdrawal,
+        )
+        return chunk_result, chunk_wealth
+
+    if chunk_size is None or paths <= chunk_size:
+        return _single(int(paths), int(random_seed))
+
+    total = int(paths)
+    chunk_size = max(1, int(chunk_size))
+    state_codes = {state: index for index, state in enumerate(model.states)}
+    regime_codes = np.empty((periods, total), dtype=np.int8)
+    wealth = pd.DataFrame(
+        np.nan,
+        index=pd.RangeIndex(periods),
+        columns=[f"path_{i}" for i in range(total)],
+        dtype=float,
+    )
+    for start in range(0, total, chunk_size):
+        count = min(chunk_size, total - start)
+        seed = int(random_seed) + start // chunk_size
+        chunk_result, chunk_wealth = _single(count, seed)
+        wealth.iloc[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
+        for period in range(periods):
+            column = chunk_result.regimes[period]
+            regime_codes[period, start:start + count] = [state_codes[state] for state in column]
+
+    combined = SimulationResult(
+        returns=np.empty((periods, 0, len(model.assets)), dtype=float),
+        regimes=regime_codes,
+        assets=model.assets,
+        states=model.states.copy(),
+        frequency=model.frequency,
+        distribution=distribution,
+        degrees_of_freedom=(float(degrees_of_freedom) if distribution == "student_t" else None),
+        transition_concentration=transition_concentration,
+    )
+    return combined, wealth
 
 
 def run_scenario(
@@ -78,6 +189,8 @@ def run_scenario(
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
     walk_forward: bool = True,
+    chunk_size: int | None = None,
+    return_kind: str = "log",
 ) -> SimulationRun:
     """Calibrate and simulate one fully specified investment scenario.
 
@@ -176,12 +289,12 @@ def run_scenario(
         if asset_currencies:
             model.metadata["asset_currencies"] = dict(asset_currencies)
 
-    result = simulate_returns(
+    result, wealth = _simulate_chunked(
         model,
         periods=int(periods),
         paths=int(paths),
-        start_state=start_state,
         random_seed=int(random_seed),
+        start_state=start_state,
         distribution=distribution,
         degrees_of_freedom=float(degrees_of_freedom),
         block_size=int(block_size),
@@ -193,14 +306,12 @@ def run_scenario(
         garch=garch,
         garch_alpha=float(garch_alpha),
         garch_beta=float(garch_beta),
-    )
-    wealth = simulate_portfolio_paths(
-        result,
-        weights=normalized_weights,
+        chunk_size=chunk_size,
+        weight_series=pd.Series(normalized_weights, dtype=float),
         initial_value=initial_value,
         rebalance_frequency=rebalance_frequency,
         transaction_cost_bps=float(transaction_cost_bps),
-        asset_expense_ratios=normalized_expense_ratios,
+        expense_ratios=pd.Series(normalized_expense_ratios, dtype=float),
         leverage_multiple=float(leverage_multiple),
         financing_rate=float(financing_rate),
         financing_inflation_sensitivity=float(financing_inflation_sensitivity),
@@ -208,6 +319,7 @@ def run_scenario(
         maintenance_margin=float(maintenance_margin),
         contribution=float(contribution),
         withdrawal=float(withdrawal),
+        return_kind=return_kind,
     )
     walk_forward_result = None
     if walk_forward and model_kind == "quadrant":
@@ -243,8 +355,14 @@ def run_scenario(
     state_inflation = model.metadata.get("state_inflation", {})
     effective_financing = float(financing_rate)
     if float(financing_inflation_sensitivity) > 0 and state_inflation and len(result.states):
-        regime_counts = pd.Series(result.regimes.ravel()).value_counts()
-        total = max(int(regime_counts.sum()), 1)
+        simulated_regimes = result.regimes
+        if simulated_regimes.dtype.kind in "iu":
+            hist = np.bincount(simulated_regimes.ravel(), minlength=len(result.states))
+            regime_counts = {state: int(count) for state, count in zip(result.states, hist)}
+        else:
+            unique_states, state_counts = np.unique(simulated_regimes.ravel(), return_counts=True)
+            regime_counts = {str(state): int(count) for state, count in zip(unique_states, state_counts)}
+        total = max(sum(regime_counts.values()), 1)
         effective_financing = float(
             sum(
                 (float(financing_rate) + float(financing_inflation_sensitivity) * float(state_inflation.get(state, 0.0)))
