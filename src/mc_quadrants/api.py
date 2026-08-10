@@ -133,7 +133,6 @@ REBALANCE_KEYS = {
 MAX_PERIODS = 360
 MAX_PATHS = 120_000
 MAX_WORKERS = 16
-MAX_ESTIMATED_MEMORY_MB = 384
 DEFAULT_EXPORT_PATHS = 1_000
 MAX_EXPORT_PATHS = 5_000
 
@@ -508,7 +507,7 @@ def _workers_value(payload: Mapping[str, Any]) -> int:
 
 
 def simulation_resource_estimate(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Estimate the dominant in-memory arrays for one simulation request."""
+    """Describe the adaptive execution plan for one simulation request."""
 
     periods = int(payload.get("periods", 120))
     paths = int(payload.get("paths", 3000))
@@ -516,41 +515,14 @@ def simulation_resource_estimate(payload: Mapping[str, Any]) -> dict[str, Any]:
     workers = _workers_value(payload)
     chunk_size = _chunk_size_value(payload) or paths
     chunk_size = min(chunk_size, paths)
-    joint_macro = bool(payload.get("joint_macro", False))
-    dynamic_correlation = bool(payload.get("dynamic_correlation", False))
-
-    wealth_bytes = periods * paths * 8
-    regime_bytes = periods * paths
-    response_bytes = paths * 8 * 2
-    macro_path_bytes = periods * paths * 2 * 8 if joint_macro else 0
-    transient_per_worker = periods * chunk_size * assets * 8 * 3
-    if joint_macro:
-        transient_per_worker += periods * chunk_size * 2 * 8
-    if dynamic_correlation:
-        # Q, normalized correlations, and Cholesky factors are the dominant
-        # per-path ADCC work arrays.
-        transient_per_worker += chunk_size * assets * assets * 8 * 3
-    worker_overhead = workers * 32 * 1024**2
-    fixed_overhead = 64 * 1024**2
-    estimated_bytes = (
-        wealth_bytes
-        + regime_bytes
-        + response_bytes
-        + macro_path_bytes
-        + transient_per_worker * workers
-        + worker_overhead
-        + fixed_overhead
-    )
     return {
         "periods": periods,
         "paths": paths,
         "assets": assets,
         "workers": workers,
         "chunk_size": chunk_size,
-        "joint_macro": joint_macro,
-        "dynamic_correlation": dynamic_correlation,
-        "estimated_memory_mb": round(estimated_bytes / 1024**2, 1),
-        "limit_memory_mb": MAX_ESTIMATED_MEMORY_MB,
+        "joint_macro": bool(payload.get("joint_macro", False)),
+        "dynamic_correlation": bool(payload.get("dynamic_correlation", False)),
         "work_units": periods * paths * assets,
     }
 
@@ -561,12 +533,6 @@ def _validate_simulation_size(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"periods must be between 1 and {MAX_PERIODS}.")
     if estimate["paths"] < 1 or estimate["paths"] > MAX_PATHS:
         raise ValueError(f"paths must be between 1 and {MAX_PATHS:,}.")
-    if estimate["estimated_memory_mb"] > MAX_ESTIMATED_MEMORY_MB:
-        raise ValueError(
-            "This scenario is estimated to need "
-            f"{estimate['estimated_memory_mb']:.0f} MB, above the "
-            f"{MAX_ESTIMATED_MEMORY_MB} MB safety budget. Reduce paths, periods, assets, or workers."
-        )
     return estimate
 
 
@@ -800,6 +766,157 @@ def _max_drawdown_paths(wealth: pd.DataFrame, initial_value: float = 100.0) -> n
     return drawdowns
 
 
+def _sample_distribution(values: np.ndarray, limit: int = 4_000) -> list[float]:
+    """Return a deterministic bounded sample while preserving the full range."""
+
+    clean = np.asarray(values, dtype=float)
+    clean = clean[np.isfinite(clean)]
+    if clean.size <= limit:
+        return clean.tolist()
+    indices = np.linspace(0, clean.size - 1, limit, dtype=int)
+    return clean[indices].tolist()
+
+
+def _distribution_summary(values: np.ndarray) -> dict[str, float]:
+    clean = np.asarray(values, dtype=float)
+    clean = clean[np.isfinite(clean)]
+    if not clean.size:
+        return {key: 0.0 for key in ("min", "p05", "p25", "median", "p75", "p95", "max", "mean", "std")}
+    quantiles = np.quantile(clean, [0.05, 0.25, 0.50, 0.75, 0.95])
+    return {
+        "min": float(clean.min()),
+        "p05": float(quantiles[0]),
+        "p25": float(quantiles[1]),
+        "median": float(quantiles[2]),
+        "p75": float(quantiles[3]),
+        "p95": float(quantiles[4]),
+        "max": float(clean.max()),
+        "mean": float(clean.mean()),
+        "std": float(clean.std(ddof=0)),
+    }
+
+
+def _path_analytics(
+    wealth: pd.DataFrame,
+    result: Any,
+    payload: Mapping[str, Any],
+    initial_value: float = 100.0,
+) -> dict[str, Any]:
+    """Build decision-focused path analytics without retaining asset return cubes."""
+
+    values = wealth.to_numpy(dtype=float)
+    periods, paths = values.shape
+    contribution = float(payload.get("contribution", 0.0))
+    withdrawal = float(payload.get("withdrawal", 0.0))
+    risk_free_rate = float(payload.get("risk_free_rate", 0.0)) / 100.0
+    previous = np.vstack([np.full(paths, initial_value), values[:-1]])
+    denominator = previous + contribution
+    numerator = values + withdrawal
+    with np.errstate(divide="ignore", invalid="ignore"):
+        period_returns = numerator / denominator - 1.0
+    period_returns[(denominator <= 0) | (numerator < 0)] = np.nan
+    annual_return = np.nanmean(period_returns, axis=0) * 12.0
+    annual_volatility = np.nanstd(period_returns, axis=0) * np.sqrt(12.0)
+    valid_log_returns = np.where(period_returns > -1.0, np.log1p(period_returns), np.nan)
+    valid_counts = np.sum(np.isfinite(valid_log_returns), axis=0)
+    log_sums = np.nansum(valid_log_returns, axis=0)
+    annual_cagr = np.where(
+        valid_counts > 0,
+        np.exp(log_sums / np.maximum(valid_counts, 1) * 12.0) - 1.0,
+        0.0,
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sharpe = (annual_return - risk_free_rate) / annual_volatility
+    sharpe[~np.isfinite(sharpe)] = 0.0
+    drawdowns = _max_drawdown_paths(wealth, initial_value=initial_value)
+    terminal = values[-1]
+
+    invested = initial_value + (contribution - withdrawal) * np.arange(1, periods + 1)
+    success = {
+        "periods": list(range(1, periods + 1)),
+        "survival": np.mean(values > 0.0, axis=1).tolist(),
+        "preservation": np.mean(values >= initial_value, axis=1).tolist(),
+        "profit": np.mean(values >= np.maximum(invested, 0.0)[:, None], axis=1).tolist(),
+    }
+
+    metric_values = {
+        "terminal_wealth": terminal,
+        "max_drawdown": drawdowns,
+        "annualized_return": annual_return,
+        "geometric_annualized_return": annual_cagr,
+        "annualized_volatility": annual_volatility,
+        "sharpe_ratio": sharpe,
+    }
+    metric_distributions = {
+        key: {
+            "sample": _sample_distribution(metric),
+            "summary": _distribution_summary(metric),
+        }
+        for key, metric in metric_values.items()
+    }
+
+    scenario_targets = (
+        ("worst", 0.0),
+        ("p05", 0.05),
+        ("median", 0.50),
+        ("p95", 0.95),
+        ("best", 1.0),
+    )
+    scenarios = []
+    for label, quantile in scenario_targets:
+        target = float(np.quantile(terminal, quantile))
+        path_index = int(np.argmin(np.abs(terminal - target)))
+        regime_column = result.regimes[:, path_index]
+        if result.regimes.dtype.kind in "iu":
+            states = np.asarray(result.states, dtype=object)
+            regimes = [str(state) for state in states[regime_column]]
+        else:
+            regimes = [str(state) for state in regime_column]
+        scenarios.append(
+            {
+                "label": label,
+                "terminal": float(terminal[path_index]),
+                "wealth": values[:, path_index].tolist(),
+                "regimes": regimes,
+            }
+        )
+    sequence_risk = None
+    if contribution > 0 and withdrawal == 0:
+        low = np.full(paths, -0.99, dtype=float)
+        high = np.full(paths, 10.0, dtype=float)
+        periods_index = np.arange(1, periods + 1, dtype=float)[:, None]
+        interim_cashflow = -contribution
+        for _ in range(64):
+            midpoint = (low + high) / 2.0
+            discount = np.power(1.0 + midpoint[None, :], periods_index)
+            npv = -initial_value + np.sum(interim_cashflow / discount, axis=0) + terminal / discount[-1]
+            low = np.where(npv > 0, midpoint, low)
+            high = np.where(npv > 0, high, midpoint)
+        money_weighted = np.power(1.0 + (low + high) / 2.0, 12.0) - 1.0
+        money_weighted = np.clip(money_weighted, -1.0, 100.0)
+        sequence_drag = money_weighted - annual_cagr
+        sample_indices = np.linspace(0, paths - 1, min(paths, 1_000), dtype=int)
+        sequence_risk = {
+            "points": [
+                {
+                    "cagr": float(annual_cagr[index]),
+                    "mwrr": float(money_weighted[index]),
+                    "drag": float(sequence_drag[index]),
+                }
+                for index in sample_indices
+            ],
+            "median_drag": float(np.median(sequence_drag)),
+            "probability_negative_drag": float(np.mean(sequence_drag < 0.0)),
+        }
+
+    return {
+        "success": success,
+        "metric_distributions": metric_distributions,
+        "representative_scenarios": scenarios,
+        "sequence_risk": sequence_risk,
+    }
+
+
 def _regime_counts(result: Any) -> dict[str, int]:
     regimes = result.regimes
     if regimes.dtype.kind in "iu":
@@ -966,6 +1083,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "maintenance_margin": summary_values.get("maintenance_margin", 0.0),
         "margin_calls": summary_values.get("margin_calls", 0),
     }
+    path_analytics = _path_analytics(
+        wealth,
+        result,
+        payload,
+        initial_value=float(payload.get("initial_value", 100.0)),
+    )
 
     return {
         "ok": True,
@@ -991,6 +1114,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "terminal": terminal_values.tolist(),
         "drawdowns": _max_drawdown_paths(wealth).tolist(),
+        **path_analytics,
         "regime_timeline": regime_timelines["median"],
         "regime_timelines": regime_timelines,
         "regime_mix": [{"label": label, "share": float(share)} for label, share in regime_mix.items()],

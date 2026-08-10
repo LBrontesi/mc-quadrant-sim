@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Four-Quadrant Monte Carlo Simulator</title>
-  <link rel="stylesheet" href="style.css?v=20260811">
+  <link rel="stylesheet" href="style.css?v=20260815">
 </head>
 <body class="light">
   <div class="scroll-progress" aria-hidden="true"><span id="scroll-progress-bar"></span></div>
@@ -54,7 +54,7 @@
     </div>
     <div class="hero-meta">
       <span><strong>04</strong> macro regimes</span>
-      <span><strong id="hero-path-count">10,000</strong> paths</span>
+      <span><strong id="hero-path-count">100,000</strong> paths</span>
       <span><strong>Joint</strong> macro + markets</span>
     </div>
   </section>
@@ -91,7 +91,7 @@
           </li>
           <li id="guide-run" class="guide-step">
             <span class="guide-number">4</span>
-            <div><strong>Run the simulation</strong><span>Set the horizon and path count if needed, then click <b>Run Simulation</b>.</span></div>
+            <div><strong>Run the analysis</strong><span>The recommended setup is ready. Click <b>Run analysis</b>; data loading and simulation happen together.</span></div>
           </li>
           <li id="guide-read" class="guide-step">
             <span class="guide-number">5</span>
@@ -103,8 +103,12 @@
 
       <div class="action-bar">
         <div class="action-bar-buttons">
-          <button id="run-btn" class="btn btn-primary btn-lg" disabled>Run Simulation</button>
+          <button id="run-btn" class="btn btn-primary btn-lg" disabled>Run analysis</button>
           <button id="compare-btn" class="btn" disabled>Compare</button>
+        </div>
+        <div class="quick-start-copy">
+          <strong>One-click analysis</strong>
+          <span>Market data loads automatically with the recommended model.</span>
         </div>
         <div class="action-bar-status">
           <p id="load-message" class="status inline-status"></p>
@@ -113,13 +117,60 @@
       </div>
 
       <div class="settings-panel">
-        <details open>
+        <details>
           <summary>Market data</summary>
-          <p class="hint">Real history from Yahoo Finance and FRED. Tickers default to a diversified set; you can edit them or add synthetic backfills.</p>
+          <p class="hint">Choose a source, shape the investable universe, and set the history window before you run.</p>
+          <div class="data-source-switcher" role="group" aria-label="Market data source">
+            <button type="button" id="data-source-live" class="data-source-card active" aria-pressed="true">
+              <span class="source-number">01</span>
+              <span><strong>Live feeds</strong><small>Yahoo Finance + FRED</small></span>
+              <span class="source-status">Active</span>
+            </button>
+            <button type="button" id="data-source-csv" class="data-source-card" aria-pressed="false">
+              <span class="source-number">02</span>
+              <span><strong>Custom files</strong><small>Your asset + macro CSVs</small></span>
+              <span class="source-status">Select</span>
+            </button>
+          </div>
+          <div class="market-summary-strip" aria-live="polite">
+            <span><small>Source</small><strong id="market-source-summary">Live feeds</strong></span>
+            <span><small>Universe</small><strong id="market-universe-summary">8 assets</strong></span>
+            <span><small>Window</small><strong id="market-window-summary">Since 1990</strong></span>
+          </div>
           <div class="group yahoo-group" id="yahoo-group">
-            <label>Market tickers
-              <textarea id="yahoo-tickers" rows="2">SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY</textarea>
-            </label>
+            <div class="market-field-heading">
+              <div><strong>Ticker universe</strong><span>Use a starting set or build your own.</span></div>
+              <span id="ticker-count" class="field-count">8 selected</span>
+            </div>
+            <div class="universe-presets" role="group" aria-label="Ticker universe presets">
+              <button type="button" class="universe-preset" data-tickers="SPY, IEF, GLD, DBC"><strong>Core 4</strong><small>Stocks · bonds · real assets</small></button>
+              <button type="button" class="universe-preset active" data-tickers="SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY"><strong>Diversified 8</strong><small>Broad multi-asset mix</small></button>
+              <button type="button" class="universe-preset" data-tickers="SPY, EFA, EEM, IEF, GLD, DBC"><strong>Global</strong><small>US + international risk</small></button>
+              <button type="button" class="universe-preset" data-tickers="SPY, TLT, GLD, DBMF, KMLM"><strong>Alternatives</strong><small>Trend + diversifiers</small></button>
+            </div>
+            <div class="ticker-composer">
+              <div id="market-ticker-chips" class="ticker-token-list" aria-label="Selected market tickers"></div>
+              <div class="ticker-add-row">
+                <label for="ticker-add" class="sr-only">Add ticker symbol</label>
+                <input id="ticker-add" type="text" maxlength="20" autocomplete="off" placeholder="Add a symbol, e.g. QQQ">
+                <button type="button" id="ticker-add-btn" class="btn ticker-add-btn">Add ticker</button>
+              </div>
+            </div>
+            <details class="raw-ticker-entry">
+              <summary>Paste or edit ticker list</summary>
+              <label>Comma-separated symbols
+                <textarea id="yahoo-tickers" rows="2">SPY, IEF, GLD, DBC, EFA, VNQ, TIP, SHY</textarea>
+              </label>
+            </details>
+            <div class="market-field-heading history-heading">
+              <div><strong>History window</strong><span>Longer windows improve regime coverage.</span></div>
+              <div id="history-ranges" class="segmented-selector" role="group" aria-label="History window presets">
+                <button type="button" data-years="10">10Y</button>
+                <button type="button" data-years="20">20Y</button>
+                <button type="button" data-years="30">30Y</button>
+                <button type="button" data-start="1990-01-01" class="active">Max</button>
+              </div>
+            </div>
             <div class="two-col">
               <label>Start <input type="date" id="yahoo-start" value="1990-01-01"></label>
               <label>End <input type="date" id="yahoo-end"></label>
@@ -129,7 +180,7 @@
                 <option value="latest" selected>Latest revised FRED + release lag</option>
                 <option value="initial_release">ALFRED initial releases (point-in-time)</option>
               </select>
-              <span class="hint">Point-in-time mode removes revision look-ahead and requires <code>FRED_API_KEY</code> on the server.</span>
+              <span id="macro-vintage-explainer" class="hint">Fastest setup. Release lags reduce timing bias, but revised observations still contain information unavailable at the time.</span>
             </label>
             <label>Historical proxies (optional)
               <input type="text" id="yahoo-proxies" placeholder="SPY:^GSPC, GLD:GC=F">
@@ -158,7 +209,7 @@
         <details id="custom-data-toggle">
           <summary>Custom data (optional)</summary>
           <p class="hint">Instead of the market data above, you can run the analysis on your own asset and macro CSV files.</p>
-          <label class="check-inline"><input type="checkbox" id="csv-enabled"> Use custom CSV files</label>
+          <label class="check-inline source-fallback"><input type="checkbox" id="csv-enabled"> Use custom CSV files</label>
           <label>Asset CSV <input type="file" id="csv-prices" accept=".csv"></label>
           <label>Macro CSV <input type="file" id="csv-macro" accept=".csv"></label>
           <div class="radio-row">
@@ -311,22 +362,14 @@
           <summary>Simulation</summary>
           <div class="two-col">
             <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12">
-              <span class="hint">Longer horizons use more memory; lower paths to compensate.</span>
+              <span class="hint">The default models a ten-year investment horizon.</span>
             </label>
-            <label>Paths <input type="number" id="paths" value="10000" min="1000" max="120000" step="1000">
+            <label>Paths <input type="number" id="paths" value="100000" min="1000" max="120000" step="1000">
               <span class="hint">Adaptive chunking scales with the horizon and selected assets.</span>
             </label>
             <label>Parallel workers <input type="number" id="workers" value="1" min="1" max="16" step="1">
-              <span class="hint">Simulate path chunks in parallel. Each worker adds memory; use more on paid instances.</span>
+              <span class="hint">Simulate path chunks in parallel. Additional workers can reduce runtime on multi-core hosts.</span>
             </label>
-          </div>
-          <div id="resource-card" class="resource-card" data-level="good">
-            <div class="resource-heading">
-              <strong>Estimated server load</strong>
-              <span id="resource-label">Calculating...</span>
-            </div>
-            <div class="resource-track" aria-hidden="true"><span id="resource-bar"></span></div>
-            <p id="resource-detail" class="hint"></p>
           </div>
           <div class="two-col">
             <label>Random seed <input type="number" id="seed" value="7" min="1" step="1"></label>
@@ -429,6 +472,7 @@
         <button class="tab-btn" data-tab="tab-drawdowns">Drawdowns</button>
         <button class="tab-btn" data-tab="tab-correlations">Correlations</button>
         <button class="tab-btn" data-tab="tab-monthly">Monthly</button>
+        <button class="tab-btn" data-tab="tab-lab">Research Lab</button>
         <button class="tab-btn" data-tab="tab-compare">Compare</button>
         <button class="tab-btn" data-tab="tab-diagnostics">Diagnostics</button>
         <button class="tab-btn" data-tab="tab-data">Data</button>
@@ -439,8 +483,8 @@
       <div id="tab-growth" class="tab-panel active">
         <div id="intro" class="empty-state">
           <h2>Welcome to the Four-Quadrant Simulator</h2>
-          <p>Market data loads automatically on start. Edit tickers in <strong>Market data</strong> settings, then <strong>Run Simulation</strong> — the app loads and simulates in one step.</p>
-          <p>1. Data loads on open &nbsp;·&nbsp; 2. Set the allocation &nbsp;·&nbsp; 3. Run the simulation</p>
+          <p>Click <strong>Run analysis</strong> to use the recommended setup. Market data loads automatically and the model runs in the same step.</p>
+          <p>Optional: open the settings only when you want to customize data, allocation, or methodology.</p>
         </div>
         <div id="growth-content" class="hidden">
           <div id="scenario-chips" class="chips"></div>
@@ -471,6 +515,43 @@
           <div class="chart-grid">
             <div class="card card-wide"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
             <div class="card card-wide"><h3>Regime Timeline (P05 / Median / P95 paths)</h3><div class="chart" id="chart-timeline"></div></div>
+          </div>
+          <div class="decision-grid">
+            <section class="card card-wide">
+              <div class="card-heading-row"><h3>Probability of success through time</h3><span class="research-label">Path-aware</span></div>
+              <p class="caption">Survival stays above zero. Preservation stays above starting capital. Profit stays above net invested capital.</p>
+              <div class="chart" id="chart-success"></div>
+            </section>
+            <section class="card card-wide">
+              <div class="card-heading-row">
+                <div><h3>Representative path explorer</h3><p id="path-caption" class="caption">Inspect how a specific outcome developed.</p></div>
+                <div id="path-selector" class="segmented-selector scenario-selector" role="group" aria-label="Representative simulated path"></div>
+              </div>
+              <div class="chart" id="chart-scenario-path"></div>
+              <div class="chart scenario-regimes" id="chart-scenario-regimes"></div>
+            </section>
+            <section class="card card-wide">
+              <div class="card-heading-row">
+                <div><h3>Metric distribution explorer</h3><p class="caption">Inspect the full shape, not only headline percentiles.</p></div>
+                <label class="compact-selector">Metric
+                  <select id="metric-explorer-select">
+                    <option value="terminal_wealth">Terminal wealth</option>
+                    <option value="max_drawdown">Maximum drawdown</option>
+                    <option value="annualized_return">Annualized return</option>
+                    <option value="geometric_annualized_return">CAGR</option>
+                    <option value="annualized_volatility">Annualized volatility</option>
+                    <option value="sharpe_ratio">Sharpe ratio</option>
+                  </select>
+                </label>
+              </div>
+              <div id="metric-distribution-stats" class="distribution-stats"></div>
+              <div class="chart" id="chart-metric-explorer"></div>
+            </section>
+            <section id="sequence-risk-card" class="card card-wide hidden">
+              <div class="card-heading-row"><h3>Sequence-of-returns risk</h3><span id="sequence-risk-badge" class="research-label"></span></div>
+              <p id="sequence-risk-caption" class="caption"></p>
+              <div class="chart" id="chart-sequence-risk"></div>
+            </section>
           </div>
         </div>
       </div>
@@ -519,6 +600,60 @@
             <p class="caption">Cross-sectional median time-weighted return in each simulated month; this is not a single stitched path.</p>
             <div class="chart" id="chart-monthly"></div>
           </div>
+        </div>
+      </div>
+
+      <div id="tab-lab" class="tab-panel">
+        <div id="lab-empty" class="results-empty empty-state">Run a simulation to unlock paired portfolio research.</div>
+        <div id="lab-content" class="hidden">
+          <section class="card research-hero-card">
+            <span class="section-index">Paired research</span>
+            <h3>Change the portfolio.<br>Keep the market paths.</h3>
+            <p class="caption">Portfolio B uses the same seed, macro regimes, parameter assumptions, and simulated shocks as Portfolio A. Differences therefore reflect the allocation rather than a different random experiment.</p>
+          </section>
+          <div class="research-grid">
+            <section class="card">
+              <div class="card-heading-row"><h3>Portfolio B</h3><span id="lab-weight-total" class="field-count">100%</span></div>
+              <div class="lab-preset-row" role="group" aria-label="Portfolio B presets">
+                <button type="button" class="lab-preset active" data-preset="balanced">Balanced</button>
+                <button type="button" class="lab-preset" data-preset="defensive">Defensive</button>
+                <button type="button" class="lab-preset" data-preset="growth">Growth</button>
+                <button type="button" class="lab-preset" data-preset="equal">Equal</button>
+              </div>
+              <div id="lab-weights" class="lab-weight-editor"></div>
+              <button type="button" id="portfolio-compare-btn" class="btn btn-primary btn-block">Run paired comparison</button>
+              <p id="portfolio-compare-status" class="status"></p>
+            </section>
+            <section class="card">
+              <h3>Scenario library</h3>
+              <p class="caption">Save assumptions locally or create a reproducible link containing the complete scenario.</p>
+              <label>Scenario name <input id="scenario-name" type="text" placeholder="e.g. Inflation-resilient 60/40"></label>
+              <div class="scenario-library-actions">
+                <button type="button" id="save-scenario-btn" class="btn">Save</button>
+                <button type="button" id="share-scenario-btn" class="btn">Copy link</button>
+              </div>
+              <label>Saved scenarios
+                <select id="saved-scenario-select"><option value="">Choose a saved scenario</option></select>
+              </label>
+              <div class="scenario-library-actions">
+                <button type="button" id="load-scenario-btn" class="btn">Load</button>
+                <button type="button" id="delete-scenario-btn" class="btn btn-ghost">Delete</button>
+              </div>
+            </section>
+          </div>
+          <section id="paired-results" class="card hidden">
+            <div class="card-heading-row"><h3>Portfolio A vs Portfolio B</h3><span id="paired-win-rate" class="research-label"></span></div>
+            <div id="paired-summary" class="table-wrap"></div>
+            <div class="chart-grid">
+              <div class="card"><h3>Paired terminal difference</h3><div class="chart" id="chart-paired-difference"></div></div>
+              <div class="card"><h3>Wealth range comparison</h3><div class="chart" id="chart-paired-wealth"></div></div>
+            </div>
+          </section>
+          <section class="card">
+            <div class="card-heading-row"><div><h3>Rebalancing sensitivity</h3><p class="caption">Quick paired sweep using the current portfolio and up to 1,000 paths.</p></div><button type="button" id="rebalance-sensitivity-btn" class="btn">Analyze schedules</button></div>
+            <p id="rebalance-status" class="status"></p>
+            <div id="rebalance-sensitivity-table" class="table-wrap"></div>
+          </section>
         </div>
       </div>
 
@@ -598,6 +733,6 @@
   </div>
   <div id="toast-container"></div>
 
-  <script type="module" src="app.js?v=20260811"></script>
+  <script type="module" src="app.js?v=20260815"></script>
 </body>
 </html>

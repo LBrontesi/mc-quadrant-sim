@@ -146,7 +146,7 @@ def test_simulate_reports_real_terms_with_inflation():
     assert response["ok"] is True
     assert response["terms"] == "real"
     assert response["summary"]["sharpe_ratio"] == response["summary"]["sharpe_ratio"]
-    assert response["resources"]["estimated_memory_mb"] > 0
+    assert response["resources"]["chunk_size"] > 0
 
 
 def test_scenario_kwargs_include_long_term_fields():
@@ -320,7 +320,7 @@ def test_scenario_kwargs_rejects_invalid_workers():
         api.scenario_kwargs({"weights": {"SPY": 100}, "workers": 0})
 
 
-def test_resource_guard_scales_with_scenario_dimensions():
+def test_execution_plan_scales_with_scenario_dimensions():
     compact = api.simulation_resource_estimate(
         {"weights": {"SPY": 100}, "periods": 12, "paths": 1000, "workers": 1}
     )
@@ -334,7 +334,7 @@ def test_resource_guard_scales_with_scenario_dimensions():
         }
     )
 
-    assert larger["estimated_memory_mb"] > compact["estimated_memory_mb"]
+    assert larger["work_units"] > compact["work_units"]
     assert larger["work_units"] == 120 * 100000 * len(ASSET_TICKERS)
     advanced = api.simulation_resource_estimate(
         {
@@ -347,17 +347,17 @@ def test_resource_guard_scales_with_scenario_dimensions():
             "dynamic_correlation": True,
         }
     )
-    assert advanced["estimated_memory_mb"] > larger["estimated_memory_mb"]
-    with pytest.raises(ValueError, match="safety budget"):
-        api.scenario_kwargs(
-            {
-                "weights": {ticker: 1 for ticker in ASSET_TICKERS},
-                "selected_tickers": ASSET_TICKERS,
-                "periods": 360,
-                "paths": 120000,
-                "workers": 4,
-            }
-        )
+    assert advanced["chunk_size"] == larger["chunk_size"]
+    kwargs = api.scenario_kwargs(
+        {
+            "weights": {ticker: 1 for ticker in ASSET_TICKERS},
+            "selected_tickers": ASSET_TICKERS,
+            "periods": 360,
+            "paths": 120000,
+            "workers": 4,
+        }
+    )
+    assert kwargs["paths"] == 120000
 
 
 def test_wealth_export_is_bounded_sample():
@@ -431,6 +431,28 @@ def test_simulate_reports_regime_timelines_for_percentile_paths():
         assert all(isinstance(state, str) and state for state in timeline)
     assert timelines["p05"] != timelines["p95"]
     assert response["regime_timeline"] == timelines["median"]
+
+
+def test_simulate_reports_decision_analytics_and_sequence_risk():
+    response = api.build_simulate_response(
+        _csv_payload(periods=24, paths=80, contribution=10.0, walk_forward=False)
+    )
+
+    assert set(response["success"]) == {"periods", "survival", "preservation", "profit"}
+    assert len(response["success"]["survival"]) == 24
+    assert all(0 <= probability <= 1 for probability in response["success"]["profit"])
+    assert {scenario["label"] for scenario in response["representative_scenarios"]} == {
+        "worst",
+        "p05",
+        "median",
+        "p95",
+        "best",
+    }
+    assert len(response["representative_scenarios"][0]["wealth"]) == 24
+    assert "terminal_wealth" in response["metric_distributions"]
+    assert "geometric_annualized_return" in response["metric_distributions"]
+    assert response["sequence_risk"] is not None
+    assert len(response["sequence_risk"]["points"]) == 80
 
 
 def test_simulate_csv_with_correlation_overrides():

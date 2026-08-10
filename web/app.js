@@ -1,7 +1,6 @@
 "use strict";
 
 import { postJSON } from "./api-client.js";
-import { MEMORY_LIMIT_MB, estimateSimulationResources, formatWorkUnits } from "./resource-planner.js";
 
 /* ---------- Constants ---------- */
 
@@ -79,6 +78,9 @@ const state = {
   results: null,
   diagnostics: null,
   lastSimPayload: null,
+  labWeights: {},
+  pairedResults: null,
+  pendingPortfolio: null,
 };
 
 /* ---------- Helpers ---------- */
@@ -659,8 +661,160 @@ function activeSource() {
   return $("csv-enabled").checked ? "csv" : "yahoo";
 }
 
+function parseMarketTickers() {
+  return [...new Set(String($("yahoo-tickers").value || "")
+    .split(/[,;\s]+/)
+    .map((ticker) => ticker.trim().toUpperCase())
+    .filter(Boolean))];
+}
+
+function setMarketTickers(tickers) {
+  $("yahoo-tickers").value = [...new Set(tickers.map((ticker) => String(ticker).trim().toUpperCase()).filter(Boolean))].join(", ");
+  $("yahoo-tickers").dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function syncUniversePreset() {
+  const current = parseMarketTickers().join(",");
+  document.querySelectorAll(".universe-preset").forEach((button) => {
+    const selected = String(button.dataset.tickers || "").replaceAll(" ", "") === current;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+}
+
+function renderTickerComposer() {
+  const tickers = parseMarketTickers();
+  const container = $("market-ticker-chips");
+  container.innerHTML = "";
+  tickers.forEach((ticker) => {
+    const token = document.createElement("span");
+    token.className = "ticker-token";
+    const symbol = document.createElement("strong");
+    symbol.textContent = ticker;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.setAttribute("aria-label", `Remove ${ticker}`);
+    remove.addEventListener("click", () => setMarketTickers(tickers.filter((item) => item !== ticker)));
+    token.append(symbol, remove);
+    container.appendChild(token);
+  });
+  $("ticker-count").textContent = `${tickers.length} selected`;
+  $("market-universe-summary").textContent = `${tickers.length} ${tickers.length === 1 ? "asset" : "assets"}`;
+  syncUniversePreset();
+}
+
+function syncHistoryRange() {
+  const start = $("yahoo-start").value;
+  const end = $("yahoo-end").value;
+  const endDate = end ? new Date(`${end}T12:00:00`) : new Date();
+  document.querySelectorAll("#history-ranges button").forEach((button) => {
+    let expected = button.dataset.start;
+    if (button.dataset.years) {
+      const date = new Date(endDate);
+      date.setFullYear(date.getFullYear() - Number(button.dataset.years));
+      expected = date.toISOString().slice(0, 10);
+    }
+    const selected = start === expected;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", String(selected));
+  });
+  if (!start) $("market-window-summary").textContent = "Choose dates";
+  else {
+    const startYear = start.slice(0, 4);
+    const endYear = end ? end.slice(0, 4) : "today";
+    $("market-window-summary").textContent = `${startYear}–${endYear}`;
+  }
+}
+
+function syncMacroVintageExplainer() {
+  const pointInTime = $("macro-vintage").value === "initial_release";
+  $("macro-vintage-explainer").innerHTML = pointInTime
+    ? "Most realistic research mode. Uses historical releases to remove revision look-ahead and requires <code>FRED_API_KEY</code> on the server."
+    : "Fastest setup. Release lags reduce timing bias, but revised observations still contain information unavailable at the time.";
+}
+
+function syncDataSourceUI() {
+  const custom = activeSource() === "csv";
+  const liveButton = $("data-source-live");
+  const csvButton = $("data-source-csv");
+  liveButton.classList.toggle("active", !custom);
+  csvButton.classList.toggle("active", custom);
+  liveButton.setAttribute("aria-pressed", String(!custom));
+  csvButton.setAttribute("aria-pressed", String(custom));
+  liveButton.querySelector(".source-status").textContent = custom ? "Select" : "Active";
+  csvButton.querySelector(".source-status").textContent = custom ? "Active" : "Select";
+  $("yahoo-group").classList.toggle("hidden", custom);
+  if (custom) $("custom-data-toggle").open = true;
+  $("market-source-summary").textContent = custom ? "Custom CSV" : "Live feeds";
+  $("market-universe-summary").textContent = custom ? "From file" : `${parseMarketTickers().length} assets`;
+  if (custom) $("market-window-summary").textContent = "File history";
+  else syncHistoryRange();
+}
+
+function enhanceSelects(root = document) {
+  root.querySelectorAll("select:not([data-enhanced])").forEach((select) => {
+    const wrapper = document.createElement("span");
+    wrapper.className = "select-control";
+    select.parentNode.insertBefore(wrapper, select);
+    wrapper.appendChild(select);
+    const arrow = document.createElement("span");
+    arrow.className = "select-arrow";
+    arrow.setAttribute("aria-hidden", "true");
+    wrapper.appendChild(arrow);
+    select.dataset.enhanced = "true";
+  });
+}
+
+function setupMarketDataExperience() {
+  enhanceSelects();
+  $("yahoo-tickers").addEventListener("input", renderTickerComposer);
+  [$("yahoo-start"), $("yahoo-end")].forEach((input) => input.addEventListener("input", syncHistoryRange));
+  $("macro-vintage").addEventListener("change", syncMacroVintageExplainer);
+  document.querySelectorAll(".universe-preset").forEach((button) => button.addEventListener("click", () => {
+    setMarketTickers(String(button.dataset.tickers || "").split(","));
+  }));
+  const addTicker = () => {
+    const input = $("ticker-add");
+    const additions = input.value.split(/[,;\s]+/).filter(Boolean);
+    if (!additions.length) return;
+    setMarketTickers([...parseMarketTickers(), ...additions]);
+    input.value = "";
+    input.focus();
+  };
+  $("ticker-add-btn").addEventListener("click", addTicker);
+  $("ticker-add").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    addTicker();
+  });
+  document.querySelectorAll("#history-ranges button").forEach((button) => button.addEventListener("click", () => {
+    if (button.dataset.start) $("yahoo-start").value = button.dataset.start;
+    else {
+      const end = $("yahoo-end").value ? new Date(`${$("yahoo-end").value}T12:00:00`) : new Date();
+      end.setFullYear(end.getFullYear() - Number(button.dataset.years));
+      $("yahoo-start").value = end.toISOString().slice(0, 10);
+    }
+    $("yahoo-start").dispatchEvent(new Event("input", { bubbles: true }));
+  }));
+  const chooseSource = (custom) => {
+    $("csv-enabled").checked = custom;
+    $("custom-data-toggle").open = custom;
+    syncDataSourceUI();
+    toggleSourceGroups();
+    saveControls();
+    if (custom) $("custom-data-toggle").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  };
+  $("data-source-live").addEventListener("click", () => chooseSource(false));
+  $("data-source-csv").addEventListener("click", () => chooseSource(true));
+  renderTickerComposer();
+  syncHistoryRange();
+  syncMacroVintageExplainer();
+  syncDataSourceUI();
+}
+
 function resetResultsView() {
-  ["growth", "returns", "drawdowns", "correlations", "monthly", "compare", "diagnostics", "data"]
+  ["growth", "returns", "drawdowns", "correlations", "monthly", "lab", "compare", "diagnostics", "data"]
     .forEach((name) => {
       const content = $(`${name}-content`);
       if (content) content.classList.add("hidden");
@@ -775,41 +929,15 @@ function gatherScenario() {
   };
 }
 
-function plannedAssetCount() {
-  const selected = selectedTickers().length;
-  if (selected) return selected;
-  if (state.loadResult?.tickers?.length) return state.loadResult.tickers.length;
-  return Math.max(1, String($("yahoo-tickers").value || "").split(/[,;\s]+/).filter(Boolean).length);
-}
-
-function currentResourceEstimate() {
-  return estimateSimulationResources({
-    periods: Number($("periods").value),
-    paths: Number($("paths").value),
-    assets: plannedAssetCount(),
-    workers: Number($("workers").value),
-    jointMacro: $("joint-macro").checked,
-    dynamicCorrelation: $("dynamic-correlation").checked,
-  });
-}
-
 function updateResourceEstimate() {
-  const estimate = currentResourceEstimate();
-  const card = $("resource-card");
-  const percent = Math.min(100, Math.max(2, estimate.ratio * 100));
-  card.dataset.level = estimate.level;
-  $("resource-bar").style.width = `${percent}%`;
-  $("resource-label").textContent = `${estimate.memoryMb.toFixed(0)} MB / ${MEMORY_LIMIT_MB} MB`;
-  $("resource-detail").textContent =
-    `${formatWorkUnits(estimate.workUnits)} asset-period-path operations · adaptive chunk ${estimate.chunkSize.toLocaleString()} paths.` +
-    (estimate.level === "over" ? " Reduce paths, periods, assets, or workers before running." : "");
-  const paths = Math.max(0, Number($("paths").value) || 0);
-  $("run-btn").textContent = paths ? `Run ${paths.toLocaleString()} paths` : "Run simulation";
-  return estimate;
+  $("run-btn").textContent = "Run analysis";
 }
 
 function validateScenario() {
   const errors = [];
+  if (activeSource() === "csv" && (!$('csv-prices').files.length || !$('csv-macro').files.length)) {
+    errors.push("Attach both asset and macro CSV files to use custom data.");
+  }
   if ($("garch").checked && $("distribution").value !== "normal") {
     errors.push("GARCH volatility clustering requires the Normal return distribution.");
   }
@@ -842,10 +970,6 @@ function validateScenario() {
   }
   if (!Number.isInteger(workers) || workers < 1 || workers > 16) {
     errors.push("Workers must be between 1 and 16.");
-  }
-  const estimate = currentResourceEstimate();
-  if (estimate.memoryMb > MEMORY_LIMIT_MB) {
-    errors.push(`Estimated memory is ${estimate.memoryMb.toFixed(0)} MB; reduce the scenario below ${MEMORY_LIMIT_MB} MB.`);
   }
   return errors;
 }
@@ -1017,10 +1141,11 @@ function updateGuide() {
     step.classList.toggle("complete", completed[index]);
     step.classList.toggle("active", index === activeIndex);
   });
-  if (!loaded) guideStatus.textContent = "Loading market data — this happens automatically.";
+  if (!loaded && activeSource() === "csv") guideStatus.textContent = "Next: attach both asset and macro CSV files.";
+  else if (!loaded) guideStatus.textContent = "Loading market data — this happens automatically.";
   else if (!portfolioReady) guideStatus.textContent = "Next: select at least one ticker and set a positive weight.";
   else if (!methodologyReady) guideStatus.textContent = "Next: resolve the highlighted methodology setting.";
-  else if (!state.results) guideStatus.textContent = "Next: click Run Simulation.";
+  else if (!state.results) guideStatus.textContent = "Ready: click Run analysis.";
   else if (state.lastSimPayload && JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) guideStatus.textContent = "Inputs changed: run the simulation again to refresh the results.";
   else guideStatus.textContent = "Scenario ready: inspect Results, Diagnostics, or Data.";
 }
@@ -1171,7 +1296,6 @@ function renderScenarioChips(payload, data) {
   if (Number(payload.parameter_draws) > 0) chips.push(`${payload.parameter_draws} parameter draws`);
   if (payload.joint_macro) chips.push("Joint macro paths");
   if (payload.dynamic_correlation) chips.push("Dynamic dependence");
-  if (data.resources?.estimated_memory_mb) chips.push(`~${Number(data.resources.estimated_memory_mb).toFixed(0)} MB server load`);
   if (Number(payload.leverage_multiple || 1) > 1) chips.push(`${Number(payload.leverage_multiple).toFixed(1)}x leverage`);
   el.innerHTML = chips.map((text) => `<span class="chip">${escapeHtml(text)}</span>`).join("");
 }
@@ -1362,6 +1486,98 @@ function renderMonthlyCalendar(data) {
   container.appendChild(table);
 }
 
+const METRIC_EXPLORER_META = {
+  terminal_wealth: { label: "Terminal wealth", kind: "currency", color: "#b8d0d6" },
+  max_drawdown: { label: "Maximum drawdown", kind: "percent", color: "#d97706" },
+  annualized_return: { label: "Annualized return", kind: "percent", color: "#a8b79b" },
+  geometric_annualized_return: { label: "CAGR", kind: "percent", color: "#8ca4aa" },
+  annualized_volatility: { label: "Annualized volatility", kind: "percent", color: "#8ca4aa" },
+  sharpe_ratio: { label: "Sharpe ratio", kind: "number", color: "#b8d0d6" },
+};
+
+function formatExplorerValue(value, kind, currency) {
+  if (kind === "currency") return formatMetricValue("p50", value, currency);
+  if (kind === "percent") return pct(value, 1);
+  return fmt(value, 2);
+}
+
+function renderMetricExplorer(data) {
+  const select = $("metric-explorer-select");
+  const render = () => {
+    const key = select.value;
+    const metric = data.metric_distributions?.[key];
+    if (!metric) return;
+    const meta = METRIC_EXPLORER_META[key];
+    const summary = metric.summary;
+    $("metric-distribution-stats").innerHTML = [
+      ["P05", summary.p05], ["Median", summary.median], ["Mean", summary.mean], ["P95", summary.p95],
+    ].map(([label, value]) => `<div><small>${label}</small><strong>${escapeHtml(formatExplorerValue(value, meta.kind, data.currency))}</strong></div>`).join("");
+    histChart($("chart-metric-explorer"), metric.sample, 45, meta.label, meta.color);
+  };
+  select.onchange = render;
+  render();
+}
+
+function renderRepresentativeScenarios(data) {
+  const scenarios = data.representative_scenarios || [];
+  const selector = $("path-selector");
+  selector.innerHTML = "";
+  const render = (scenario) => {
+    selector.querySelectorAll("button").forEach((button) => {
+      const selected = button.dataset.scenario === scenario.label;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+    $("path-caption").textContent = `${scenario.label.toUpperCase()} path · terminal ${formatMetricValue("p50", scenario.terminal, data.currency)}`;
+    lineChart($("chart-scenario-path"), data.wealth.periods, [
+      { name: scenario.label.toUpperCase(), color: "#b8d0d6", values: scenario.wealth },
+    ]);
+    timelineChart($("chart-scenario-regimes"), [
+      { label: scenario.label.toUpperCase(), color: "#b8d0d6", states: scenario.regimes },
+    ]);
+  };
+  scenarios.forEach((scenario) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.scenario = scenario.label;
+    button.textContent = scenario.label === "median" ? "Median" : scenario.label.toUpperCase();
+    button.addEventListener("click", () => render(scenario));
+    selector.appendChild(button);
+  });
+  const initial = scenarios.find((scenario) => scenario.label === "median") || scenarios[0];
+  if (initial) render(initial);
+}
+
+function renderDecisionAnalytics(data) {
+  if (data.success) {
+    lineChart($("chart-success"), data.success.periods, [
+      { name: "Survival", color: "#a8b79b", values: data.success.survival },
+      { name: "Preservation", color: "#b8d0d6", values: data.success.preservation },
+      { name: "Profit", color: "#d7a86e", values: data.success.profit },
+    ]);
+  }
+  renderRepresentativeScenarios(data);
+  renderMetricExplorer(data);
+  const sequence = data.sequence_risk;
+  $("sequence-risk-card").classList.toggle("hidden", !sequence);
+  if (sequence) {
+    $("sequence-risk-badge").textContent = `${pct(sequence.probability_negative_drag, 0)} negative drag`;
+    $("sequence-risk-caption").textContent =
+      `Median money-weighted return minus CAGR: ${sequence.median_drag >= 0 ? "+" : ""}${pct(sequence.median_drag, 2)}. ` +
+      "Points below the equality relationship indicate that contribution timing reduced the investor's realized return.";
+    scatterChart(
+      $("chart-sequence-risk"),
+      sequence.points.map((point) => ({ x: point.cagr, y: point.mwrr, color: point.drag < 0 ? "#d77b72" : "#6fa58c", label: `Drag ${pct(point.drag, 2)}`, regime: point.drag < 0 ? "Negative sequence drag" : "Positive sequence effect" })),
+      "CAGR",
+      "Money-weighted return",
+      [
+        { label: "Negative sequence drag", color: "#d77b72" },
+        { label: "Positive sequence effect", color: "#6fa58c" },
+      ],
+    );
+  }
+}
+
 function renderResults(data) {
   $("intro").classList.add("hidden");
   ["growth", "returns", "drawdowns", "correlations", "monthly"].forEach((name) => {
@@ -1455,6 +1671,10 @@ function renderResults(data) {
   renderMonthlyCalendar(data);
   renderMacroPaths(data);
   renderRegimeProbabilities(data);
+  renderDecisionAnalytics(data);
+  initializeResearchLab();
+  $("lab-empty").classList.add("hidden");
+  $("lab-content").classList.remove("hidden");
 
   const diagnostics = data.diagnostics;
   $("diagnostics-table").innerHTML = "<table><thead><tr>" + diagnostics.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
@@ -1492,6 +1712,14 @@ async function onLoad() {
     setStatus(message, data.message);
     renderTickerChecklist(data.tickers, data.default_tickers);
     state.weights = {};
+    if (state.pendingPortfolio) {
+      const selected = new Set(state.pendingPortfolio.selected || []);
+      document.querySelectorAll("#ticker-list input[type='checkbox']").forEach((checkbox) => {
+        checkbox.checked = selected.has(checkbox.value);
+      });
+      state.weights = { ...state.pendingPortfolio.weights };
+      state.pendingPortfolio = null;
+    }
     assetColors = {};
     renderWeightEditor();
     renderTables(data);
@@ -1540,10 +1768,9 @@ async function onRun() {
   const message = $("run-message");
   const button = $("run-btn");
   button.disabled = true;
-  const estimate = currentResourceEstimate();
   showOverlay(
-    "Running simulation...",
-    `${Number($("paths").value).toLocaleString()} paths · ${Number($("periods").value)} months · about ${estimate.memoryMb.toFixed(0)} MB`,
+    "Running analysis...",
+    `${Number($("paths").value).toLocaleString()} paths · ${Number($("periods").value)} months`,
   );
   try {
     const currentLoadPayload = gatherLoadPayload();
@@ -1553,8 +1780,8 @@ async function onRun() {
       await onLoad();
       if (!state.loadResult) return;
       showOverlay(
-        "Running simulation...",
-        `${Number($("paths").value).toLocaleString()} paths · ${Number($("periods").value)} months · about ${estimate.memoryMb.toFixed(0)} MB`,
+        "Running analysis...",
+        `${Number($("paths").value).toLocaleString()} paths · ${Number($("periods").value)} months`,
       );
     }
     const payload = gatherSimPayload();
@@ -1563,7 +1790,7 @@ async function onRun() {
     state.results = data;
     updateGuide();
     setStatus(message, data.message);
-    notify("Simulation complete", "success");
+    notify("Analysis complete", "success");
     renderResults(data);
     switchTab("tab-growth");
     requestAnimationFrame(focusResults);
@@ -1668,7 +1895,7 @@ const CONTROL_IDS = [
 ];
 
 function saveControls() {
-  const data = {};
+  const data = { schemaVersion: 3 };
   CONTROL_IDS.forEach((id) => {
     const el = $(id);
     if (el) data[id] = el.value;
@@ -1686,29 +1913,43 @@ function saveControls() {
   localStorage.setItem("mcq-controls", JSON.stringify(data));
 }
 
+function applyControlSnapshot(data) {
+  CONTROL_IDS.forEach((id) => {
+    const el = $(id);
+    if (el && data[id] !== undefined) el.value = data[id];
+  });
+  if (data.csvEnabled !== undefined) $("csv-enabled").checked = data.csvEnabled;
+  document.querySelectorAll("#synthetic-options input[type='checkbox']").forEach((checkbox) => {
+    checkbox.checked = (data.synthetic || []).includes(checkbox.value);
+  });
+  if (data.csvMonthly !== undefined) $("csv-monthly").checked = data.csvMonthly;
+  if (data.useCorr !== undefined) $("use-corr-override").checked = data.useCorr;
+  if (data.garch !== undefined) $("garch").checked = data.garch;
+  if (data.walkForward !== undefined) $("walk-forward").checked = data.walkForward;
+  if (data.probabilisticRegimes !== undefined) $("probabilistic-regimes").checked = data.probabilisticRegimes;
+  if (data.jointMacro !== undefined) $("joint-macro").checked = data.jointMacro;
+  if (data.dynamicCorrelation !== undefined) $("dynamic-correlation").checked = data.dynamicCorrelation;
+  document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
+    if (data.corrTargets && data.corrTargets[slider.dataset.state] !== undefined) slider.value = data.corrTargets[slider.dataset.state];
+  });
+  if (data.selected && data.weights) {
+    state.pendingPortfolio = { selected: data.selected, weights: data.weights };
+  }
+}
+
 function restoreControls() {
   try {
     const raw = localStorage.getItem("mcq-controls");
-    if (!raw) return;
-    const data = JSON.parse(raw);
-    CONTROL_IDS.forEach((id) => {
-      const el = $(id);
-      if (el && data[id] !== undefined) el.value = data[id];
-    });
-    if (data.csvEnabled !== undefined) $("csv-enabled").checked = data.csvEnabled;
-    document.querySelectorAll("#synthetic-options input[type='checkbox']").forEach((checkbox) => {
-      checkbox.checked = (data.synthetic || []).includes(checkbox.value);
-    });
-    if (data.csvMonthly !== undefined) $("csv-monthly").checked = data.csvMonthly;
-    if (data.useCorr !== undefined) $("use-corr-override").checked = data.useCorr;
-    if (data.garch !== undefined) $("garch").checked = data.garch;
-    if (data.walkForward !== undefined) $("walk-forward").checked = data.walkForward;
-    if (data.probabilisticRegimes !== undefined) $("probabilistic-regimes").checked = data.probabilisticRegimes;
-    if (data.jointMacro !== undefined) $("joint-macro").checked = data.jointMacro;
-    if (data.dynamicCorrelation !== undefined) $("dynamic-correlation").checked = data.dynamicCorrelation;
-    document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
-      if (data.corrTargets && data.corrTargets[slider.dataset.state] !== undefined) slider.value = data.corrTargets[slider.dataset.state];
-    });
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (!data.schemaVersion && String(data.paths) === "10000" && String(data.periods) === "120") {
+        data.paths = "100000";
+      }
+      if (Number(data.schemaVersion || 0) < 3 && String(data.paths) === "100000" && String(data.periods) === "60") {
+        data.periods = "120";
+      }
+      applyControlSnapshot(data);
+    }
   } catch (error) {
     // ignore corrupted saved settings
   }
@@ -1757,6 +1998,267 @@ function onDownloadJson() {
   }
   downloadFile("results.json", JSON.stringify(state.results, null, 2), "application/json;charset=utf-8");
   notify("Results downloaded", "success");
+}
+
+/* ---------- Research lab ---------- */
+
+const LAB_PRESETS = {
+  balanced: { SPY: 60, IEF: 30, GLD: 10 },
+  defensive: { SPY: 30, IEF: 50, GLD: 20 },
+  growth: { SPY: 80, IEF: 10, GLD: 10 },
+};
+
+function tickerBase(ticker) {
+  return String(ticker).replace(/_SIM$/, "").replace(/SIM$/, "");
+}
+
+function setLabPreset(name) {
+  const tickers = selectedTickers();
+  const weights = {};
+  if (name === "equal") {
+    const equal = tickers.length ? 100 / tickers.length : 0;
+    tickers.forEach((ticker) => { weights[ticker] = equal; });
+  } else {
+    const preset = LAB_PRESETS[name] || LAB_PRESETS.balanced;
+    tickers.forEach((ticker) => { weights[ticker] = preset[tickerBase(ticker)] || 0; });
+    const total = Object.values(weights).reduce((sum, value) => sum + value, 0);
+    if (!total && tickers.length) {
+      tickers.forEach((ticker) => { weights[ticker] = 100 / tickers.length; });
+    }
+  }
+  state.labWeights = weights;
+  document.querySelectorAll(".lab-preset").forEach((button) => button.classList.toggle("active", button.dataset.preset === name));
+  renderLabWeights();
+}
+
+function renderLabWeights() {
+  const container = $("lab-weights");
+  if (!container) return;
+  const tickers = selectedTickers();
+  container.innerHTML = "";
+  tickers.forEach((ticker) => {
+    const label = document.createElement("label");
+    label.innerHTML = `<span>${escapeHtml(ticker)}</span>`;
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "100";
+    input.step = "1";
+    input.value = Number(state.labWeights[ticker] || 0).toFixed(1);
+    input.addEventListener("input", () => {
+      state.labWeights[ticker] = Math.max(0, Number(input.value) || 0);
+      updateLabWeightTotal();
+    });
+    const unit = document.createElement("small");
+    unit.textContent = "%";
+    label.append(input, unit);
+    container.appendChild(label);
+  });
+  updateLabWeightTotal();
+}
+
+function updateLabWeightTotal() {
+  const total = Object.values(state.labWeights).reduce((sum, value) => sum + (Number(value) || 0), 0);
+  $("lab-weight-total").textContent = `${total.toFixed(1)}%`;
+  $("lab-weight-total").style.color = total > 0 ? "var(--accent)" : "var(--danger)";
+  $("portfolio-compare-btn").disabled = total <= 0;
+}
+
+function initializeResearchLab() {
+  if (!$("lab-weights")) return;
+  const tickers = selectedTickers();
+  const sameUniverse = tickers.length && tickers.every((ticker) => Object.hasOwn(state.labWeights, ticker));
+  if (!sameUniverse) setLabPreset("balanced");
+  else renderLabWeights();
+}
+
+function pairedSummaryRows(portfolioA, portfolioB) {
+  return [
+    ["Median terminal wealth", "p50", true],
+    ["Annualized return", "annualized_return", true],
+    ["Annualized volatility", "annualized_volatility", false],
+    ["Sharpe ratio", "sharpe_ratio", true],
+    ["Probability of loss", "probability_of_loss", false],
+    ["Worst max drawdown", "max_drawdown_worst", false],
+  ].map(([label, key, higherIsBetter]) => [label, portfolioA.summary[key], portfolioB.summary[key], portfolioB.summary[key] - portfolioA.summary[key], key, higherIsBetter]);
+}
+
+function renderPairedComparison(portfolioB) {
+  const portfolioA = state.results;
+  const count = Math.min(portfolioA.terminal.length, portfolioB.terminal.length);
+  const differences = portfolioB.terminal.slice(0, count).map((value, index) => value - portfolioA.terminal[index]);
+  const winRate = differences.filter((value) => value > 0).length / Math.max(count, 1);
+  $("paired-win-rate").textContent = `Portfolio B wins ${pct(winRate, 1)} of paths`;
+  const rows = pairedSummaryRows(portfolioA, portfolioB).map(([label, a, b, difference, key, higherIsBetter]) => {
+    const percentKey = PERCENT_METRICS.has(key);
+    const formatter = percentKey ? (value) => pct(value, 2) : (value) => formatMetricValue(key, value, portfolioA.currency);
+    const differenceText = `${difference >= 0 ? "+" : ""}${formatter(difference)}`;
+    const favorable = higherIsBetter ? difference >= 0 : difference <= 0;
+    return `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(formatter(a))}</td><td>${escapeHtml(formatter(b))}</td><td class="${favorable ? "difference-positive" : "difference-negative"}">${escapeHtml(differenceText)}</td></tr>`;
+  });
+  $("paired-summary").innerHTML = `<table><thead><tr><th>Metric</th><th>Portfolio A</th><th>Portfolio B</th><th>B − A</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+  histChart($("chart-paired-difference"), differences, 45, "Terminal wealth difference", "#a8b79b");
+  lineChart($("chart-paired-wealth"), portfolioA.wealth.periods, [
+    { name: "Portfolio A median", color: "#b8d0d6", values: portfolioA.wealth.median },
+    { name: "Portfolio B median", color: "#d7a86e", values: portfolioB.wealth.median },
+  ]);
+  $("paired-results").classList.remove("hidden");
+  state.pairedResults = portfolioB;
+}
+
+async function onPortfolioCompare() {
+  if (!state.results || !state.lastSimPayload) return;
+  const button = $("portfolio-compare-btn");
+  const status = $("portfolio-compare-status");
+  button.disabled = true;
+  showOverlay("Running paired portfolio...", "Reusing the same seed and market-path assumptions");
+  try {
+    const payload = { ...state.lastSimPayload, weights: { ...state.labWeights }, walk_forward: false };
+    const data = await postJSON("/api/simulate", payload);
+    renderPairedComparison(data);
+    setStatus(status, "Paired comparison complete. Both portfolios used identical seeded market paths.");
+    notify("Paired comparison complete", "success");
+  } catch (error) {
+    setStatus(status, error.message, true);
+    notify(error.message, "error");
+  } finally {
+    hideOverlay();
+    updateLabWeightTotal();
+  }
+}
+
+async function onRebalancingSensitivity() {
+  if (!state.lastSimPayload) return;
+  const button = $("rebalance-sensitivity-btn");
+  const status = $("rebalance-status");
+  button.disabled = true;
+  const schedules = [["Monthly", "monthly"], ["Quarterly", "quarterly"], ["Annual", "annual"], ["Buy and hold", "legacy"]];
+  const results = [];
+  showOverlay("Analyzing rebalancing...", "Running paired schedule 1 of 4");
+  try {
+    for (let index = 0; index < schedules.length; index += 1) {
+      const [label, rebalance] = schedules[index];
+      $("overlay-stage").textContent = `Running ${label.toLowerCase()} schedule · ${index + 1} of ${schedules.length}`;
+      const payload = {
+        ...state.lastSimPayload,
+        rebalance,
+        cost_bps: rebalance === "legacy" ? 0 : state.lastSimPayload.cost_bps,
+        paths: Math.min(Number(state.lastSimPayload.paths), 1_000),
+        parameter_draws: 0,
+        walk_forward: false,
+        workers: 1,
+      };
+      const data = await postJSON("/api/simulate", payload);
+      results.push([label, data.summary.p50, data.summary.annualized_return, data.summary.annualized_volatility, data.summary.max_drawdown_mean, data.summary.sharpe_ratio]);
+    }
+    $("rebalance-sensitivity-table").innerHTML = "<table><thead><tr><th>Schedule</th><th>Median wealth</th><th>Return</th><th>Volatility</th><th>Mean drawdown</th><th>Sharpe</th></tr></thead><tbody>" +
+      results.map((row) => `<tr><td><strong>${row[0]}</strong></td><td>${formatMetricValue("p50", row[1], state.results.currency)}</td><td>${pct(row[2])}</td><td>${pct(row[3])}</td><td>${pct(row[4])}</td><td>${fmt(row[5], 2)}</td></tr>`).join("") + "</tbody></table>";
+    setStatus(status, "Sensitivity sweep complete using identical seeds and up to 1,000 paths per schedule.");
+  } catch (error) {
+    setStatus(status, error.message, true);
+  } finally {
+    hideOverlay();
+    button.disabled = false;
+  }
+}
+
+function scenarioLibrary() {
+  try { return JSON.parse(localStorage.getItem("mcq-scenario-library") || "[]"); }
+  catch (error) { return []; }
+}
+
+function captureScenarioSnapshot() {
+  saveControls();
+  const controls = JSON.parse(localStorage.getItem("mcq-controls") || "{}");
+  controls.csvEnabled = false;
+  controls.selected = selectedTickers();
+  controls.weights = gatherWeights();
+  controls.savedAt = new Date().toISOString();
+  return controls;
+}
+
+function refreshScenarioLibrary() {
+  const select = $("saved-scenario-select");
+  const selected = select.value;
+  select.innerHTML = '<option value="">Choose a saved scenario</option>';
+  scenarioLibrary().forEach((entry) => {
+    const option = document.createElement("option");
+    option.value = entry.id;
+    option.textContent = entry.name;
+    select.appendChild(option);
+  });
+  select.value = selected;
+}
+
+function saveScenarioToLibrary() {
+  const name = $("scenario-name").value.trim() || `Scenario ${new Date().toLocaleDateString()}`;
+  const library = scenarioLibrary();
+  library.unshift({ id: String(Date.now()), name, data: captureScenarioSnapshot() });
+  localStorage.setItem("mcq-scenario-library", JSON.stringify(library.slice(0, 20)));
+  refreshScenarioLibrary();
+  $("saved-scenario-select").value = library[0].id;
+  notify(`Saved “${name}” locally`, "success");
+}
+
+function encodeScenario(data) {
+  const bytes = new TextEncoder().encode(JSON.stringify(data));
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function decodeScenario(encoded) {
+  const normalized = encoded.replaceAll("-", "+").replaceAll("_", "/");
+  const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="));
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0))));
+}
+
+function applyScenarioSnapshot(data, reload = true) {
+  applyControlSnapshot(data);
+  $("csv-enabled").checked = false;
+  renderTickerComposer();
+  syncDataSourceUI();
+  updateMethodologyControls();
+  saveControls();
+  if (reload) onLoad();
+}
+
+async function shareScenario() {
+  const encoded = encodeScenario(captureScenarioSnapshot());
+  const url = `${location.href.split("?")[0]}?scenario=${encoded}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    notify("Reproducible scenario link copied", "success");
+  } catch (error) {
+    window.prompt("Copy this reproducible scenario link:", url);
+  }
+}
+
+function loadSavedScenario() {
+  const id = $("saved-scenario-select").value;
+  const entry = scenarioLibrary().find((item) => item.id === id);
+  if (!entry) return notify("Choose a saved scenario first.", "error");
+  applyScenarioSnapshot(entry.data);
+  notify(`Loaded “${entry.name}”`, "success");
+}
+
+function deleteSavedScenario() {
+  const id = $("saved-scenario-select").value;
+  if (!id) return;
+  localStorage.setItem("mcq-scenario-library", JSON.stringify(scenarioLibrary().filter((item) => item.id !== id)));
+  refreshScenarioLibrary();
+  notify("Saved scenario deleted", "success");
+}
+
+function restoreScenarioFromUrl() {
+  const encoded = new URLSearchParams(location.search).get("scenario");
+  if (!encoded) return;
+  try {
+    applyScenarioSnapshot(decodeScenario(encoded), false);
+    notify("Shared scenario loaded", "success");
+  } catch (error) {
+    notify("The shared scenario link is invalid.", "error");
+  }
 }
 
 /* ---------- Init ---------- */
@@ -1809,12 +2311,16 @@ function init() {
   });
 
   function syncCsvEnabled() {
-    const bothFiles = $("csv-prices").files.length > 0 && $("csv-macro").files.length > 0;
-    $("csv-enabled").checked = bothFiles;
+    const hasFiles = $("csv-prices").files.length > 0 || $("csv-macro").files.length > 0;
+    if (hasFiles) $("csv-enabled").checked = true;
+    syncDataSourceUI();
     toggleSourceGroups();
   }
 
-  $("csv-enabled").addEventListener("change", toggleSourceGroups);
+  $("csv-enabled").addEventListener("change", () => {
+    syncDataSourceUI();
+    toggleSourceGroups();
+  });
   $("csv-prices").addEventListener("change", syncCsvEnabled);
   $("csv-macro").addEventListener("change", syncCsvEnabled);
 
@@ -1832,6 +2338,13 @@ function init() {
   $("equalize-btn").addEventListener("click", equalizeWeights);
   $("reset-btn").addEventListener("click", resetControls);
   $("edit-scenario").addEventListener("click", editScenario);
+  $("portfolio-compare-btn").addEventListener("click", onPortfolioCompare);
+  $("rebalance-sensitivity-btn").addEventListener("click", onRebalancingSensitivity);
+  document.querySelectorAll(".lab-preset").forEach((button) => button.addEventListener("click", () => setLabPreset(button.dataset.preset)));
+  $("save-scenario-btn").addEventListener("click", saveScenarioToLibrary);
+  $("share-scenario-btn").addEventListener("click", shareScenario);
+  $("load-scenario-btn").addEventListener("click", loadSavedScenario);
+  $("delete-scenario-btn").addEventListener("click", deleteSavedScenario);
 
   document.addEventListener("input", () => { saveControls(); updateMethodologyControls(); });
   document.addEventListener("change", () => { saveControls(); updateMethodologyControls(); });
@@ -1843,6 +2356,9 @@ function init() {
   });
 
   restoreControls();
+  setupMarketDataExperience();
+  restoreScenarioFromUrl();
+  refreshScenarioLibrary();
   setupExperience();
   $("transition-uncertainty-output").textContent = Number($("transition-uncertainty").value).toFixed(2);
   $("macro-transition-weight-output").textContent = Number($("macro-transition-weight").value).toFixed(2);

@@ -428,7 +428,7 @@ streamlit run streamlit_app.py
 
 ## Run The Web UI
 
-The `web-ui` branch provides the same simulation methodology through a plain
+The `web-ui-prod` branch provides the same simulation methodology through a plain
 HTML/CSS/JavaScript interface and a small Python HTTP backend:
 
 ```bash
@@ -439,20 +439,20 @@ Open `http://127.0.0.1:7860`. Set `PORT` to use a different port. The browser
 client calls the same `/api/load`, `/api/simulate`, `/api/compare`, and
 `/api/wealth` payload contracts used by the other frontends.
 
-The server rejects simulations whose estimated working set exceeds its 384 MB
-safety budget, limits concurrent heavy jobs, caps request bodies, and exports a
+The server uses adaptive path chunking, limits concurrent heavy jobs, caps request bodies, and exports a
 deterministic sample of at most 5,000 wealth paths instead of serializing the
 entire simulation. Production limits can be adjusted with
-`MAX_CONCURRENT_JOBS` and `MAX_REQUEST_BYTES`; the UI shows the same resource
-estimate before a run.
+`MAX_CONCURRENT_JOBS` and `MAX_REQUEST_BYTES`.
 
-The web interface updates its run label and estimated memory/workload as the
-horizon, path count, worker count, or asset selection changes. Configurations
-above the server budget are blocked before submission. During longer jobs it
-shows the active stage and elapsed time; after completion it collapses the
+During longer jobs the web interface shows the active stage and elapsed time;
+after completion it collapses the
 settings, moves focus to the results, and provides an **Edit scenario** shortcut.
 The allocation/status areas, metric cards, result tabs, and charts adapt to
 mobile widths without causing page-level horizontal overflow.
+
+For a faster first run, the web UI starts with the settings collapsed and a
+single **Run analysis** action that loads market data and runs the model. New
+sessions default to 100,000 paths over a ten-year, 120-month horizon.
 
 Frontend network and resource-planning logic live in `web/api-client.js` and
 `web/resource-planner.js`; `web/app.js` is responsible for application state,
@@ -490,10 +490,23 @@ retirement drawdowns. The web UI uses an editorial research-studio layout:
 an interactive four-regime hero, warm light and charcoal dark themes, scroll
 progress, section reveals, responsive motion, and a compact allocation editor.
 Tabbed result views cover Growth, Returns, Drawdowns, Correlations, Monthly
-returns, and distribution comparison. Results include metric cards,
+returns, paired research, and distribution comparison. Results include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, a monthly-return calendar, macro scatter,
-calibration diagnostics, scenario comparison, and bounded CSV path samples. Gradio
+calibration diagnostics, scenario comparison, and bounded CSV path samples.
+
+The decision-reporting layer also provides survival, capital-preservation, and
+profit probabilities through time; representative worst/P05/median/P95/best
+paths with their regime histories; selectable metric distributions; and a
+sequence-risk view comparing CAGR with money-weighted returns when contributions
+are active. The **Research Lab** runs Portfolio B with the exact random seed and
+market-path assumptions used for Portfolio A, reports paired differences and
+path win rates, sweeps monthly/quarterly/annual/buy-and-hold rebalancing, and
+stores up to 20 named scenarios locally. Share links serialize the controls,
+portfolio selection, weights, and seed so a run can be reconstructed without
+embedding uploaded CSV contents.
+
+Gradio
 charts are rendered with Plotly; Streamlit charts use Altair.
 
 ## Testing And CI

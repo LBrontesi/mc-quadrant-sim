@@ -52,11 +52,45 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert "renderMacroPaths" in javascript
     assert 'risk_free_rate: Number($("risk-free").value)' in javascript
     assert 'type="module" src="app.js?' in html
-    assert 'id="resource-card"' in html
+    assert 'id="resource-card"' not in html
     assert 'id="hero-title"' in html
     assert 'id="quadrant-stage"' in html
     assert 'id="scroll-progress-bar"' in html
+    for control in (
+        "data-source-live",
+        "data-source-csv",
+        "market-ticker-chips",
+        "ticker-add",
+        "history-ranges",
+        "market-universe-summary",
+        "macro-vintage-explainer",
+        "chart-success",
+        "path-selector",
+        "metric-explorer-select",
+        "sequence-risk-card",
+        "tab-lab",
+        "portfolio-compare-btn",
+        "rebalance-sensitivity-btn",
+        "save-scenario-btn",
+        "share-scenario-btn",
+    ):
+        assert f'id="{control}"' in html
     assert "setupExperience" in javascript
+    assert "setupMarketDataExperience" in javascript
+    assert "renderTickerComposer" in javascript
+    assert "enhanceSelects" in javascript
+    assert "renderDecisionAnalytics" in javascript
+    assert "onPortfolioCompare" in javascript
+    assert "onRebalancingSensitivity" in javascript
+    assert "captureScenarioSnapshot" in javascript
+    assert 'id="paths" value="100000"' in html
+    assert 'id="periods" value="120"' in html
+    assert '<button id="run-btn" class="btn btn-primary btn-lg" disabled>Run analysis</button>' in html
+    assert '$("run-btn").textContent = "Run analysis"' in javascript
+    assert "Run ${paths.toLocaleString()} paths" not in javascript
+    assert 'String(data.paths) === "10000"' in javascript
+    assert "Estimated memory" not in javascript
+    assert "MEMORY_LIMIT_MB" not in javascript
     assert 'setAttribute("height", "auto")' not in javascript
     assert 'setAttribute("height", String(height))' in javascript
 
