@@ -119,6 +119,7 @@ def test_market_data_drops_an_incomplete_final_month(monkeypatch):
         {
             "growth": np.linspace(100.0, 130.0, len(macro_dates)),
             "inflation": np.linspace(100.0, 125.0, len(macro_dates)),
+            "interest_rate": np.linspace(1.0, 3.0, len(macro_dates)),
         },
         index=macro_dates,
     )
@@ -127,9 +128,13 @@ def test_market_data_drops_an_incomplete_final_month(monkeypatch):
     monkeypatch.setattr(data_module, "fetch_fred_macro", lambda *args, **kwargs: macro_levels)
     data_module._load_market_data_cached.cache_clear()
 
-    _, returns, _, _ = data_module.load_market_data(["SPY"], "2018-01-01", "2020-03-15")
+    macro, returns, _, _ = data_module.load_market_data(["SPY"], "2018-01-01", "2020-03-15")
 
     assert returns.index.max() == pd.Timestamp("2020-02-29")
+    assert macro.attrs["rate_col"] == "interest_rate"
+    assert macro.loc[pd.Timestamp("2020-02-29"), "interest_rate"] == pytest.approx(
+        macro_levels.loc[pd.Timestamp("2020-02-01"), "interest_rate"]
+    )
 
 
 def test_yoy_macro_preserves_and_aligns_initial_release_dates():

@@ -10,6 +10,7 @@ def _scenario_kwargs(extra: dict | None = None) -> dict:
         {
             "growth": np.tile([2.0, 2.5, -1.0, -1.5], 12),
             "inflation": np.tile([1.0, 4.0, 4.5, 1.2], 12),
+            "interest_rate": np.tile([1.0, 4.5, 5.0, 0.5], 12),
         },
         index=dates,
     )
@@ -101,10 +102,13 @@ def test_pipeline_combines_parameter_macro_and_dependence_uncertainty():
     assert scenario.parameter_uncertainty is not None
     assert len(scenario.parameter_uncertainty) == 3
     assert scenario.result.regimes.shape == (6, 12)
-    assert scenario.result.macro_paths.shape == (6, 12, 2)
+    assert scenario.result.macro_paths.shape == (6, 12, 3)
+    assert scenario.result.macro_columns == ["growth", "inflation", "interest_rate"]
     assert scenario.reporting_wealth.shape == scenario.wealth.shape
     assert scenario.model.metadata["regime_assignment"] == "probabilistic"
     assert scenario.model.metadata["inflation_model"] == "joint_macro_path"
+    assert scenario.model.metadata["rate_model"] == "joint_macro_path"
+    assert np.isfinite(scenario.summary["effective_risk_free_rate"])
 
 
 def test_pipeline_runs_walk_forward_validation_on_long_history():
@@ -142,6 +146,16 @@ def test_pipeline_runs_walk_forward_validation_on_long_history():
     assert scenario.walk_forward is not None
     assert scenario.walk_forward is not None
     assert scenario.walk_forward.summary["splits"] > 0
+
+
+def test_pipeline_reports_when_walk_forward_validation_is_unavailable():
+    scenario = run_scenario(**_scenario_kwargs())
+
+    assert scenario.walk_forward is None
+    assert any(
+        "Walk-forward validation unavailable" in warning
+        for warning in scenario.diagnostics.warnings
+    )
 
 
 def test_pipeline_applies_macro_lag_and_normalizes_asset_names():

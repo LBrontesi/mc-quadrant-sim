@@ -594,7 +594,11 @@ def _load_market_data_cached(
         raise ValueError("No complete monthly return observations are available for the selected dates.")
 
     macro_source = fetch_fred_macro(
-        {"growth": "INDPRO", "inflation": "CPIAUCSL"},
+        {
+            "growth": "INDPRO",
+            "inflation": "CPIAUCSL",
+            "interest_rate": "FEDFUNDS",
+        },
         start=start_date.strftime("%Y-%m-%d"),
         end=end_date.strftime("%Y-%m-%d"),
         vintage=macro_vintage,
@@ -604,7 +608,22 @@ def _load_market_data_cached(
     macro_levels.attrs.update(macro_attrs)
     if isinstance(macro_attrs.get("release_dates"), pd.DataFrame):
         macro_levels.attrs["release_dates"] = macro_attrs["release_dates"].resample("ME").last()
-    macro = yoy_change(macro_levels).apply(pd.to_numeric, errors="coerce").dropna(how="any")
+    # Growth and inflation are year-over-year changes in index levels, whereas
+    # FEDFUNDS is already an annual percentage rate and must remain in levels.
+    macro = yoy_change(macro_levels.loc[:, ["growth", "inflation"]]).apply(
+        pd.to_numeric,
+        errors="coerce",
+    )
+    if "interest_rate" in macro_levels:
+        macro["interest_rate"] = pd.to_numeric(macro_levels["interest_rate"], errors="coerce")
+    macro.attrs.update(macro_attrs)
+    if isinstance(macro_attrs.get("release_dates"), pd.DataFrame):
+        macro.attrs["release_dates"] = macro_levels.attrs["release_dates"].reindex(
+            index=macro.index,
+            columns=macro.columns,
+        )
+    macro.attrs["rate_col"] = "interest_rate" if "interest_rate" in macro.columns else None
+    macro = macro.dropna(how="any")
     if macro.attrs.get("point_in_time"):
         macro = align_macro_to_availability(macro)
     if macro.empty:

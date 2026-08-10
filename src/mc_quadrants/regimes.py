@@ -233,6 +233,162 @@ def classify_quadrants(
     return regimes.astype("string")
 
 
+def smooth_macro_for_regimes(
+    macro: pd.DataFrame,
+    growth_col: str = "growth",
+    inflation_col: str = "inflation",
+    smoothing_window: int = 3,
+) -> pd.DataFrame:
+    """Return a causal trailing-average macro panel for regime assignment."""
+
+    missing = {growth_col, inflation_col}.difference(macro.columns)
+    if missing:
+        raise KeyError(f"Macro data is missing required columns: {sorted(missing)}")
+    smoothing_window = int(smoothing_window)
+    if smoothing_window < 1:
+        raise ValueError("smoothing_window must be at least 1.")
+    smoothed = macro.copy()
+    columns = [growth_col, inflation_col]
+    numeric = smoothed.loc[:, columns].apply(pd.to_numeric, errors="coerce")
+    smoothed.loc[:, columns] = numeric.rolling(
+        smoothing_window,
+        min_periods=1,
+    ).mean()
+    smoothed.attrs.update(macro.attrs)
+    return smoothed
+
+
+def classify_persistent_quadrants(
+    macro: pd.DataFrame,
+    growth_col: str = "growth",
+    inflation_col: str = "inflation",
+    growth_threshold: ThresholdSpec = "median",
+    inflation_threshold: ThresholdSpec = "median",
+    threshold_window: int | None = None,
+    smoothing_window: int = 3,
+    hysteresis: float = 0.15,
+    confirmation_periods: int = 2,
+) -> pd.Series:
+    """Classify causal quadrants with smoothing, hysteresis, and confirmation.
+
+    Macro inputs first receive a trailing average. Once a state is active, each
+    high/low component must cross the threshold by ``hysteresis`` historical
+    standard deviations before it can flip, and the resulting new quadrant
+    must persist for ``confirmation_periods`` observations. The switch is
+    recorded only on its confirmation date, so the classifier is causal.
+    """
+
+    if not np.isfinite(hysteresis) or hysteresis < 0:
+        raise ValueError("hysteresis must be finite and non-negative.")
+    confirmation_periods = int(confirmation_periods)
+    if confirmation_periods < 1:
+        raise ValueError("confirmation_periods must be at least 1.")
+    smoothed = smooth_macro_for_regimes(
+        macro,
+        growth_col=growth_col,
+        inflation_col=inflation_col,
+        smoothing_window=smoothing_window,
+    )
+    growth = pd.to_numeric(smoothed[growth_col], errors="coerce")
+    inflation = pd.to_numeric(smoothed[inflation_col], errors="coerce")
+    growth_cutoff = _threshold_series(growth, growth_threshold, threshold_window)
+    inflation_cutoff = _threshold_series(inflation, inflation_threshold, threshold_window)
+    growth_band = _probability_scale(
+        growth,
+        growth_cutoff,
+        threshold_window,
+        1.0,
+    ) * float(hysteresis)
+    inflation_band = _probability_scale(
+        inflation,
+        inflation_cutoff,
+        threshold_window,
+        1.0,
+    ) * float(hysteresis)
+
+    def state_for(growth_high: bool, inflation_high: bool) -> str:
+        if growth_high and not inflation_high:
+            return Regime.HIGH_GROWTH_LOW_INFLATION.value
+        if growth_high and inflation_high:
+            return Regime.HIGH_GROWTH_HIGH_INFLATION.value
+        if not growth_high and inflation_high:
+            return Regime.LOW_GROWTH_HIGH_INFLATION.value
+        return Regime.LOW_GROWTH_LOW_INFLATION.value
+
+    def growth_is_high(state: str) -> bool:
+        return state in {
+            Regime.HIGH_GROWTH_LOW_INFLATION.value,
+            Regime.HIGH_GROWTH_HIGH_INFLATION.value,
+        }
+
+    def inflation_is_high(state: str) -> bool:
+        return state in {
+            Regime.HIGH_GROWTH_HIGH_INFLATION.value,
+            Regime.LOW_GROWTH_HIGH_INFLATION.value,
+        }
+
+    labels: list[object] = []
+    current: str | None = None
+    candidate: str | None = None
+    candidate_count = 0
+    consecutive = _consecutive_periods(smoothed.index)
+    for position in range(len(smoothed)):
+        if position and not consecutive[position - 1]:
+            current = None
+            candidate = None
+            candidate_count = 0
+        values = (
+            growth.iloc[position],
+            inflation.iloc[position],
+            growth_cutoff.iloc[position],
+            inflation_cutoff.iloc[position],
+            growth_band.iloc[position],
+            inflation_band.iloc[position],
+        )
+        if not all(np.isfinite(value) for value in values):
+            labels.append(pd.NA)
+            current = None
+            candidate = None
+            candidate_count = 0
+            continue
+        growth_value, inflation_value, growth_level, inflation_level, g_band, i_band = values
+        if current is None:
+            current = state_for(
+                bool(growth_value >= growth_level),
+                bool(inflation_value >= inflation_level),
+            )
+            labels.append(current)
+            continue
+
+        proposed = state_for(
+            bool(
+                growth_value >= growth_level - g_band
+                if growth_is_high(current)
+                else growth_value >= growth_level + g_band
+            ),
+            bool(
+                inflation_value >= inflation_level - i_band
+                if inflation_is_high(current)
+                else inflation_value >= inflation_level + i_band
+            ),
+        )
+        if proposed == current:
+            candidate = None
+            candidate_count = 0
+        else:
+            if proposed == candidate:
+                candidate_count += 1
+            else:
+                candidate = proposed
+                candidate_count = 1
+            if candidate_count >= confirmation_periods:
+                current = proposed
+                candidate = None
+                candidate_count = 0
+        labels.append(current)
+    return pd.Series(labels, index=macro.index, name="regime", dtype="string")
+
+
 def sojourn_durations(regime_series: pd.Series, states: Iterable[str], min_length: int = 1) -> dict[str, np.ndarray]:
     """Extract the empirical run-length distribution of each state.
 
@@ -262,6 +418,103 @@ def sojourn_durations(regime_series: pd.Series, states: Iterable[str], min_lengt
     if length >= min_length:
         durations[current_state].append(length)
     return {state: np.array(lengths, dtype=int) for state, lengths in durations.items()}
+
+
+def _sojourn_records(regime_series: pd.Series) -> list[tuple[str, int, bool]]:
+    """Return ``(state, months, observed_exit)`` records, preserving censoring."""
+
+    clean = regime_series.dropna().sort_index().astype(str)
+    if clean.empty:
+        return []
+    records: list[tuple[str, int, bool]] = []
+    current = str(clean.iloc[0])
+    length = 1
+    consecutive = _consecutive_periods(clean.index)
+    for position, observation in enumerate(clean.iloc[1:]):
+        next_state = str(observation)
+        if consecutive[position] and next_state == current:
+            length += 1
+            continue
+        records.append((current, length, bool(consecutive[position] and next_state != current)))
+        current = next_state
+        length = 1
+    records.append((current, length, False))
+    return records
+
+
+def estimate_duration_hazards(
+    regimes: pd.Series,
+    states: Iterable[str] = REGIME_ORDER,
+    prior_strength: float = 8.0,
+    max_duration: int = 240,
+) -> dict[str, np.ndarray]:
+    """Estimate regularized state-specific discrete duration hazards.
+
+    At each regime age, the state hazard is shrunk toward an age-dependent
+    pooled hazard. This retains duration dependence while avoiding zero/one
+    estimates in sparsely observed tails. Runs ending at a data boundary are
+    treated as right-censored rather than as observed exits.
+    """
+
+    state_list = list(dict.fromkeys(states))
+    if not state_list:
+        raise ValueError("At least one state is required.")
+    if not np.isfinite(prior_strength) or prior_strength <= 0:
+        raise ValueError("prior_strength must be positive and finite.")
+    max_duration = int(max_duration)
+    if max_duration < 1:
+        raise ValueError("max_duration must be positive.")
+    records = [record for record in _sojourn_records(regimes) if record[0] in state_list]
+    pooled_risk = np.zeros(max_duration, dtype=float)
+    pooled_exits = np.zeros(max_duration, dtype=float)
+    state_risk = {state: np.zeros(max_duration, dtype=float) for state in state_list}
+    state_exits = {state: np.zeros(max_duration, dtype=float) for state in state_list}
+    for state, duration, observed_exit in records:
+        exposed = min(int(duration), max_duration)
+        state_risk[state][:exposed] += 1.0
+        pooled_risk[:exposed] += 1.0
+        if observed_exit and duration <= max_duration:
+            state_exits[state][duration - 1] += 1.0
+            pooled_exits[duration - 1] += 1.0
+
+    total_exits = float(pooled_exits.sum())
+    total_risk = float(pooled_risk.sum())
+    baseline = (total_exits + 1.0) / (total_risk + 2.0)
+    baseline = float(np.clip(baseline, 0.005, 0.95))
+    pooled_hazard = (pooled_exits + prior_strength * baseline) / (
+        pooled_risk + prior_strength
+    )
+    hazards: dict[str, np.ndarray] = {}
+    for state in state_list:
+        hazard = (state_exits[state] + prior_strength * pooled_hazard) / (
+            state_risk[state] + prior_strength
+        )
+        hazards[state] = np.clip(hazard, 0.005, 0.95)
+    return hazards
+
+
+def expected_duration_from_hazards(
+    hazards: Iterable[float],
+    min_duration: int = 1,
+) -> float:
+    """Return the expected run length implied by discrete hazards."""
+
+    values = np.asarray(list(hazards), dtype=float)
+    if values.ndim != 1 or len(values) == 0 or not np.isfinite(values).all():
+        raise ValueError("hazards must be a non-empty finite one-dimensional sequence.")
+    if (values < 0).any() or (values > 1).any():
+        raise ValueError("hazards must be between zero and one.")
+    min_duration = int(min_duration)
+    if min_duration < 1:
+        raise ValueError("min_duration must be at least 1.")
+    survival = 1.0
+    expectation = 0.0
+    effective_tail = float(np.clip(values[-1], 1e-6, 1.0))
+    for age, hazard in enumerate(values, start=1):
+        expectation += survival
+        effective = 0.0 if age < min_duration else float(hazard)
+        survival *= 1.0 - effective
+    return float(expectation + survival / effective_tail)
 
 
 def estimate_transition_matrix(
@@ -302,7 +555,12 @@ def estimate_probabilistic_transition_matrix(
     states: Iterable[str] = REGIME_ORDER,
     smoothing: float = 1.0,
 ) -> pd.DataFrame:
-    """Estimate expected transition counts from soft regime memberships."""
+    """Legacy helper for expected counts from independent soft memberships.
+
+    The production calibration path intentionally does not use this estimator;
+    transitions come from persistence-filtered hard states. It remains public
+    only for backwards compatibility and method-comparison experiments.
+    """
 
     if not np.isfinite(smoothing) or smoothing < 0:
         raise ValueError("smoothing must be a finite, non-negative number.")

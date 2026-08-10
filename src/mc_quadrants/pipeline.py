@@ -17,7 +17,7 @@ from mc_quadrants.diagnostics import (
     build_hmm_diagnostics,
 )
 from mc_quadrants.hmm import fit_hmm_model
-from mc_quadrants.regimes import classify_quadrants
+from mc_quadrants.regimes import classify_persistent_quadrants
 from mc_quadrants.simulation import (
     inflation_adjust_wealth,
     simulate_portfolio_paths,
@@ -45,6 +45,24 @@ class SimulationRun:
 
 
 _CHUNK_WORKER_STATE: dict[str, Any] = {}
+
+
+def _annual_macro_paths(
+    model: ScenarioModel,
+    result: SimulationResult,
+    column: str | None,
+    percent_flag: str,
+) -> np.ndarray | None:
+    """Extract one simulated annual macro series as decimal rates."""
+
+    if result.macro_paths is None or not column or column not in result.macro_columns:
+        return None
+    index = result.macro_columns.index(column)
+    values = result.macro_paths[:, :, index].astype(float, copy=True)
+    dynamics = model.metadata.get("macro_dynamics", {})
+    if bool(dynamics.get(percent_flag, model.metadata.get(percent_flag, False))):
+        values /= 100.0
+    return values
 
 
 def _init_chunk_worker(state: dict[str, Any]) -> None:
@@ -98,6 +116,18 @@ def _run_chunk(
         financing_rate=state["financing_rate"],
         financing_inflation_sensitivity=state["financing_inflation_sensitivity"],
         state_inflation=state["state_inflation"],
+        financing_rate_paths=_annual_macro_paths(
+            state["model"],
+            chunk_result,
+            state["rate_col"],
+            "rate_is_percent",
+        ),
+        financing_inflation_paths=_annual_macro_paths(
+            state["model"],
+            chunk_result,
+            state["inflation_col"],
+            "inflation_is_percent",
+        ),
         maintenance_margin=state["maintenance_margin"],
         contribution=state["contribution"],
         withdrawal=state["withdrawal"],
@@ -153,6 +183,8 @@ def _simulate_chunked(
     contribution: float,
     withdrawal: float,
     return_kind: str,
+    rate_col: str | None,
+    inflation_col: str,
     workers: int = 1,
 ) -> tuple[SimulationResult, pd.DataFrame]:
     """Simulate returns and portfolio wealth, chunking the path dimension.
@@ -205,6 +237,18 @@ def _simulate_chunked(
             financing_rate=financing_rate,
             financing_inflation_sensitivity=financing_inflation_sensitivity,
             state_inflation=state_inflation,
+            financing_rate_paths=_annual_macro_paths(
+                model,
+                chunk_result,
+                rate_col,
+                "rate_is_percent",
+            ),
+            financing_inflation_paths=_annual_macro_paths(
+                model,
+                chunk_result,
+                inflation_col,
+                "inflation_is_percent",
+            ),
             maintenance_margin=maintenance_margin,
             contribution=contribution,
             withdrawal=withdrawal,
@@ -266,6 +310,8 @@ def _simulate_chunked(
             "financing_rate": float(financing_rate),
             "financing_inflation_sensitivity": float(financing_inflation_sensitivity),
             "state_inflation": dict(state_inflation) if state_inflation else None,
+            "rate_col": rate_col,
+            "inflation_col": inflation_col,
             "maintenance_margin": float(maintenance_margin),
             "contribution": float(contribution),
             "withdrawal": float(withdrawal),
@@ -335,6 +381,7 @@ def run_scenario(
     random_seed: int,
     start_state: str | None,
     weights: Mapping[str, float],
+    rate_col: str | None = "interest_rate",
     correlation_overrides: CorrelationOverrides | None = None,
     override_weight: float = 1.0,
     macro_lag_periods: int = 0,
@@ -361,14 +408,18 @@ def run_scenario(
     model_kind: str = "quadrant",
     hmm_states: int = 4,
     threshold_window: int | None = None,
-    duration_model: str = "markov",
-    min_regime_duration: int = 3,
+    duration_model: str = "semi_markov",
+    min_regime_duration: int = 5,
     garch: bool = False,
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
     walk_forward: bool = True,
     probabilistic_regimes: bool = False,
     regime_temperature: float = 0.35,
+    regime_smoothing_window: int = 3,
+    regime_hysteresis: float = 0.15,
+    regime_confirmation_periods: int = 2,
+    duration_prior_strength: float = 8.0,
     mean_prior_strength: float = 0.0,
     parameter_draws: int = 0,
     parameter_block_size: int = 12,
@@ -387,8 +438,8 @@ def run_scenario(
     ``model_kind="quadrant"`` builds the four-quadrant macro model from growth
     and inflation thresholds; ``model_kind="hmm"`` fits a Gaussian-emission
     hidden Markov model directly on the asset returns instead. ``duration_model``
-    controls whether regime run lengths follow the Markov chain or the
-    empirical sojourn distribution, and ``garch`` adds within-regime
+    controls whether regime run lengths follow the Markov chain or regularized
+    state-specific duration hazards, and ``garch`` adds within-regime
     GARCH(1,1) conditional variance dynamics. ``walk_forward`` runs a
     strictly out-of-sample predictive check of the regime model against an
     unconditional benchmark.
@@ -439,6 +490,7 @@ def run_scenario(
             scenario_returns,
             n_states=int(hmm_states),
             random_seed=int(random_seed),
+            min_regime_duration=int(min_regime_duration),
         )
         regimes = fit.regimes
         model.metadata["base_currency"] = str(base_currency).strip().upper()
@@ -453,25 +505,34 @@ def run_scenario(
             macro=macro,
             growth_col=growth_col,
             inflation_col=inflation_col,
+            rate_col=rate_col,
             growth_threshold=growth_threshold,
             inflation_threshold=inflation_threshold,
             correlation_overrides=correlation_overrides,
             override_weight=override_weight,
             macro_lag_periods=macro_lag_periods,
             threshold_window=threshold_window,
+            min_regime_duration=int(min_regime_duration),
             probabilistic_regimes=probabilistic_regimes,
             regime_temperature=regime_temperature,
+            regime_smoothing_window=int(regime_smoothing_window),
+            regime_hysteresis=float(regime_hysteresis),
+            regime_confirmation_periods=int(regime_confirmation_periods),
+            duration_prior_strength=float(duration_prior_strength),
             mean_prior_strength=mean_prior_strength,
             joint_macro=joint_macro,
         )
         model.metadata["requested_macro_lag_periods"] = requested_macro_lag_periods
-        regimes = classify_quadrants(
+        regimes = classify_persistent_quadrants(
             macro,
             growth_col=growth_col,
             inflation_col=inflation_col,
             growth_threshold=growth_threshold,
             inflation_threshold=inflation_threshold,
             threshold_window=threshold_window,
+            smoothing_window=int(regime_smoothing_window),
+            hysteresis=float(regime_hysteresis),
+            confirmation_periods=int(regime_confirmation_periods),
         )
         diagnostics = build_calibration_diagnostics(
             model,
@@ -483,6 +544,9 @@ def run_scenario(
             inflation_threshold,
             macro_lag_periods=macro_lag_periods,
             threshold_window=threshold_window,
+            regime_smoothing_window=int(regime_smoothing_window),
+            regime_hysteresis=float(regime_hysteresis),
+            regime_confirmation_periods=int(regime_confirmation_periods),
         )
         if transition_uncertainty > 0:
             diagnostics.warnings.append(
@@ -514,6 +578,7 @@ def run_scenario(
             random_seed=int(random_seed) + 10_000,
             growth_col=growth_col,
             inflation_col=inflation_col,
+            rate_col=rate_col,
             growth_threshold=growth_threshold,
             inflation_threshold=inflation_threshold,
             correlation_overrides=correlation_overrides,
@@ -523,6 +588,10 @@ def run_scenario(
             min_regime_duration=int(min_regime_duration),
             probabilistic_regimes=probabilistic_regimes,
             regime_temperature=float(regime_temperature),
+            regime_smoothing_window=int(regime_smoothing_window),
+            regime_hysteresis=float(regime_hysteresis),
+            regime_confirmation_periods=int(regime_confirmation_periods),
+            duration_prior_strength=float(duration_prior_strength),
             mean_prior_strength=float(mean_prior_strength),
             joint_macro=joint_macro,
         )
@@ -572,6 +641,8 @@ def run_scenario(
                 contribution=float(contribution),
                 withdrawal=float(withdrawal),
                 return_kind=return_kind,
+                rate_col=rate_col,
+                inflation_col=inflation_col,
                 workers=workers,
             )
         if parameter_models and draw_result.returns.shape[1]:
@@ -649,11 +720,18 @@ def run_scenario(
                 threshold_window=threshold_window,
                 probabilistic_regimes=probabilistic_regimes,
                 regime_temperature=float(regime_temperature),
+                regime_smoothing_window=int(regime_smoothing_window),
+                regime_hysteresis=float(regime_hysteresis),
+                regime_confirmation_periods=int(regime_confirmation_periods),
+                duration_prior_strength=float(duration_prior_strength),
+                min_regime_duration=int(min_regime_duration),
                 mean_prior_strength=float(mean_prior_strength),
+                weights=normalized_weights,
             )
             diagnostics.warnings.extend(walk_forward_result.warnings)
-        except ValueError:
+        except ValueError as exc:
             walk_forward_result = None
+            diagnostics.warnings.append(f"Walk-forward validation unavailable: {exc}")
     weight_series = pd.Series(normalized_weights, dtype=float).reindex(selected).fillna(0.0)
     weight_total = float(weight_series.sum())
     if not pd.notna(weight_total) or abs(weight_total) < 1e-12:
@@ -671,6 +749,17 @@ def run_scenario(
         model.metadata["inflation_model"] = "joint_macro_path"
     else:
         model.metadata["inflation_model"] = "deterministic"
+    risk_free_paths = _annual_macro_paths(
+        model,
+        result,
+        model.metadata.get("rate_col"),
+        "rate_is_percent",
+    )
+    if risk_free_paths is not None:
+        risk_free_paths = np.clip(risk_free_paths, -0.05, 0.50)
+        model.metadata["rate_model"] = "joint_macro_path"
+    else:
+        model.metadata["rate_model"] = "deterministic"
     reporting_wealth = inflation_adjust_wealth(
         wealth,
         annual_inflation=annual_inflation,
@@ -684,11 +773,17 @@ def run_scenario(
         contribution=float(contribution),
         withdrawal=float(withdrawal),
         inflation_paths=inflation_paths,
+        risk_free_paths=risk_free_paths,
     )
     summary = summary.copy()
     state_inflation = model.metadata.get("state_inflation", {})
     effective_financing = float(financing_rate)
-    if float(financing_inflation_sensitivity) > 0 and state_inflation and len(result.states):
+    if risk_free_paths is not None:
+        financing_paths = risk_free_paths + float(financing_rate)
+        if float(financing_inflation_sensitivity) > 0 and inflation_paths is not None:
+            financing_paths += float(financing_inflation_sensitivity) * inflation_paths
+        effective_financing = float(np.clip(financing_paths, 0.0, 1.0).mean())
+    elif float(financing_inflation_sensitivity) > 0 and state_inflation and len(result.states):
         simulated_regimes = result.regimes
         if simulated_regimes.dtype.kind in "iu":
             hist = np.bincount(simulated_regimes.ravel(), minlength=len(result.states))

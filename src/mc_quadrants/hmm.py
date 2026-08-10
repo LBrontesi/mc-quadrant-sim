@@ -7,7 +7,11 @@ import pandas as pd
 
 from mc_quadrants.calibration import _ledoit_wolf_alpha
 from mc_quadrants.matrix import covariance_to_correlation
-from mc_quadrants.regimes import sojourn_durations
+from mc_quadrants.regimes import (
+    estimate_duration_hazards,
+    expected_duration_from_hazards,
+    sojourn_durations,
+)
 from mc_quadrants.types import RegimeMoments, ScenarioModel
 
 
@@ -144,6 +148,7 @@ def fit_hmm_model(
     shrinkage: float | None = None,
     restarts: int = 3,
     frequency: str = "M",
+    min_regime_duration: int = 5,
 ) -> tuple[ScenarioModel, HmmFit]:
     """Fit a Gaussian-emission hidden Markov model on asset returns.
 
@@ -161,6 +166,8 @@ def fit_hmm_model(
 
     if returns.empty:
         raise ValueError("returns must not be empty.")
+    if min_regime_duration < 1:
+        raise ValueError("min_regime_duration must be positive.")
     if not isinstance(n_states, int) or n_states < 2:
         raise ValueError("n_states must be an integer of at least 2.")
     if max_iterations <= 0:
@@ -279,6 +286,7 @@ def fit_hmm_model(
         index=returns.dropna().sort_index().index,
         dtype="string",
     )
+    duration_hazards = estimate_duration_hazards(regime_series, states)
     model = ScenarioModel(
         states=states,
         transition_matrix=transition_frame,
@@ -292,6 +300,16 @@ def fit_hmm_model(
             "iterations": best_iterations,
             "shrinkage": shrinkage,
             "sojourn_durations": sojourn_durations(regime_series, states),
+            "duration_model_kind": "regularized_state_specific_hazard",
+            "min_regime_duration": int(min_regime_duration),
+            "duration_hazards": duration_hazards,
+            "expected_duration_months": {
+                state: expected_duration_from_hazards(
+                    duration_hazards[state],
+                    min_duration=min_regime_duration,
+                )
+                for state in states
+            },
         },
     )
     model.validate()

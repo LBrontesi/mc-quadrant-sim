@@ -76,29 +76,19 @@ def _sample_transition_matrix(
 def _sample_sojourn(
     rng: np.random.Generator,
     state: int,
-    duration_map: dict[str, np.ndarray],
+    hazard_map: dict[str, np.ndarray],
     states: list[str],
-    transition: np.ndarray,
-    min_duration: int = 3,
+    min_duration: int = 5,
 ) -> int:
-    """Draw a sojourn length for a state from its empirical run distribution.
+    """Draw a run length from a regularized, duration-dependent hazard."""
 
-    States never observed in history fall back to the geometric duration
-    implied by the transition matrix, capped to stay conservative. A minimum
-    duration floor prevents unrealistic single-period regime flips.
-    """
-
-    observed = duration_map.get(states[state], np.array([], dtype=int))
-    if len(observed):
-        valid = observed[observed >= min_duration]
-        if len(valid):
-            return int(rng.choice(valid))
-        return int(np.maximum(int(rng.choice(observed)), min_duration))
-    persistence = float(transition[state, state])
-    if persistence < 1.0:
-        mean_duration = 1.0 / (1.0 - persistence)
-        return int(np.clip(round(mean_duration), min_duration, 240))
-    return max(min_duration, 1)
+    hazards = np.asarray(hazard_map.get(states[state], []), dtype=float)
+    if not len(hazards):
+        raise ValueError(f"No duration hazards are available for state {states[state]!r}.")
+    for age, hazard in enumerate(hazards, start=1):
+        if age >= min_duration and rng.random() < float(hazard):
+            return age
+    return max(len(hazards), min_duration)
 
 
 def simulate_regime_paths(
@@ -109,17 +99,14 @@ def simulate_regime_paths(
     random_seed: int | None = None,
     transition_concentration: float | None = None,
     duration_model: str = "markov",
-    min_regime_duration: int = 3,
+    min_regime_duration: int = 5,
 ) -> np.ndarray:
     """Simulate Markov (or semi-Markov) regime paths.
 
     ``duration_model="semi_markov"`` replaces the geometric sojourn times of a
-    first-order Markov chain with the empirical run-length distribution of
-    each state observed in history (stored in ``model.metadata`` under
-    ``sojourn_durations``). Regimes then persist for realistic lengths instead
-    of flipping with the constant per-period probability implied by the
-    transition matrix. Transitions between states still follow the calibrated
-    matrix with the self-transition probabilities renormalized away.
+    first-order Markov chain with regularized state- and age-specific exit
+    hazards stored in ``model.metadata``. Transitions between states still
+    follow the calibrated matrix with self-transition probabilities removed.
     """
 
     model.validate()
@@ -137,13 +124,13 @@ def simulate_regime_paths(
     duration_model = str(duration_model).lower()
     if duration_model not in {"markov", "semi_markov"}:
         raise ValueError("duration_model must be 'markov' or 'semi_markov'.")
-    sojourns: dict[str, np.ndarray] | None = None
+    duration_hazards: dict[str, np.ndarray] | None = None
     if duration_model == "semi_markov":
-        sojourns = model.metadata.get("sojourn_durations")
-        if not isinstance(sojourns, dict):
+        duration_hazards = model.metadata.get("duration_hazards")
+        if not isinstance(duration_hazards, dict):
             raise ValueError(
-                "semi_markov requires the model to expose 'sojourn_durations' "
-                "in its metadata; calibrate the model with sojourn support."
+                "semi_markov requires the model to expose 'duration_hazards' "
+                "in its metadata; recalibrate the model with duration support."
             )
 
     if start_state is None:
@@ -176,9 +163,8 @@ def simulate_regime_paths(
                 _sample_sojourn(
                     rng,
                     state_index,
-                    sojourns,
+                    duration_hazards,
                     states,
-                    transition,
                     min_regime_duration,
                 )
                 for _ in range(int(mask.sum()))
@@ -195,7 +181,16 @@ def simulate_regime_paths(
             probabilities = probabilities / max(float(probabilities.sum()), 1e-300)
             following = rng.choice(other_states, size=mask.sum(), p=probabilities)
             next_sojourns = np.array(
-                [_sample_sojourn(rng, int(index), sojourns, states, transition, min_regime_duration) for index in following],
+                [
+                    _sample_sojourn(
+                        rng,
+                        int(index),
+                        duration_hazards,
+                        states,
+                        min_regime_duration,
+                    )
+                    for index in following
+                ],
                 dtype=int,
             )
             current[mask] = following
@@ -206,7 +201,11 @@ def simulate_regime_paths(
 def _macro_quadrant_probabilities(values: np.ndarray, dynamics: Mapping[str, object]) -> np.ndarray:
     thresholds = np.asarray(dynamics["thresholds"], dtype=float)
     scales = np.maximum(np.asarray(dynamics["probability_scales"], dtype=float), 1e-9)
-    standardized = np.clip((values - thresholds) / scales, -35.0, 35.0)
+    # Only growth and inflation define quadrant membership. Additional macro
+    # state variables such as the short rate affect their joint dynamics and
+    # returns, but do not create new quadrant dimensions.
+    quadrant_values = values[:, : len(thresholds)]
+    standardized = np.clip((quadrant_values - thresholds) / scales, -35.0, 35.0)
     high = 1.0 / (1.0 + np.exp(-standardized))
     growth_high = high[:, 0]
     inflation_high = high[:, 1]
@@ -228,7 +227,7 @@ def simulate_joint_regime_macro_paths(
     random_seed: int | None = None,
     transition_concentration: float | None = None,
     duration_model: str = "markov",
-    min_regime_duration: int = 3,
+    min_regime_duration: int = 5,
     macro_transition_weight: float = 0.35,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Simulate mutually consistent macro paths and time-varying regimes."""
@@ -276,24 +275,30 @@ def simulate_joint_regime_macro_paths(
         np.asarray(dynamics["latest"], dtype=float),
         (paths, len(dynamics["columns"])),
     ).copy()
+    rate_col = dynamics.get("rate_col")
+    rate_index = (
+        list(dynamics["columns"]).index(rate_col)
+        if rate_col in dynamics["columns"]
+        else None
+    )
+    rate_bounds = dynamics.get("rate_bounds")
     regime_paths = np.empty((periods, paths), dtype=object)
     macro_paths = np.empty((periods, paths, current_macro.shape[1]), dtype=float)
     macro_shocks = np.empty_like(macro_paths)
 
-    sojourns = model.metadata.get("sojourn_durations")
+    duration_hazards = model.metadata.get("duration_hazards")
     remaining = np.zeros(paths, dtype=int)
     if duration_model == "semi_markov":
-        if not isinstance(sojourns, dict):
-            raise ValueError("semi_markov requires calibrated sojourn durations.")
+        if not isinstance(duration_hazards, dict):
+            raise ValueError("semi_markov requires calibrated duration hazards.")
         for state_index in range(len(states)):
             mask = current == state_index
             remaining[mask] = [
                 _sample_sojourn(
                     rng,
                     state_index,
-                    sojourns,
+                    duration_hazards,
                     states,
-                    transition,
                     min_regime_duration,
                 )
                 for _ in range(int(mask.sum()))
@@ -314,6 +319,12 @@ def simulate_joint_regime_macro_paths(
             center = centers[state]
             next_macro[mask] = center + (current_macro[mask] - center) @ coefficient + shocks
             macro_shocks[period, mask] = shocks
+        if rate_index is not None and rate_bounds is not None:
+            next_macro[:, rate_index] = np.clip(
+                next_macro[:, rate_index],
+                float(rate_bounds[0]),
+                float(rate_bounds[1]),
+            )
         current_macro = next_macro
         macro_paths[period] = current_macro
 
@@ -344,9 +355,8 @@ def simulate_joint_regime_macro_paths(
                     _sample_sojourn(
                         rng,
                         int(next_state),
-                        sojourns,
+                        duration_hazards,
                         states,
-                        transition,
                         min_regime_duration,
                     )
                     for next_state in following[path_indexes]
@@ -375,7 +385,7 @@ def simulate_returns(
     block_size: int = 3,
     transition_concentration: float | None = None,
     duration_model: str = "markov",
-    min_regime_duration: int = 3,
+    min_regime_duration: int = 5,
     garch: bool = False,
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
@@ -395,8 +405,8 @@ def simulate_returns(
     observations together. Finite-variance Student-t sampling requires more
     than two degrees of freedom.
 
-    ``duration_model="semi_markov"`` draws regime run lengths from the
-    empirical sojourn distribution instead of the geometric lengths implied by
+    ``duration_model="semi_markov"`` draws regime run lengths from regularized
+    state-specific duration hazards instead of the geometric lengths implied by
     a first-order chain.
 
     ``garch=True`` (Gaussian draws only) adds GARCH(1,1) conditional variance
@@ -506,7 +516,14 @@ def simulate_returns(
             if distribution in {"bootstrap", "block_bootstrap"}:
                 historical = model.historical_returns.get(state)
                 if historical is None or historical.empty:
-                    raise ValueError(f"No historical returns are available for bootstrap regime: {state}")
+                    available = [
+                        frame
+                        for frame in model.historical_returns.values()
+                        if frame is not None and not frame.empty
+                    ]
+                    if not available:
+                        raise ValueError("No historical returns are available for bootstrap sampling.")
+                    historical = pd.concat(available).sort_index()
                 historical_values = historical.loc[:, assets].to_numpy(dtype=float)
                 if distribution == "bootstrap":
                     row_indices = rng.integers(len(historical_values), size=len(path_indices))
@@ -644,14 +661,13 @@ def _simulate_leveraged_portfolio_paths(
     withdrawal: float,
     regimes: np.ndarray | None = None,
     state_financing_rates: Mapping[str, float] | None = None,
+    financing_rate_paths: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Simulate leveraged holdings with explicit debt and financing costs.
 
-    ``state_financing_rates`` maps each regime state to an annual financing
-    rate (decimal). When supplied together with the per-period, per-path
-    ``regimes`` array, the monthly financing charge applied to each path
-    depends on the regime that path is currently in; otherwise the scalar
-    ``financing_rate`` is used for every path and period.
+    ``financing_rate_paths`` supplies a stochastic annual financing rate for
+    every simulated month and path.  It takes precedence over the legacy
+    regime-average map and scalar fallback.
     """
 
     periods, paths, assets = asset_growth.shape
@@ -664,7 +680,16 @@ def _simulate_leveraged_portfolio_paths(
     margin_calls = np.zeros(paths, dtype=bool)
     cost_rate = float(transaction_cost_bps) / 10_000.0
 
-    if regimes is not None and state_financing_rates:
+    effective_financing_rate = float(financing_rate)
+    if financing_rate_paths is not None:
+        annual_rates = np.asarray(financing_rate_paths, dtype=float)
+        if annual_rates.shape != (periods, paths):
+            raise ValueError("financing_rate_paths must have shape (periods, paths).")
+        if not np.isfinite(annual_rates).all() or (annual_rates <= -1.0).any():
+            raise ValueError("financing_rate_paths must contain finite annual rates above -100%.")
+        financing_growth = np.power(1.0 + annual_rates, 1.0 / 12.0)
+        effective_financing_rate = float(annual_rates.mean())
+    elif regimes is not None and state_financing_rates:
         unique_states = np.unique(regimes.ravel())
         rate_by_state = np.array(
             [float(state_financing_rates.get(state, financing_rate)) for state in unique_states]
@@ -672,6 +697,7 @@ def _simulate_leveraged_portfolio_paths(
         growth_lookup = (1.0 + rate_by_state) ** (1.0 / 12.0)
         state_codes = np.searchsorted(unique_states, regimes.ravel()).reshape(regimes.shape)
         financing_growth = growth_lookup[state_codes]
+        effective_financing_rate = float(np.mean(rate_by_state[state_codes]))
     else:
         financing_growth = (1.0 + financing_rate) ** (1.0 / 12.0)
 
@@ -735,7 +761,12 @@ def _simulate_leveraged_portfolio_paths(
         wealth[period] = np.maximum(equity, 0.0)
 
     frame = pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(paths)])
-    frame.attrs.update({"margin_calls": int(margin_calls.sum())})
+    frame.attrs.update(
+        {
+            "margin_calls": int(margin_calls.sum()),
+            "effective_financing_rate": effective_financing_rate,
+        }
+    )
     return frame
 
 
@@ -751,6 +782,8 @@ def simulate_portfolio_paths(
     financing_rate: float = 0.0,
     financing_inflation_sensitivity: float = 0.0,
     state_inflation: Mapping[str, float] | None = None,
+    financing_rate_paths: np.ndarray | None = None,
+    financing_inflation_paths: np.ndarray | None = None,
     maintenance_margin: float = 0.0,
     contribution: float = 0.0,
     withdrawal: float = 0.0,
@@ -758,8 +791,9 @@ def simulate_portfolio_paths(
     """Convert simulated asset returns into portfolio wealth paths.
 
     With ``rebalance_frequency=None`` the original weighted-return behavior is
-    retained. Set a positive frequency to model holdings, periodic rebalancing,
-    and transaction costs in basis points charged on traded notional.
+    retained. ``0`` models true buy-and-hold with drifting asset weights, while
+    a positive frequency models holdings, periodic rebalancing, and transaction
+    costs in basis points charged on traded notional.
 
     ``contribution`` and ``withdrawal`` are periodic cash flows in the same
     currency as ``initial_value``. A contribution is invested at the target
@@ -809,13 +843,13 @@ def simulate_portfolio_paths(
         raise ValueError("return_kind must be 'log' or 'simple'.")
     if rebalance_frequency is not None:
         rebalance_frequency = int(rebalance_frequency)
-        if rebalance_frequency <= 0:
-            raise ValueError("rebalance_frequency must be positive or None.")
+        if rebalance_frequency < 0:
+            raise ValueError("rebalance_frequency must be non-negative or None.")
     if not np.isfinite(transaction_cost_bps) or transaction_cost_bps < 0:
         raise ValueError("transaction_cost_bps must be a non-negative number.")
-    if rebalance_frequency is None and not np.isclose(transaction_cost_bps, 0.0):
-        raise ValueError("Transaction costs require a rebalancing frequency.")
-    if rebalance_frequency is None and (
+    if rebalance_frequency in {None, 0} and not np.isclose(transaction_cost_bps, 0.0):
+        raise ValueError("Transaction costs require monthly, quarterly, or annual rebalancing.")
+    if rebalance_frequency in {None, 0} and (
         not np.isclose(leverage_multiple, 1.0)
         or not np.isclose(financing_rate, 0.0)
         or not np.isclose(maintenance_margin, 0.0)
@@ -871,7 +905,25 @@ def simulate_portfolio_paths(
         or not np.isclose(maintenance_margin, 0.0)
     ):
         state_financing_rates = None
-        if not np.isclose(financing_inflation_sensitivity, 0.0) and result.states and state_inflation:
+        path_financing_rates = None
+        if financing_rate_paths is not None:
+            short_rates = np.asarray(financing_rate_paths, dtype=float)
+            if short_rates.shape != (periods, paths):
+                raise ValueError("financing_rate_paths must have shape (periods, paths).")
+            path_financing_rates = short_rates + float(financing_rate)
+            if not np.isclose(financing_inflation_sensitivity, 0.0):
+                if financing_inflation_paths is None:
+                    raise ValueError(
+                        "financing_inflation_paths are required when dynamic rates use inflation sensitivity."
+                    )
+                inflation_rates = np.asarray(financing_inflation_paths, dtype=float)
+                if inflation_rates.shape != (periods, paths):
+                    raise ValueError(
+                        "financing_inflation_paths must have shape (periods, paths)."
+                    )
+                path_financing_rates += financing_inflation_sensitivity * inflation_rates
+            path_financing_rates = np.clip(path_financing_rates, 0.0, 1.0)
+        elif not np.isclose(financing_inflation_sensitivity, 0.0) and result.states and state_inflation:
             state_financing_rates = {
                 state: financing_rate + financing_inflation_sensitivity * float(state_inflation.get(state, 0.0))
                 for state in result.states
@@ -889,6 +941,7 @@ def simulate_portfolio_paths(
             withdrawal,
             regimes=result.regimes if state_financing_rates else None,
             state_financing_rates=state_financing_rates,
+            financing_rate_paths=path_financing_rates,
         )
     holdings = np.broadcast_to(
         initial_value * target_weights,
@@ -906,7 +959,7 @@ def simulate_portfolio_paths(
             holdings -= holdings * fraction[:, None]
             holdings = np.maximum(holdings, 0.0)
         value_before_rebalance = holdings.sum(axis=1)
-        if (period + 1) % rebalance_frequency == 0:
+        if rebalance_frequency > 0 and (period + 1) % rebalance_frequency == 0:
             target_holdings = value_before_rebalance[:, None] * target_weights
             turnover = np.abs(target_holdings - holdings).sum(axis=1)
             costs = turnover * cost_rate
@@ -985,6 +1038,7 @@ def summarize_wealth_risk(
     contribution: float = 0.0,
     withdrawal: float = 0.0,
     inflation_paths: np.ndarray | None = None,
+    risk_free_paths: np.ndarray | None = None,
 ) -> pd.Series:
     """Calculate terminal, loss-tail, drawdown, and annualized metrics.
 
@@ -1025,6 +1079,25 @@ def summarize_wealth_risk(
         inflation_paths=inflation_paths,
     )
     wealth_values = wealth_values * deflator
+    if risk_free_paths is None:
+        nominal_risk_free = np.full((periods, paths), float(risk_free_rate), dtype=float)
+    else:
+        nominal_risk_free = np.asarray(risk_free_paths, dtype=float)
+        if nominal_risk_free.shape != (periods, paths):
+            raise ValueError("risk_free_paths must have shape (periods, paths).")
+        if not np.isfinite(nominal_risk_free).all() or (nominal_risk_free <= -1.0).any():
+            raise ValueError("risk_free_paths must contain finite annual rates above -100%.")
+    if inflation_paths is not None:
+        annual_inflation_paths = np.asarray(inflation_paths, dtype=float)
+    else:
+        annual_inflation_paths = np.full(
+            (periods, paths),
+            float(annual_inflation),
+            dtype=float,
+        )
+    real_risk_free = (1.0 + nominal_risk_free) / (1.0 + annual_inflation_paths) - 1.0
+    periodic_risk_free = np.power(1.0 + real_risk_free, 1.0 / periods_per_year) - 1.0
+    effective_risk_free_rate = float(real_risk_free.mean())
     terminal = wealth_values[-1]
     tail_probability = 1.0 - confidence
     lower_tail = float(np.quantile(terminal, tail_probability))
@@ -1041,6 +1114,7 @@ def summarize_wealth_risk(
     return_sum = 0.0
     return_squares = 0.0
     return_count = 0
+    excess_return_sum = 0.0
     log_return_sum = 0.0
     log_return_count = 0
     downside_sum = 0.0
@@ -1061,29 +1135,35 @@ def summarize_wealth_risk(
             period_returns = numerator / denominator - 1.0
         period_returns[(denominator <= 0) | (numerator < 0)] = np.nan
         finite_returns = period_returns[np.isfinite(period_returns)]
+        finite_mask = np.isfinite(period_returns)
+        finite_risk_free = periodic_risk_free[:, start:start + values.shape[1]][finite_mask]
+        excess_returns = finite_returns - finite_risk_free
         return_sum += float(finite_returns.sum())
         return_squares += float(np.square(finite_returns).sum())
         return_count += int(finite_returns.size)
         valid_log_returns = finite_returns[finite_returns > -1.0]
         log_return_sum += float(np.log1p(valid_log_returns).sum())
         log_return_count += int(valid_log_returns.size)
-        downside = finite_returns - risk_free_rate / periods_per_year
-        downside_sum += float(np.sum(np.where(downside < 0, downside**2, 0.0)))
-        downside_count += int(downside.size)
+        excess_return_sum += float(excess_returns.sum())
+        downside_sum += float(np.sum(np.where(excess_returns < 0, excess_returns**2, 0.0)))
+        downside_count += int(excess_returns.size)
 
     mean_period_return = return_sum / return_count if return_count else 0.0
     period_variance = max(return_squares / return_count - mean_period_return**2, 0.0) if return_count else 0.0
     annualized_return = float(mean_period_return * periods_per_year)
+    annualized_excess_return = float(
+        excess_return_sum / return_count * periods_per_year
+    ) if return_count else 0.0
     annualized_volatility = float(np.sqrt(period_variance) * np.sqrt(periods_per_year))
     sharpe_ratio = (
-        float((annualized_return - risk_free_rate) / annualized_volatility)
+        float(annualized_excess_return / annualized_volatility)
         if annualized_volatility > 0
         else 0.0
     )
     downside_deviation = float(np.sqrt(downside_sum / downside_count)) if downside_count else 0.0
     annualized_downside = downside_deviation * np.sqrt(periods_per_year)
     sortino_ratio = (
-        float((annualized_return - risk_free_rate) / annualized_downside) if annualized_downside > 0 else 0.0
+        float(annualized_excess_return / annualized_downside) if annualized_downside > 0 else 0.0
     )
     mean_max_drawdown = float(max_drawdown.mean())
     geometric_annualized_return = (
@@ -1103,6 +1183,7 @@ def summarize_wealth_risk(
         "p50": float(np.quantile(terminal, 0.50)),
         "p95": float(np.quantile(terminal, 0.95)),
         "annualized_return": float(annualized_return),
+        "effective_risk_free_rate": effective_risk_free_rate,
         "annualized_volatility": float(annualized_volatility),
         "geometric_annualized_return": geometric_annualized_return,
         "sharpe_ratio": sharpe_ratio,

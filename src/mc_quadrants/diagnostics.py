@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from mc_quadrants.regimes import REGIME_ORDER, classify_quadrants
+from mc_quadrants.regimes import REGIME_ORDER, classify_persistent_quadrants
 from mc_quadrants.types import ScenarioModel, SimulationResult
 
 
@@ -37,16 +37,22 @@ def build_calibration_diagnostics(
     inflation_threshold: str | float,
     macro_lag_periods: int = 0,
     threshold_window: int | None = None,
+    regime_smoothing_window: int = 3,
+    regime_hysteresis: float = 0.15,
+    regime_confirmation_periods: int = 2,
 ) -> CalibrationDiagnostics:
     """Check regime coverage, covariance conditioning, and transition data."""
 
-    regimes = classify_quadrants(
+    regimes = classify_persistent_quadrants(
         macro,
         growth_col=growth_col,
         inflation_col=inflation_col,
         growth_threshold=growth_threshold,
         inflation_threshold=inflation_threshold,
         threshold_window=threshold_window,
+        smoothing_window=regime_smoothing_window,
+        hysteresis=regime_hysteresis,
+        confirmation_periods=regime_confirmation_periods,
     )
     lagged_regimes = regimes.sort_index().shift(macro_lag_periods)
     aligned = lagged_regimes.dropna().reindex(returns.sort_index().index, method="ffill")
@@ -75,6 +81,9 @@ def build_calibration_diagnostics(
                     if model.metadata.get("shrinkage") is not None
                     else np.nan
                 ),
+                "expected_duration_months": float(
+                    model.metadata.get("expected_duration_months", {}).get(state, np.nan)
+                ),
             }
         )
         if observations < minimum_observations:
@@ -94,6 +103,11 @@ def build_calibration_diagnostics(
             f"Thresholds use causal expanding windows with {threshold_window} minimum prior "
             "observations; the earliest macro observations are left unclassified."
         )
+    warnings.append(
+        "Regimes use a causal "
+        f"{regime_smoothing_window}-month macro average, {regime_hysteresis:.2f}-standard-"
+        f"deviation hysteresis, and {regime_confirmation_periods}-month confirmation."
+    )
     if len(aligned) < 24:
         warnings.append("The aligned calibration sample contains fewer than 24 observations.")
 

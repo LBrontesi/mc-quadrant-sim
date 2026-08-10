@@ -43,6 +43,7 @@ const METRIC_FIELDS = [
   ["mean", "Mean terminal wealth"], ["p05", "P05"], ["p50", "Median"], ["p95", "P95"],
   ["annualized_return", "Annualized return"],
   ["annualized_volatility", "Annualized volatility"],
+  ["effective_risk_free_rate", "Effective risk-free rate"],
   ["sharpe_ratio", "Sharpe ratio"], ["sortino_ratio", "Sortino"], ["calmar_ratio", "Calmar"],
   ["geometric_annualized_return", "CAGR"], ["probability_of_loss", "Probability of loss"],
   ["var_95", "VaR (95%)"], ["expected_shortfall_95", "Expected shortfall (95%)"],
@@ -54,6 +55,16 @@ const FLOW_METRIC_FIELDS = [
   ["total_withdrawn", "Total withdrawals"],
   ["net_external_cash_flow", "Net external cash flow"],
 ];
+const GOAL_METRIC_FIELDS = [
+  ["target_wealth", "Target wealth"],
+  ["goal_success_probability", "Target success"],
+  ["expected_goal_shortfall", "Expected shortfall to target"],
+  ["risk_of_ruin", "Risk of ruin"],
+  ["omega_ratio", "Omega ratio"],
+  ["worst_rolling_return_p05", "P05 worst rolling return"],
+  ["max_underwater_months_p95", "P95 time underwater"],
+  ["recovery_months_p95", "P95 recovery time"],
+];
 const COST_METRIC_FIELDS = [
   ["leverage_multiple", "Leverage"], ["weighted_expense_ratio", "Weighted ETF fee"],
   ["annual_fee_drag", "Annual fee drag"], ["annual_financing_cost", "Annual financing cost"],
@@ -63,11 +74,15 @@ const COST_METRIC_FIELDS = [
 const PERCENT_METRICS = new Set([
   "annualized_return", "annualized_volatility", "cash_flow_adjusted_annualized_return",
   "cash_flow_adjusted_volatility", "geometric_annualized_return", "probability_of_loss",
+  "effective_risk_free_rate", "effective_financing_rate",
   "max_drawdown_mean", "max_drawdown_p95", "max_drawdown_worst", "ulcer_index_mean", "ulcer_index_p95",
+  "goal_success_probability", "risk_of_ruin", "unrecovered_at_horizon", "worst_rolling_return",
+  "worst_rolling_return_p05", "median_worst_rolling_return",
 ]);
 const CURRENCY_METRICS = new Set([
   "mean", "std", "p05", "p50", "p95", "var_95", "expected_shortfall_95", "periodic_contribution",
   "periodic_withdrawal", "total_contributed", "total_withdrawn", "net_external_cash_flow",
+  "target_wealth", "expected_goal_shortfall",
 ]);
 
 const state = {
@@ -94,6 +109,19 @@ function fmt(value, digits = 2) {
 
 function pct(value, digits = 1) {
   return fmt(value * 100, digits) + "%";
+}
+
+function quantileFromSorted(sorted, probability) {
+  if (!sorted.length) return 0;
+  const position = Math.max(0, Math.min(sorted.length - 1, probability * (sorted.length - 1)));
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  const weight = position - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
+function sampleQuantile(values, probability) {
+  return quantileFromSorted([...values].sort((a, b) => a - b), probability);
 }
 
 function readFile(file) {
@@ -152,9 +180,23 @@ function formatMetricValue(key, value, currency = "USD") {
   const numeric = Number(value);
   if (key === "leverage_multiple") return `${numeric.toFixed(1)}x`;
   if (key === "margin_calls") return Math.round(numeric).toLocaleString();
+  if (key.includes("_months")) return `${numeric.toFixed(1)} mo`;
   if (PERCENT_METRICS.has(key)) return `${(numeric * 100).toFixed(2)}%`;
   if (CURRENCY_METRICS.has(key)) return `${currency} ${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   return numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function compactCurrency(value, currency = "USD") {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency,
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(value);
+  } catch {
+    return `${currency} ${Number(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  }
 }
 
 function animateMetric(el, target, key, currency) {
@@ -320,24 +362,26 @@ function drawAxes(svg, width, height, xTicks, yTicks, xLabel, yLabel) {
   const grid = document.createElementNS(SVG_NS, "g");
   xTicks.forEach(([x, label]) => {
     const line = document.createElementNS(SVG_NS, "line");
-    line.setAttribute("x1", x); line.setAttribute("y1", 0);
-    line.setAttribute("x2", x); line.setAttribute("y2", height);
+    line.setAttribute("x1", x); line.setAttribute("y1", MARGIN.top);
+    line.setAttribute("x2", x); line.setAttribute("y2", MARGIN.top + height);
     line.setAttribute("stroke", "var(--grid)"); line.setAttribute("stroke-width", "1");
     grid.appendChild(line);
-    svgText(grid, x, height + 14, label, "chart-title");
+    svgText(grid, x, MARGIN.top + height + 14, label, "chart-title");
   });
   yTicks.forEach(([y, label]) => {
     const line = document.createElementNS(SVG_NS, "line");
-    line.setAttribute("x1", 0); line.setAttribute("y1", y);
-    line.setAttribute("x2", width); line.setAttribute("y2", y);
+    line.setAttribute("x1", MARGIN.left); line.setAttribute("y1", y);
+    line.setAttribute("x2", MARGIN.left + width); line.setAttribute("y2", y);
     line.setAttribute("stroke", "var(--grid)"); line.setAttribute("stroke-width", "1");
     grid.appendChild(line);
-    svgText(grid, -6, y + 4, label, "chart-title", "end");
+    svgText(grid, MARGIN.left - 6, y + 4, label, "chart-title", "end");
   });
-  if (xLabel) svgText(grid, width / 2, height + 22, xLabel, "chart-title");
+  if (xLabel) svgText(grid, MARGIN.left + width / 2, MARGIN.top + height + 22, xLabel, "chart-title");
   if (yLabel) {
-    const el = svgText(grid, -32, height / 2, yLabel, "chart-title");
-    el.setAttribute("transform", "rotate(-90 -32 " + height / 2 + ")");
+    const labelX = 10;
+    const labelY = MARGIN.top + height / 2;
+    const el = svgText(grid, labelX, labelY, yLabel, "chart-title");
+    el.setAttribute("transform", `rotate(-90 ${labelX} ${labelY})`);
   }
   svg.appendChild(grid);
 }
@@ -351,8 +395,12 @@ function niceTicks(min, max, count = 5) {
   return ticks.length ? ticks : [min];
 }
 
-function lineChart(container, labels, series) {
+function lineChart(container, labels, series, options = {}) {
   container.innerHTML = "";
+  if (!labels.length || !series.length) {
+    container.innerHTML = "<p class='status'>No values to chart.</p>";
+    return;
+  }
   const width = 560, height = 300;
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
@@ -360,12 +408,31 @@ function lineChart(container, labels, series) {
   series.forEach((s) => s.values.forEach((v) => { if (v < min) min = v; if (v > max) max = v; }));
   const pad = (max - min) * 0.08 || 1;
   min -= pad; max += pad;
-  const xScale = (i) => MARGIN.left + (i / Math.max(labels.length - 1, 1)) * plotW;
+  const numericX = Boolean(options.numericX) && labels.every((value) => Number.isFinite(Number(value)));
+  const xMin = numericX ? Number(labels[0]) : 0;
+  const xMax = numericX ? Number(labels.at(-1)) : labels.length - 1;
+  const xScale = (i) => {
+    const value = numericX ? Number(labels[i]) : i;
+    return MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW;
+  };
   const yScale = (v) => MARGIN.top + (1 - (v - min) / (max - min)) * plotH;
   const svg = createSvg(width, height);
-  const xTicks = niceTicks(0, labels.length - 1, 5).map((t) => [xScale(t), labels[Math.round(t)] ?? ""]);
-  const yTicks = niceTicks(min, max, 5).map((v) => [yScale(v), v.toFixed(0)]);
-  drawAxes(svg, plotW, plotH, xTicks, yTicks, "Period", "Wealth");
+  const xTicks = numericX
+    ? niceTicks(xMin, xMax, 5).map((value) => [MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW, value])
+    : niceTicks(0, labels.length - 1, 5).map((t) => [xScale(Math.round(t)), labels[Math.round(t)] ?? ""]);
+  const yFormatter = options.yFormatter || ((value) => value.toFixed(0));
+  const xFormatter = options.xFormatter || ((value) => String(value));
+  const formattedXTicks = xTicks.map(([x, label]) => [x, xFormatter(label)]);
+  const yTicks = niceTicks(min, max, 5).map((v) => [yScale(v), yFormatter(v)]);
+  drawAxes(
+    svg,
+    plotW,
+    plotH,
+    formattedXTicks,
+    yTicks,
+    options.xLabel || "Period",
+    options.yLabel || "Wealth",
+  );
   const crosshair = document.createElementNS(SVG_NS, "line");
   crosshair.setAttribute("y1", 0);
   crosshair.setAttribute("y2", plotH);
@@ -407,13 +474,119 @@ function lineChart(container, labels, series) {
   svg.addEventListener("mousemove", (e) => {
     const { x, px, py } = pointerPosition(e);
     const ratio = (x - MARGIN.left) / plotW;
-    const index = Math.max(0, Math.min(labels.length - 1, Math.round(ratio * (labels.length - 1))));
+    const index = numericX
+      ? labels.reduce((best, value, candidate) => (
+        Math.abs(Number(value) - (xMin + ratio * (xMax - xMin))) < Math.abs(Number(labels[best]) - (xMin + ratio * (xMax - xMin))) ? candidate : best
+      ), 0)
+      : Math.max(0, Math.min(labels.length - 1, Math.round(ratio * (labels.length - 1))));
     crosshair.setAttribute("x1", xScale(index));
     crosshair.setAttribute("x2", xScale(index));
     crosshair.setAttribute("opacity", "1");
-    const lines = [`<b>Period ${labels[index]}</b>`];
-    series.forEach((s) => lines.push(`<span style="color:${s.color}">${s.name}:</span> ${fmt(s.values[index])}`));
+    const title = options.tooltipTitle
+      ? options.tooltipTitle(labels[index])
+      : `${options.xLabel || "Period"} ${xFormatter(labels[index])}`;
+    const valueFormatter = options.valueFormatter || ((value) => fmt(value));
+    const lines = [`<b>${escapeHtml(title)}</b>`];
+    series.forEach((s) => lines.push(`<span style="color:${s.color}">${s.name}:</span> ${escapeHtml(valueFormatter(s.values[index]))}`));
     tooltip.show(px, py, lines.join("<br>"));
+  });
+  svg.addEventListener("mouseleave", () => { crosshair.setAttribute("opacity", "0"); tooltip.hide(); });
+}
+
+function bandChart(container, labels, band, options = {}) {
+  container.innerHTML = "";
+  if (!labels.length || !band.low?.length || !band.median?.length || !band.high?.length) {
+    container.innerHTML = "<p class='status'>No values to chart.</p>";
+    return;
+  }
+  const width = 560, height = 300;
+  const plotW = width - MARGIN.left - MARGIN.right;
+  const plotH = height - MARGIN.top - MARGIN.bottom;
+  const allValues = [...band.low, ...band.median, ...band.high].filter(Number.isFinite);
+  let min = Math.min(...allValues), max = Math.max(...allValues);
+  if (options.includeZero !== false) {
+    min = Math.min(min, 0);
+    max = Math.max(max, 0);
+  }
+  const pad = (max - min) * 0.08 || 0.01;
+  min -= pad;
+  max += pad;
+  const numericX = Boolean(options.numericX) && labels.every((value) => Number.isFinite(Number(value)));
+  const xMin = numericX ? Number(labels[0]) : 0;
+  const xMax = numericX ? Number(labels.at(-1)) : labels.length - 1;
+  const xScale = (index) => {
+    const value = numericX ? Number(labels[index]) : index;
+    return MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW;
+  };
+  const yScale = (value) => MARGIN.top + (1 - (value - min) / (max - min)) * plotH;
+  const yFormatter = options.yFormatter || ((value) => value.toFixed(2));
+  const xFormatter = options.xFormatter || ((value) => String(value));
+  const svg = createSvg(width, height);
+  const xTicks = numericX
+    ? niceTicks(xMin, xMax, 5).map((value) => [MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW, xFormatter(value)])
+    : [...new Set(niceTicks(0, labels.length - 1, 5).map(Math.round))]
+        .map((index) => [xScale(index), xFormatter(labels[index])]);
+  const yTicks = niceTicks(min, max, 5).map((value) => [yScale(value), yFormatter(value)]);
+  drawAxes(svg, plotW, plotH, xTicks, yTicks, options.xLabel || "Period", options.yLabel || "Value");
+
+  const area = document.createElementNS(SVG_NS, "polygon");
+  const upper = band.high.map((value, index) => `${xScale(index)},${yScale(value)}`);
+  const lower = band.low.map((value, index) => `${xScale(index)},${yScale(value)}`).reverse();
+  area.setAttribute("points", [...upper, ...lower].join(" "));
+  area.setAttribute("fill", band.color || "#b8d0d6");
+  area.setAttribute("opacity", "0.16");
+  svg.appendChild(area);
+  [
+    { values: band.low, opacity: "0.48", width: "1.2" },
+    { values: band.high, opacity: "0.48", width: "1.2" },
+    { values: band.median, opacity: "1", width: "2.4" },
+  ].forEach((series) => {
+    const path = document.createElementNS(SVG_NS, "polyline");
+    path.setAttribute("points", series.values.map((value, index) => `${xScale(index)},${yScale(value)}`).join(" "));
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", band.color || "#b8d0d6");
+    path.setAttribute("stroke-width", series.width);
+    path.setAttribute("opacity", series.opacity);
+    path.setAttribute("stroke-linejoin", "round");
+    svg.appendChild(path);
+  });
+  const crosshair = document.createElementNS(SVG_NS, "line");
+  crosshair.setAttribute("y1", 0);
+  crosshair.setAttribute("y2", plotH);
+  crosshair.setAttribute("stroke", "var(--crosshair)");
+  crosshair.setAttribute("stroke-dasharray", "4 4");
+  crosshair.setAttribute("opacity", "0");
+  svg.appendChild(crosshair);
+  container.appendChild(svg);
+
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  const labelsForBand = options.bandLabels || ["P05", "Median", "P95"];
+  legend.innerHTML = `<span class="legend-item"><span class="legend-band" style="background:${band.color || "#b8d0d6"}"></span>${escapeHtml(labelsForBand[0])}–${escapeHtml(labelsForBand[2])}</span><span class="legend-item"><span class="legend-line" style="background:${band.color || "#b8d0d6"}"></span>${escapeHtml(labelsForBand[1])}</span>`;
+  container.appendChild(legend);
+
+  const tooltip = attachTooltip(container);
+  const valueFormatter = options.valueFormatter || yFormatter;
+  svg.addEventListener("mousemove", (event) => {
+    const rect = svg.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * (width / rect.width);
+    const ratio = (x - MARGIN.left) / plotW;
+    const index = numericX
+      ? labels.reduce((best, value, candidate) => (
+        Math.abs(Number(value) - (xMin + ratio * (xMax - xMin))) < Math.abs(Number(labels[best]) - (xMin + ratio * (xMax - xMin))) ? candidate : best
+      ), 0)
+      : Math.max(0, Math.min(labels.length - 1, Math.round(ratio * (labels.length - 1))));
+    crosshair.setAttribute("x1", xScale(index));
+    crosshair.setAttribute("x2", xScale(index));
+    crosshair.setAttribute("opacity", "1");
+    const title = options.tooltipTitle
+      ? options.tooltipTitle(labels[index])
+      : `${options.xLabel || "Period"} ${xFormatter(labels[index])}`;
+    tooltip.show(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      `<b>${escapeHtml(title)}</b><br>${escapeHtml(labelsForBand[0])}: ${escapeHtml(valueFormatter(band.low[index]))}<br>${escapeHtml(labelsForBand[1])}: ${escapeHtml(valueFormatter(band.median[index]))}<br>${escapeHtml(labelsForBand[2])}: ${escapeHtml(valueFormatter(band.high[index]))}`,
+    );
   });
   svg.addEventListener("mouseleave", () => { crosshair.setAttribute("opacity", "0"); tooltip.hide(); });
 }
@@ -504,8 +677,12 @@ function heatmap(container, labels, values, domain, title) {
   container.appendChild(svg);
 }
 
-function scatterChart(container, points, xLabel, yLabel, legend = null) {
+function scatterChart(container, points, xLabel, yLabel, legend = null, options = {}) {
   container.innerHTML = "";
+  if (!points.length) {
+    container.innerHTML = "<p class='status'>No drawdown episodes to chart.</p>";
+    return;
+  }
   const width = 560, height = 300;
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
@@ -519,8 +696,10 @@ function scatterChart(container, points, xLabel, yLabel, legend = null) {
   const xScale = (v) => MARGIN.left + ((v - xMin) / (xMax - xMin)) * plotW;
   const yScale = (v) => MARGIN.top + (1 - (v - yMin) / (yMax - yMin)) * plotH;
   const svg = createSvg(width, height);
-  const xTicks = niceTicks(xMin, xMax, 5).map((v) => [xScale(v), v.toFixed(1)]);
-  const yTicks = niceTicks(yMin, yMax, 5).map((v) => [yScale(v), v.toFixed(1)]);
+  const xFormatter = options.xFormatter || ((value) => value.toFixed(1));
+  const yFormatter = options.yFormatter || ((value) => value.toFixed(1));
+  const xTicks = niceTicks(xMin, xMax, 5).map((v) => [xScale(v), xFormatter(v)]);
+  const yTicks = niceTicks(yMin, yMax, 5).map((v) => [yScale(v), yFormatter(v)]);
   drawAxes(svg, plotW, plotH, xTicks, yTicks, xLabel, yLabel);
   const tooltip = attachTooltip(container);
   points.forEach((p) => {
@@ -535,8 +714,8 @@ function scatterChart(container, points, xLabel, yLabel, legend = null) {
       circle.setAttribute("stroke", "#fff");
       circle.setAttribute("stroke-width", "1");
       const lines = p.label ? [`<b>${escapeHtml(p.label)}</b>`] : [];
-      lines.push(`${xLabel}: ${fmt(p.x, 2)}`);
-      lines.push(`${yLabel}: ${fmt(p.y, 2)}`);
+      lines.push(`${xLabel}: ${escapeHtml(options.xValueFormatter ? options.xValueFormatter(p.x) : fmt(p.x, 2))}`);
+      lines.push(`${yLabel}: ${escapeHtml(options.yValueFormatter ? options.yValueFormatter(p.y) : fmt(p.y, 2))}`);
       if (p.regime) lines.push(`<span style="color:${p.color}">${escapeHtml(p.regime)}</span>`);
       tooltip.show(xScale(p.x), yScale(p.y), lines.join("<br>"));
     });
@@ -562,8 +741,17 @@ function scatterChart(container, points, xLabel, yLabel, legend = null) {
 
 function histChart(container, values, bins = 45, label = "Terminal wealth", color = "#3b82f6") {
   container.innerHTML = "";
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  let min = Infinity;
+  let max = -Infinity;
+  values.forEach((value) => {
+    if (!Number.isFinite(value)) return;
+    min = Math.min(min, value);
+    max = Math.max(max, value);
+  });
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    container.innerHTML = "<p class='status'>No finite values to chart.</p>";
+    return;
+  }
   const width = 560, height = 280;
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
@@ -865,6 +1053,7 @@ function gatherLoadPayload() {
     payload.monthly = $("csv-monthly").checked;
     payload.growth_col = $("csv-growth").value || "growth";
     payload.inflation_col = $("csv-inflation").value || "inflation";
+    payload.rate_col = $("csv-rate").value.trim();
   }
   return payload;
 }
@@ -892,9 +1081,11 @@ function gatherScenario() {
     degrees_of_freedom: Number($("degrees-of-freedom").value),
     block_size: Number($("block-size").value),
     rebalance: $("rebalance").value,
-    cost_bps: $("rebalance").value === "legacy" ? 0 : Number($("cost-bps").value),
+    cost_bps: ["legacy", "buy_hold"].includes($("rebalance").value) ? 0 : Number($("cost-bps").value),
     contribution: Number($("contribution").value),
     withdrawal: Number($("withdrawal").value),
+    initial_value: Number($("initial-value").value),
+    target_wealth: Number($("target-wealth").value),
     expense_ratios: $("expense-ratios").value,
     leverage_multiple: Number($("leverage-multiple").value),
     financing_rate: Number($("financing-rate").value),
@@ -917,6 +1108,10 @@ function gatherScenario() {
     walk_forward: $("walk-forward").checked,
     probabilistic_regimes: quadrantModel && $("probabilistic-regimes").checked,
     regime_temperature: Number($("regime-temperature").value),
+    regime_smoothing_window: Number($("regime-smoothing-window").value),
+    regime_hysteresis: Number($("regime-hysteresis").value),
+    regime_confirmation_periods: Number($("regime-confirmation-periods").value),
+    duration_prior_strength: Number($("duration-prior-strength").value),
     mean_prior_strength: Number($("mean-prior-strength").value),
     parameter_draws: quadrantModel ? Number($("parameter-draws").value) : 0,
     parameter_block_size: Number($("parameter-block-size").value),
@@ -950,7 +1145,7 @@ function validateScenario() {
   }
   const leverage = Number($("leverage-multiple").value);
   const margin = Number($("maintenance-margin").value) / 100;
-  if (leverage > 1 && $("rebalance").value === "legacy") {
+  if (leverage > 1 && ["legacy", "buy_hold"].includes($("rebalance").value)) {
     errors.push("Leverage requires monthly, quarterly, or annual rebalancing.");
   }
   if (leverage === 1 && margin > 0) {
@@ -958,6 +1153,12 @@ function validateScenario() {
   }
   if (leverage > 1 && margin >= 1 / leverage) {
     errors.push("Maintenance margin must be below the initial equity margin for the selected leverage.");
+  }
+  if (!(Number($("initial-value").value) > 0)) {
+    errors.push("Initial portfolio value must be positive.");
+  }
+  if (!(Number($("target-wealth").value) > 0)) {
+    errors.push("Target wealth must be positive.");
   }
   const periods = Number($("periods").value);
   const paths = Number($("paths").value);
@@ -977,7 +1178,7 @@ function validateScenario() {
 function updateMethodologyControls() {
   const isHMM = $("model-kind").value === "hmm";
   const distribution = $("distribution").value;
-  const legacy = $("rebalance").value === "legacy";
+  const legacy = ["legacy", "buy_hold"].includes($("rebalance").value);
   $("quadrant-calibration").classList.toggle("hidden", isHMM);
   $("hmm-states-group").classList.toggle("hidden", !isHMM);
   $("threshold-window-group").classList.toggle("hidden", isHMM);
@@ -986,7 +1187,7 @@ function updateMethodologyControls() {
   $("correlation-override-controls").classList.toggle("hidden", isHMM);
   $("corr-blend-group").classList.toggle("hidden", isHMM);
   $("start-state-group").classList.toggle("hidden", isHMM);
-  $("min-duration-group").classList.toggle("hidden", isHMM);
+  $("min-duration-group").classList.toggle("hidden", $("duration-model").value !== "semi_markov");
   $("student-t-group").classList.toggle("hidden", distribution !== "student_t");
   $("block-size-group").classList.toggle("hidden", distribution !== "block_bootstrap");
   $("cost-bps").disabled = legacy;
@@ -1285,6 +1486,7 @@ function renderScenarioChips(payload, data) {
     if (Number(weight) > 0) chips.push(`${ticker} ${Number(weight).toFixed(0)}%`);
   });
   chips.push(`${payload.periods} periods x ${payload.paths} paths`);
+  chips.push(`Target ${formatMetricValue("target_wealth", payload.target_wealth, data.currency)}`);
   if (Number(payload.contribution) > 0) chips.push(`+${fmt(payload.contribution, 0)}/period`);
   if (Number(payload.withdrawal) > 0) chips.push(`−${fmt(payload.withdrawal, 0)}/period`);
   chips.push(data.terms === "real" ? "Real terms" : "Nominal");
@@ -1292,7 +1494,7 @@ function renderScenarioChips(payload, data) {
   chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
   chips.push(payload.model === "hmm" ? `HMM · ${payload.hmm_states} states` : "Quadrant model");
   chips.push(payload.duration_model === "semi_markov" ? "Semi-Markov durations" : "Markov durations");
-  if (payload.probabilistic_regimes) chips.push("Probabilistic regimes");
+  if (payload.probabilistic_regimes) chips.push("Soft moment weights");
   if (Number(payload.parameter_draws) > 0) chips.push(`${payload.parameter_draws} parameter draws`);
   if (payload.joint_macro) chips.push("Joint macro paths");
   if (payload.dynamic_correlation) chips.push("Dynamic dependence");
@@ -1307,9 +1509,11 @@ function renderMethodologyReport(data) {
   const safeguards = [
     [methodology.point_in_time, methodology.point_in_time ? "Point-in-time macro vintages" : "Latest-revised macro history"],
     [methodology.availability_aligned, methodology.availability_aligned ? "Release-calendar aligned" : "Period-lag approximation"],
-    [methodology.regime_assignment === "probabilistic", "Probabilistic regimes"],
+    [methodology.regime_assignment === "probabilistic", "Soft regime weights for return moments"],
+    [methodology.transition_estimator === "persistence_filtered_hard_labels", "Persistence-filtered transitions"],
     [Number(methodology.parameter_draws) > 0, `${Number(methodology.parameter_draws) || 0} parameter recalibrations`],
     [Boolean(methodology.joint_macro), "Joint macro/market paths"],
+    [methodology.rate_model === "joint_macro_path", "Stochastic policy-rate paths"],
     [Boolean(methodology.dynamic_correlation), "Asymmetric dynamic dependence"],
     [validationAvailable && validation.advantage_vs_student_t_mean > 0, validationAvailable
       ? (validation.advantage_vs_student_t_mean > 0 ? "Beats Student-t benchmark" : "Student-t benchmark not beaten")
@@ -1322,6 +1526,43 @@ function renderMethodologyReport(data) {
   $("methodology-badges").innerHTML = safeguards.map(([passed, label]) =>
     `<span class="methodology-badge ${passed ? "integrity-good" : "integrity-warn"}">${passed ? "✓" : "!"} ${escapeHtml(label)}</span>`
   ).join("");
+}
+
+function renderPersistence(data) {
+  const persistence = data.persistence;
+  $("persistence-panel").classList.toggle("hidden", !persistence);
+  if (!persistence) return;
+  const validation = data.validation?.summary || {};
+  const low = Boolean(
+    persistence.low_persistence_warning || Number(validation.actual_switches_per_decade || 0) > 24
+  );
+  const status = $("persistence-status");
+  status.textContent = low ? "Review persistence" : "Persistence calibrated";
+  status.classList.toggle("integrity-warn", low);
+  const metrics = [
+    ["Expected switches / decade", fmt(persistence.expected_switches_per_decade, 1)],
+    ["Simulated switches / decade", fmt(persistence.simulated_switches_per_decade, 1)],
+    ["OOS observed switches / decade", fmt(validation.actual_switches_per_decade, 1)],
+    ["Months between switches", fmt(persistence.expected_months_between_switches, 1)],
+  ];
+  $("persistence-summary").innerHTML = metrics.map(([label, value]) =>
+    `<div class="metric"><div class="label">${escapeHtml(label)}</div><div class="value">${escapeHtml(value)}</div></div>`
+  ).join("");
+  renderTable("persistence-table", {
+    columns: ["State", "Expected months", "Historical median", "Historical mean", "Episodes"],
+    rows: (persistence.states || []).map((state) => [
+      state.label,
+      fmt(state.expected_months, 1),
+      state.historical_median_months == null ? "—" : fmt(state.historical_median_months, 1),
+      state.historical_mean_months == null ? "—" : fmt(state.historical_mean_months, 1),
+      state.historical_episodes,
+    ]),
+  });
+  const warning = $("persistence-warning");
+  warning.classList.toggle("hidden", !low);
+  warning.textContent = low
+    ? "Persistence is unusually low. Review the macro smoothing, hysteresis, confirmation, or minimum-duration settings."
+    : "";
 }
 
 function renderParameterUncertainty(data) {
@@ -1355,7 +1596,7 @@ function renderMacroPaths(data) {
     const card = document.createElement("div");
     card.className = "card";
     const heading = document.createElement("h4");
-    heading.textContent = name;
+    heading.textContent = name === "interest_rate" ? "Short rate (Fed funds)" : name;
     const chart = document.createElement("div");
     chart.className = "chart";
     card.append(heading, chart);
@@ -1548,16 +1789,125 @@ function renderRepresentativeScenarios(data) {
   if (initial) render(initial);
 }
 
+function renderPlanningCharts(data) {
+  const goal = data.goal_curve;
+  if (goal?.targets?.length) {
+    lineChart(
+      $("chart-goal-probability"),
+      goal.targets,
+      [{ name: "Success probability", color: "#a78bfa", values: goal.success_probability }],
+      {
+        numericX: true,
+        xLabel: "Target wealth",
+        yLabel: "Probability",
+        xFormatter: (value) => compactCurrency(value, data.currency),
+        yFormatter: (value) => pct(value, 0),
+        valueFormatter: (value) => pct(value, 1),
+        tooltipTitle: (value) => `Target ${formatMetricValue("target_wealth", value, data.currency)}`,
+      },
+    );
+  }
+
+  const horizons = data.rolling_horizons;
+  if (horizons?.months?.length) {
+    bandChart(
+      $("chart-rolling-horizon"),
+      horizons.months,
+      {
+        low: horizons.p05,
+        median: horizons.median,
+        high: horizons.p95,
+        color: "#6fa58c",
+      },
+      {
+        numericX: true,
+        xLabel: "Holding period",
+        yLabel: "Annualized return",
+        xFormatter: (months) => `${Number(months) / 12}y`,
+        yFormatter: (value) => pct(value, 0),
+        valueFormatter: (value) => pct(value, 1),
+        tooltipTitle: (months) => `${Number(months) / 12}-year rolling windows`,
+      },
+    );
+    const sampled = Number(horizons.sample_paths || 0) < Number(horizons.total_paths || 0);
+    $("rolling-horizon-caption").textContent =
+      `Annualized returns across every available rolling window${sampled ? ` using ${Number(horizons.sample_paths).toLocaleString()} representative paths` : ""}.`;
+  }
+
+  const drawdown = data.drawdown_fan;
+  if (drawdown?.periods?.length) {
+    bandChart(
+      $("chart-drawdown-fan"),
+      drawdown.periods,
+      { low: drawdown.p05, median: drawdown.median, high: drawdown.p95, color: "#d77b72" },
+      {
+        xLabel: "Simulation month",
+        yLabel: "Below peak",
+        yFormatter: (value) => pct(value, 0),
+        valueFormatter: (value) => pct(value, 1),
+        bandLabels: ["P05 deeper", "Median", "P95 shallower"],
+      },
+    );
+  }
+
+  const episodes = data.drawdown_episodes;
+  if (episodes) {
+    scatterChart(
+      $("chart-drawdown-episodes"),
+      (episodes.points || []).map((point) => ({
+        x: point.duration_months,
+        y: point.depth,
+        color: point.recovered ? "#6fa58c" : "#d97706",
+        label: `Path ${Number(point.path) + 1}`,
+        regime: point.recovered ? "Recovered" : "Still underwater",
+      })),
+      "Duration",
+      "Maximum depth",
+      [
+        { label: "Recovered", color: "#6fa58c" },
+        { label: "Still underwater", color: "#d97706" },
+      ],
+      {
+        xFormatter: (value) => `${value.toFixed(0)}m`,
+        yFormatter: (value) => pct(value, 0),
+        xValueFormatter: (value) => `${value.toFixed(0)} months`,
+        yValueFormatter: (value) => pct(value, 1),
+      },
+    );
+    $("drawdown-episode-caption").textContent =
+      `Each point is one drawdown episode from ${Number(episodes.source_paths || 0).toLocaleString()} representative paths${episodes.sampled ? "; the display is deterministically bounded" : ""}.`;
+  }
+
+  const recovery = data.recovery_required;
+  if (recovery?.periods?.length) {
+    bandChart(
+      $("chart-recovery-required"),
+      recovery.periods,
+      { low: recovery.p05, median: recovery.median, high: recovery.p95, color: "#d7a86e" },
+      {
+        xLabel: "Simulation month",
+        yLabel: "Required gain",
+        yFormatter: (value) => pct(value, 0),
+        valueFormatter: (value) => pct(value, 1),
+      },
+    );
+    $("recovery-required-caption").textContent =
+      `Gain required to regain the previous peak from the current drawdown${recovery.capped ? `; extreme values are capped at ${pct(recovery.cap, 0)} for readability` : ""}.`;
+  }
+}
+
 function renderDecisionAnalytics(data) {
   if (data.success) {
     lineChart($("chart-success"), data.success.periods, [
       { name: "Survival", color: "#a8b79b", values: data.success.survival },
       { name: "Preservation", color: "#b8d0d6", values: data.success.preservation },
       { name: "Profit", color: "#d7a86e", values: data.success.profit },
+      { name: "Target", color: "#a78bfa", values: data.success.target },
     ]);
   }
   renderRepresentativeScenarios(data);
   renderMetricExplorer(data);
+  renderPlanningCharts(data);
   const sequence = data.sequence_risk;
   $("sequence-risk-card").classList.toggle("hidden", !sequence);
   if (sequence) {
@@ -1588,8 +1938,10 @@ function renderResults(data) {
   renderScenarioChips(state.lastSimPayload, data);
   renderMethodologyReport(data);
   renderParameterUncertainty(data);
+  renderPersistence(data);
   $("macro-chart-title").textContent = data.model_kind === "hmm" ? "HMM states / macro history" : "Macro quadrants";
   renderMetricGrid("metric-grid", METRIC_FIELDS, data);
+  renderMetricGrid("goal-metric-grid", GOAL_METRIC_FIELDS, data);
   const hasCashFlows = Number(data.summary.periodic_contribution || 0) > 0 || Number(data.summary.periodic_withdrawal || 0) > 0;
   $("cash-flow-performance").classList.toggle("hidden", !hasCashFlows);
   if (hasCashFlows) renderMetricGrid("flow-metric-grid", FLOW_METRIC_FIELDS, data);
@@ -1688,8 +2040,22 @@ function renderResults(data) {
       `Advantage vs Student-t: ${summary.advantage_vs_student_t_mean > 0 ? "+" : ""}${fmt(summary.advantage_vs_student_t_mean, 4)} log-score/period · ` +
       `HAC t-stat: ${fmt(summary.dm_t_statistic_vs_student_t, 2)} · ` +
       `Brier: ${fmt(summary.regime_brier_score, 3)} vs ${fmt(summary.benchmark_brier_score, 3)} benchmark · ` +
+      `Switches/decade: ${fmt(summary.predicted_switches_per_decade, 1)} predicted vs ${fmt(summary.actual_switches_per_decade, 1)} observed · ` +
+      `Duration log score: ${fmt(summary.duration_log_score_mean, 3)} · ` +
       `VaR breaches: ${pct(summary.var_95_breach_rate)} · ${summary.splits} splits.`;
-    renderTable("validation-table", { columns: validation.columns, rows: validation.rows });
+    const preferredColumns = [
+      "date", "actual_state", "predicted_state", "actual_switch",
+      "predicted_switch_probability", "transition_brier_score",
+      "transition_log_score", "current_regime_age", "completed_duration",
+      "duration_log_score", "vintage_expected_duration",
+    ];
+    const indexes = preferredColumns
+      .map((column) => validation.columns.indexOf(column))
+      .filter((index) => index >= 0);
+    renderTable("validation-table", {
+      columns: indexes.map((index) => validation.columns[index]),
+      rows: validation.rows.map((row) => indexes.map((index) => row[index])),
+    });
   }
   state.diagnostics = diagnostics;
   $("diagnostics-empty").classList.add("hidden");
@@ -1883,19 +2249,22 @@ async function onDownloadWealth() {
 const CONTROL_IDS = [
   "yahoo-tickers", "yahoo-start", "yahoo-end", "yahoo-proxies", "synthetic-seed",
   "synthetic-method", "synthetic-categories", "macro-vintage",
-  "csv-growth", "csv-inflation", "base-currency", "currency-map", "corr-blend",
+  "csv-growth", "csv-inflation", "csv-rate", "base-currency", "currency-map", "corr-blend",
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
   "macro-lag", "transition-uncertainty", "periods", "paths", "workers", "seed", "distribution",
   "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "contribution", "withdrawal",
+  "initial-value", "target-wealth",
   "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate",
   "financing-inflation-sensitivity", "maintenance-margin",
   "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
-  "regime-temperature", "mean-prior-strength", "parameter-draws", "parameter-block-size",
+  "regime-temperature", "regime-smoothing-window", "regime-hysteresis",
+  "regime-confirmation-periods", "duration-prior-strength", "mean-prior-strength",
+  "parameter-draws", "parameter-block-size",
   "macro-transition-weight", "dcc-alpha", "dcc-beta", "dcc-asymmetry",
 ];
 
 function saveControls() {
-  const data = { schemaVersion: 3 };
+  const data = { schemaVersion: 4 };
   CONTROL_IDS.forEach((id) => {
     const el = $(id);
     if (el) data[id] = el.value;
@@ -1947,6 +2316,9 @@ function restoreControls() {
       }
       if (Number(data.schemaVersion || 0) < 3 && String(data.paths) === "100000" && String(data.periods) === "60") {
         data.periods = "120";
+      }
+      if (Number(data.schemaVersion || 0) < 4 && String(data["min-regime-duration"]) === "3") {
+        data["min-regime-duration"] = "5";
       }
       applyControlSnapshot(data);
     }
@@ -2079,6 +2451,11 @@ function pairedSummaryRows(portfolioA, portfolioB) {
     ["Annualized volatility", "annualized_volatility", false],
     ["Sharpe ratio", "sharpe_ratio", true],
     ["Probability of loss", "probability_of_loss", false],
+    ["Target success", "goal_success_probability", true],
+    ["Expected target shortfall", "expected_goal_shortfall", false],
+    ["Risk of ruin", "risk_of_ruin", false],
+    ["Omega ratio", "omega_ratio", true],
+    ["P95 time underwater", "max_underwater_months_p95", false],
     ["Worst max drawdown", "max_drawdown_worst", false],
   ].map(([label, key, higherIsBetter]) => [label, portfolioA.summary[key], portfolioB.summary[key], portfolioB.summary[key] - portfolioA.summary[key], key, higherIsBetter]);
 }
@@ -2088,7 +2465,36 @@ function renderPairedComparison(portfolioB) {
   const count = Math.min(portfolioA.terminal.length, portfolioB.terminal.length);
   const differences = portfolioB.terminal.slice(0, count).map((value, index) => value - portfolioA.terminal[index]);
   const winRate = differences.filter((value) => value > 0).length / Math.max(count, 1);
-  $("paired-win-rate").textContent = `Portfolio B wins ${pct(winRate, 1)} of paths`;
+  const totalPaths = Math.min(
+    Number(portfolioA.reporting_sample?.total_paths || count),
+    Number(portfolioB.reporting_sample?.total_paths || count),
+  );
+  const sampleNote = count < totalPaths
+    ? ` · deterministic sample ${count.toLocaleString()} of ${totalPaths.toLocaleString()}`
+    : "";
+  $("paired-win-rate").textContent = `Portfolio B wins ${pct(winRate, 1)} of paired paths${sampleNote}`;
+  const meanDifference = differences.reduce((sum, value) => sum + value, 0) / Math.max(count, 1);
+  const variance = differences.reduce((sum, value) => sum + (value - meanDifference) ** 2, 0) / Math.max(count - 1, 1);
+  const margin = 1.96 * Math.sqrt(variance / Math.max(count, 1));
+  const conditionalLosses = differences.filter((value) => value < 0).map((value) => -value);
+  const conditionalRegret = conditionalLosses.reduce((sum, value) => sum + value, 0) / Math.max(conditionalLosses.length, 1);
+  const sortedA = [...portfolioA.terminal].sort((a, b) => a - b);
+  const sortedB = [...portfolioB.terminal].sort((a, b) => a - b);
+  const quantileChecks = Array.from({ length: 101 }, (_, index) => {
+    const probability = index / 100;
+    return quantileFromSorted(sortedB, probability) >= quantileFromSorted(sortedA, probability);
+  });
+  const dominanceShare = quantileChecks.filter(Boolean).length / quantileChecks.length;
+  const evidence = [
+    ["Mean paired difference", formatMetricValue("p50", meanDifference, portfolioA.currency)],
+    ["95% Monte Carlo CI", `${formatMetricValue("p50", meanDifference - margin, portfolioA.currency)} to ${formatMetricValue("p50", meanDifference + margin, portfolioA.currency)}`],
+    ["Median paired difference", formatMetricValue("p50", sampleQuantile(differences, 0.5), portfolioA.currency)],
+    ["B higher by quantile", pct(dominanceShare, 0)],
+    ["Conditional regret", formatMetricValue("p50", conditionalRegret, portfolioA.currency)],
+  ];
+  $("paired-evidence").innerHTML = evidence.map(([label, value]) =>
+    `<div class="uncertainty-item"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`
+  ).join("");
   const rows = pairedSummaryRows(portfolioA, portfolioB).map(([label, a, b, difference, key, higherIsBetter]) => {
     const percentKey = PERCENT_METRICS.has(key);
     const formatter = percentKey ? (value) => pct(value, 2) : (value) => formatMetricValue(key, value, portfolioA.currency);
@@ -2099,9 +2505,31 @@ function renderPairedComparison(portfolioB) {
   $("paired-summary").innerHTML = `<table><thead><tr><th>Metric</th><th>Portfolio A</th><th>Portfolio B</th><th>B − A</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
   histChart($("chart-paired-difference"), differences, 45, "Terminal wealth difference", "#a8b79b");
   lineChart($("chart-paired-wealth"), portfolioA.wealth.periods, [
-    { name: "Portfolio A median", color: "#b8d0d6", values: portfolioA.wealth.median },
-    { name: "Portfolio B median", color: "#d7a86e", values: portfolioB.wealth.median },
+    { name: "A P05", color: "#78909c", values: portfolioA.wealth.p05 },
+    { name: "A median", color: "#b8d0d6", values: portfolioA.wealth.median },
+    { name: "A P95", color: "#d7e4e7", values: portfolioA.wealth.p95 },
+    { name: "B P05", color: "#a56f3f", values: portfolioB.wealth.p05 },
+    { name: "B median", color: "#d7a86e", values: portfolioB.wealth.median },
+    { name: "B P95", color: "#f0cf9f", values: portfolioB.wealth.p95 },
   ]);
+  const percentileLabels = Array.from({ length: 51 }, (_, index) => index * 2);
+  lineChart(
+    $("chart-paired-quantiles"),
+    percentileLabels,
+    [
+      { name: "Portfolio A", color: "#b8d0d6", values: percentileLabels.map((value) => quantileFromSorted(sortedA, value / 100)) },
+      { name: "Portfolio B", color: "#d7a86e", values: percentileLabels.map((value) => quantileFromSorted(sortedB, value / 100)) },
+    ],
+    {
+      numericX: true,
+      xLabel: "Terminal percentile",
+      yLabel: "Terminal wealth",
+      xFormatter: (value) => `${value}%`,
+      yFormatter: (value) => compactCurrency(value, portfolioA.currency),
+      valueFormatter: (value) => formatMetricValue("p50", value, portfolioA.currency),
+      tooltipTitle: (value) => `${value}th percentile`,
+    },
+  );
   $("paired-results").classList.remove("hidden");
   state.pairedResults = portfolioB;
 }
@@ -2132,7 +2560,7 @@ async function onRebalancingSensitivity() {
   const button = $("rebalance-sensitivity-btn");
   const status = $("rebalance-status");
   button.disabled = true;
-  const schedules = [["Monthly", "monthly"], ["Quarterly", "quarterly"], ["Annual", "annual"], ["Buy and hold", "legacy"]];
+  const schedules = [["Monthly", "monthly"], ["Quarterly", "quarterly"], ["Annual", "annual"], ["Buy and hold", "buy_hold"]];
   const results = [];
   showOverlay("Analyzing rebalancing...", "Running paired schedule 1 of 4");
   try {
@@ -2142,7 +2570,7 @@ async function onRebalancingSensitivity() {
       const payload = {
         ...state.lastSimPayload,
         rebalance,
-        cost_bps: rebalance === "legacy" ? 0 : state.lastSimPayload.cost_bps,
+        cost_bps: rebalance === "buy_hold" ? 0 : state.lastSimPayload.cost_bps,
         paths: Math.min(Number(state.lastSimPayload.paths), 1_000),
         parameter_draws: 0,
         walk_forward: false,

@@ -40,6 +40,7 @@ def bootstrap_quadrant_models(
     random_seed: int | None = None,
     growth_col: str = "growth",
     inflation_col: str = "inflation",
+    rate_col: str | None = "interest_rate",
     growth_threshold: ThresholdSpec = "median",
     inflation_threshold: ThresholdSpec = "median",
     transition_smoothing: float = 1.0,
@@ -49,9 +50,13 @@ def bootstrap_quadrant_models(
     override_weight: float = 1.0,
     macro_lag_periods: int = 0,
     threshold_window: int | None = None,
-    min_regime_duration: int = 1,
+    min_regime_duration: int = 5,
     probabilistic_regimes: bool = False,
     regime_temperature: float = 0.35,
+    regime_smoothing_window: int = 3,
+    regime_hysteresis: float = 0.15,
+    regime_confirmation_periods: int = 2,
+    duration_prior_strength: float = 8.0,
     mean_prior_strength: float = 24.0,
     joint_macro: bool = False,
 ) -> list[ScenarioModel]:
@@ -67,7 +72,11 @@ def bootstrap_quadrant_models(
         return []
     if block_size <= 0:
         raise ValueError("block_size must be positive.")
-    selected_macro = macro.loc[:, [growth_col, inflation_col]].sort_index()
+    macro_columns = [growth_col, inflation_col]
+    active_rate_col = rate_col if rate_col and rate_col in macro.columns else None
+    if active_rate_col is not None and active_rate_col not in macro_columns:
+        macro_columns.append(active_rate_col)
+    selected_macro = macro.loc[:, macro_columns].sort_index()
     aligned_macro = selected_macro.reindex(returns.sort_index().index, method="ffill")
     if macro_lag_periods:
         aligned_macro = aligned_macro.shift(int(macro_lag_periods))
@@ -85,13 +94,8 @@ def bootstrap_quadrant_models(
         sampled = panel.iloc[indexes].copy()
         sampled.index = artificial_index
         sampled_returns = sampled.loc[:, return_columns]
-        sampled_macro = sampled.loc[
-            :, [f"__macro_{growth_col}", f"__macro_{inflation_col}"]
-        ].rename(
-            columns={
-                f"__macro_{growth_col}": growth_col,
-                f"__macro_{inflation_col}": inflation_col,
-            }
+        sampled_macro = sampled.loc[:, [f"__macro_{column}" for column in macro_columns]].rename(
+            columns={f"__macro_{column}": column for column in macro_columns}
         )
         sampled_macro.attrs.update(
             {
@@ -105,6 +109,7 @@ def bootstrap_quadrant_models(
             sampled_macro,
             growth_col=growth_col,
             inflation_col=inflation_col,
+            rate_col=active_rate_col,
             growth_threshold=growth_threshold,
             inflation_threshold=inflation_threshold,
             transition_smoothing=transition_smoothing,
@@ -117,6 +122,10 @@ def bootstrap_quadrant_models(
             min_regime_duration=min_regime_duration,
             probabilistic_regimes=probabilistic_regimes,
             regime_temperature=regime_temperature,
+            regime_smoothing_window=regime_smoothing_window,
+            regime_hysteresis=regime_hysteresis,
+            regime_confirmation_periods=regime_confirmation_periods,
+            duration_prior_strength=duration_prior_strength,
             mean_prior_strength=mean_prior_strength,
             joint_macro=joint_macro,
         )

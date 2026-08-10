@@ -19,7 +19,11 @@ from numbers import Real
 import numpy as np
 import pandas as pd
 
-from mc_quadrants.regimes import REGIME_ORDER, ThresholdSpec, classify_quadrants
+from mc_quadrants.regimes import (
+    REGIME_ORDER,
+    ThresholdSpec,
+    classify_persistent_quadrants,
+)
 
 ASSET_CATEGORIES: dict[str, str] = {
     "EQUITY": "Equity",
@@ -198,13 +202,16 @@ def simulate_regime_conditioned_pre_inception_returns(
 
     numeric_both = isinstance(growth_threshold, Real) and isinstance(inflation_threshold, Real)
     classification_window = None if numeric_both else int(threshold_window or _CAUSAL_WINDOW_DEFAULT)
-    regimes = classify_quadrants(
+    regimes = classify_persistent_quadrants(
         macro,
         growth_col=growth_col,
         inflation_col=inflation_col,
         growth_threshold=growth_threshold,
         inflation_threshold=inflation_threshold,
         threshold_window=classification_window,
+        smoothing_window=3,
+        hysteresis=0.15,
+        confirmation_periods=2,
     )
     governing = regimes.sort_index().shift(macro_lag_periods)
 

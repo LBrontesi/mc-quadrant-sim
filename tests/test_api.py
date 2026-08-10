@@ -24,6 +24,7 @@ def _csv_payload(**overrides):
         {
             "growth": rng.normal(0.0, 0.6, len(dates)),
             "inflation": rng.normal(0.0, 0.4, len(dates)),
+            "interest_rate": np.clip(rng.normal(3.0, 1.0, len(dates)), 0.0, None),
         },
         index=pd.Index(dates, name="Date"),
     )
@@ -35,11 +36,14 @@ def _csv_payload(**overrides):
         "monthly": True,
         "growth_col": "growth",
         "inflation_col": "inflation",
+        "rate_col": "interest_rate",
         "selected_tickers": ["SPY", "IEF", "GLD", "DBC"],
         "weights": {"SPY": 40, "IEF": 20, "GLD": 10, "DBC": 10},
         "periods": 12,
         "paths": 50,
         "random_seed": 7,
+        "initial_value": 100.0,
+        "target_wealth": 200.0,
         "base_currency": "USD",
         "currency_map": "",
         "growth_threshold": "median",
@@ -121,7 +125,8 @@ def test_load_response_has_coverage_and_preview():
     response = api.build_load_response(macro, returns, tickers, growth_col, inflation_col, message)
     assert response["ok"] is True
     assert response["coverage"]["SPY"]["first"] == "2010-02-28"
-    assert response["macro"]["columns"] == ["Date", "growth", "inflation"]
+    assert response["macro"]["columns"] == ["Date", "growth", "inflation", "interest_rate"]
+    assert response["rate_col"] == "interest_rate"
     assert response["returns"]["columns"] == ["Date"] + tickers
 
 
@@ -150,9 +155,17 @@ def test_simulate_reports_real_terms_with_inflation():
 
 
 def test_scenario_kwargs_include_long_term_fields():
-    kwargs = api.scenario_kwargs({"weights": {"SPY": 100}, "risk_free_rate": 2.0, "annual_inflation": 3.0})
+    kwargs = api.scenario_kwargs(
+        {
+            "weights": {"SPY": 100},
+            "risk_free_rate": 2.0,
+            "annual_inflation": 3.0,
+            "initial_value": 250.0,
+        }
+    )
     assert kwargs["risk_free_rate"] == pytest.approx(0.02)
     assert kwargs["annual_inflation"] == pytest.approx(0.03)
+    assert kwargs["initial_value"] == pytest.approx(250.0)
 
 
 def test_scenario_kwargs_include_periodic_cash_flows():
@@ -169,6 +182,11 @@ def test_scenario_kwargs_include_methodology_options():
             "hmm_states": 3,
             "threshold_window": 12,
             "duration_model": "semi_markov",
+            "min_regime_duration": 5,
+            "regime_smoothing_window": 3,
+            "regime_hysteresis": 0.2,
+            "regime_confirmation_periods": 2,
+            "duration_prior_strength": 10,
             "garch": True,
             "garch_alpha": 0.2,
             "garch_beta": 0.7,
@@ -179,6 +197,11 @@ def test_scenario_kwargs_include_methodology_options():
     assert kwargs["hmm_states"] == 3
     assert kwargs["threshold_window"] == 12
     assert kwargs["duration_model"] == "semi_markov"
+    assert kwargs["min_regime_duration"] == 5
+    assert kwargs["regime_smoothing_window"] == 3
+    assert kwargs["regime_hysteresis"] == pytest.approx(0.2)
+    assert kwargs["regime_confirmation_periods"] == 2
+    assert kwargs["duration_prior_strength"] == pytest.approx(10)
     assert kwargs["garch"] is True
     assert kwargs["garch_alpha"] == pytest.approx(0.2)
     assert kwargs["walk_forward"] is False
@@ -194,6 +217,8 @@ def test_scenario_kwargs_reject_invalid_methodology_options():
         api.scenario_kwargs({"weights": {"SPY": 100}, "hmm_states": 1})
     with pytest.raises(ValueError, match="garch_alpha"):
         api.scenario_kwargs({"weights": {"SPY": 100}, "garch": True, "garch_alpha": 0.5, "garch_beta": 0.6})
+    with pytest.raises(ValueError, match="regime_smoothing_window"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "regime_smoothing_window": 0})
 
 
 def test_scenario_kwargs_reject_incompatible_settings():
@@ -203,12 +228,63 @@ def test_scenario_kwargs_reject_incompatible_settings():
         )
     with pytest.raises(ValueError, match="transaction costs"):
         api.scenario_kwargs({"weights": {"SPY": 100}, "rebalance": "legacy", "cost_bps": 10})
+    with pytest.raises(ValueError, match="transaction costs"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "rebalance": "buy_hold", "cost_bps": 10})
+
+
+def test_scenario_kwargs_support_true_buy_and_hold():
+    kwargs = api.scenario_kwargs({"weights": {"SPY": 60, "IEF": 40}, "rebalance": "buy_hold"})
+
+    assert kwargs["rebalance_frequency"] == 0
+    assert kwargs["transaction_cost_bps"] == 0
 
 
 def test_metric_formatter_respects_units():
     assert api.format_metric_value("probability_of_loss", 0.125) == "12.50%"
     assert api.format_metric_value("p50", 1234.5, "EUR") == "EUR 1,234.50"
+    assert api.format_metric_value("target_wealth", 500.0, "EUR") == "EUR 500.00"
+    assert api.format_metric_value("recovery_months_p95", 14.25) == "14.2 mo"
     assert api.format_metric_value("sharpe_ratio", 1.234) == "1.23"
+
+
+def test_scenario_kwargs_reject_invalid_wealth_targets():
+    with pytest.raises(ValueError, match="initial_value"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "initial_value": 0})
+    with pytest.raises(ValueError, match="target_wealth"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "target_wealth": float("inf")})
+
+
+def test_drawdown_duration_metrics_track_recovery_episodes():
+    values = np.array(
+        [
+            [90.0, 110.0],
+            [95.0, 90.0],
+            [105.0, 100.0],
+            [110.0, 120.0],
+        ]
+    )
+
+    metrics = api._drawdown_duration_metrics(values, initial_value=100.0)
+
+    assert metrics["max_underwater_months_mean"] == pytest.approx(2.0)
+    assert metrics["max_underwater_months_p95"] == pytest.approx(2.0)
+    assert metrics["recovery_months_median"] == pytest.approx(2.0)
+    assert metrics["recovery_months_p95"] == pytest.approx(2.0)
+    assert metrics["unrecovered_at_horizon"] == pytest.approx(0.0)
+
+
+def test_goal_probability_curve_uses_terminal_distribution():
+    curve = api._goal_probability_curve(
+        np.array([50.0, 100.0, 150.0]),
+        initial_value=100.0,
+        target_wealth=125.0,
+    )
+
+    target_index = curve["targets"].index(125.0)
+    initial_index = curve["targets"].index(100.0)
+    assert curve["success_probability"][target_index] == pytest.approx(1 / 3)
+    assert curve["success_probability"][initial_index] == pytest.approx(2 / 3)
+    assert np.all(np.diff(curve["success_probability"]) <= 0)
 
 
 def test_scenario_kwargs_parse_fees_and_leverage():
@@ -245,7 +321,12 @@ def test_simulate_response_reports_model_kind_and_validation():
     assert validation is not None
     assert validation["summary"]["splits"] > 0
     assert "advantage_mean" in validation["summary"]
+    assert "predicted_switches_per_decade" in validation["summary"]
     assert validation["rows"]
+    persistence = response["persistence"]
+    assert persistence["expected_switches_per_decade"] >= 0
+    assert len(persistence["states"]) == 4
+    assert all(state["expected_months"] >= 5 for state in persistence["states"])
 
 
 def test_simulate_reports_cash_flow_summary():
@@ -392,9 +473,22 @@ def test_simulate_csv_returns_full_result():
     assert len(response["monthly_returns"]) == 12
     assert np.isfinite(response["monthly_returns"]).all()
     assert len(response["terminal"]) == 50
+    assert response["reporting_sample"] == {
+        "paths": 50,
+        "total_paths": 50,
+        "sampled": False,
+    }
     assert len(response["transition"]["values"]) == 4
     assert response["currency"] == "USD"
     assert response["selected_tickers"] == ["SPY", "IEF", "GLD", "DBC"]
+
+
+def test_reporting_indices_bound_browser_payload_and_preserve_endpoints():
+    indices = api._reporting_indices(120_000)
+
+    assert len(indices) == api.MAX_REPORTING_PATHS
+    assert indices[0] == 0
+    assert indices[-1] == 119_999
 
 
 def test_simulate_response_separates_model_and_market_uncertainty():
@@ -435,12 +529,42 @@ def test_simulate_reports_regime_timelines_for_percentile_paths():
 
 def test_simulate_reports_decision_analytics_and_sequence_risk():
     response = api.build_simulate_response(
-        _csv_payload(periods=24, paths=80, contribution=10.0, walk_forward=False)
+        _csv_payload(
+            periods=24,
+            paths=80,
+            contribution=10.0,
+            target_wealth=250.0,
+            walk_forward=False,
+        )
     )
 
-    assert set(response["success"]) == {"periods", "survival", "preservation", "profit"}
+    assert set(response["success"]) == {"periods", "survival", "preservation", "profit", "target"}
     assert len(response["success"]["survival"]) == 24
     assert all(0 <= probability <= 1 for probability in response["success"]["profit"])
+    assert all(0 <= probability <= 1 for probability in response["success"]["target"])
+    decision = response["decision_metrics"]
+    assert decision["target_wealth"] == pytest.approx(250.0)
+    assert 0 <= decision["goal_success_probability"] <= 1
+    assert decision["expected_goal_shortfall"] >= 0
+    assert 0 <= decision["risk_of_ruin"] <= 1
+    assert decision["omega_ratio"] >= 0
+    assert 0 <= decision["max_underwater_months_p95"] <= 24
+    assert 0 <= decision["recovery_months_p95"] <= 24
+    assert -1 <= decision["worst_rolling_return_p05"]
+    assert response["summary"]["goal_success_probability"] == pytest.approx(
+        decision["goal_success_probability"]
+    )
+    assert len(response["drawdown_fan"]["periods"]) == 24
+    assert len(response["drawdown_fan"]["p05"]) == 24
+    assert len(response["recovery_required"]["median"]) == 24
+    assert response["drawdown_episodes"]["source_paths"] == 80
+    assert response["drawdown_episodes"]["points"]
+    assert response["rolling_horizons"]["months"] == [12, 24]
+    assert len(response["rolling_horizons"]["p05"]) == 2
+    assert response["goal_curve"]["targets"]
+    assert len(response["goal_curve"]["targets"]) == len(
+        response["goal_curve"]["success_probability"]
+    )
     assert {scenario["label"] for scenario in response["representative_scenarios"]} == {
         "worst",
         "p05",

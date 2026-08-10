@@ -123,6 +123,50 @@ def test_rebalancing_transaction_costs_reduce_wealth():
     assert with_costs.iloc[-1, 0] < without_costs.iloc[-1, 0]
 
 
+def test_buy_and_hold_tracks_drifting_asset_holdings():
+    result = SimulationResult(
+        returns=np.array(
+            [
+                [[0.10, 0.00]],
+                [[0.10, 0.00]],
+            ]
+        ),
+        regimes=np.empty((2, 1), dtype=object),
+        assets=["Stocks", "Bonds"],
+        states=[],
+        frequency="M",
+    )
+
+    buy_and_hold = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        rebalance_frequency=0,
+    )
+    legacy = simulate_portfolio_paths(result, {"Stocks": 0.5, "Bonds": 0.5})
+
+    assert buy_and_hold.iloc[-1, 0] == pytest.approx(50.0 * np.exp(0.20) + 50.0)
+    assert buy_and_hold.iloc[-1, 0] != pytest.approx(legacy.iloc[-1, 0])
+
+
+def test_buy_and_hold_rejects_rebalancing_costs_and_leverage():
+    result = _two_period_result()
+
+    with pytest.raises(ValueError, match="Transaction costs require"):
+        simulate_portfolio_paths(
+            result,
+            {"Stocks": 0.5, "Bonds": 0.5},
+            rebalance_frequency=0,
+            transaction_cost_bps=10,
+        )
+    with pytest.raises(ValueError, match="Leverage and financing require"):
+        simulate_portfolio_paths(
+            result,
+            {"Stocks": 0.5, "Bonds": 0.5},
+            rebalance_frequency=0,
+            leverage_multiple=2.0,
+        )
+
+
 def _two_period_result() -> SimulationResult:
     return SimulationResult(
         returns=np.array(
@@ -285,6 +329,34 @@ def test_state_dependent_financing_rate_charges_by_regime():
     assert expected_hi < expected_lo
 
 
+def test_stochastic_short_rate_and_inflation_drive_financing_by_path():
+    result = SimulationResult(
+        returns=np.zeros((1, 2, 1)),
+        regimes=np.empty((1, 2), dtype=object),
+        assets=["Stocks"],
+        states=[],
+        frequency="M",
+    )
+
+    wealth = simulate_portfolio_paths(
+        result,
+        {"Stocks": 1.0},
+        rebalance_frequency=1,
+        leverage_multiple=2.0,
+        financing_rate=0.01,
+        financing_inflation_sensitivity=0.5,
+        financing_rate_paths=np.array([[0.02, 0.08]]),
+        financing_inflation_paths=np.array([[0.02, 0.06]]),
+    )
+
+    low_rate = 0.02 + 0.01 + 0.5 * 0.02
+    high_rate = 0.08 + 0.01 + 0.5 * 0.06
+    assert wealth.iloc[0, 0] == pytest.approx(200.0 - 100.0 * (1.0 + low_rate) ** (1 / 12))
+    assert wealth.iloc[0, 1] == pytest.approx(200.0 - 100.0 * (1.0 + high_rate) ** (1 / 12))
+    assert wealth.iloc[0, 1] < wealth.iloc[0, 0]
+    assert wealth.attrs["effective_financing_rate"] == pytest.approx((low_rate + high_rate) / 2)
+
+
 def test_leverage_liquidates_when_maintenance_margin_is_breached():
     result = SimulationResult(
         returns=np.array([[[-0.60]]]),
@@ -419,6 +491,21 @@ def test_sharpe_uses_risk_free_rate():
         summarize_wealth_risk(wealth, risk_free_rate=np.nan)
 
 
+def test_risk_metrics_use_stochastic_real_short_rate_paths():
+    wealth = pd.DataFrame({"path_0": [110.0], "path_1": [120.0]})
+
+    summary = summarize_wealth_risk(
+        wealth,
+        periods_per_year=1,
+        inflation_paths=np.array([[0.02, 0.04]]),
+        risk_free_paths=np.array([[0.05, 0.08]]),
+    )
+
+    expected = np.mean([(1.05 / 1.02) - 1.0, (1.08 / 1.04) - 1.0])
+    assert summary["effective_risk_free_rate"] == pytest.approx(expected)
+    assert np.isfinite(summary["sharpe_ratio"])
+
+
 def test_inflation_adjusts_wealth_to_real_terms():
     wealth = pd.DataFrame({"path_0": [110.0]})
 
@@ -481,7 +568,12 @@ def _persistent_model() -> ScenarioModel:
         states=["state_a", "state_b"],
         transition_matrix=transition,
         moments=moments,
-        metadata={"sojourn_durations": {"state_a": np.array([50]), "state_b": np.array([50])}},
+        metadata={
+            "duration_hazards": {
+                "state_a": np.full(240, 1.0 / 50.0),
+                "state_b": np.full(240, 1.0 / 50.0),
+            }
+        },
     )
 
 
@@ -503,9 +595,9 @@ def test_semi_markov_sojourns_switch_less_than_markov_chain():
 
 def test_semi_markov_honors_exact_initial_and_following_sojourn_lengths():
     model = _persistent_model()
-    model.metadata["sojourn_durations"] = {
-        "state_a": np.array([3]),
-        "state_b": np.array([3]),
+    model.metadata["duration_hazards"] = {
+        "state_a": np.array([0.0, 0.0, 1.0]),
+        "state_b": np.array([0.0, 0.0, 1.0]),
     }
 
     regimes = simulate_regime_paths(
@@ -530,11 +622,11 @@ def test_semi_markov_honors_exact_initial_and_following_sojourn_lengths():
     ]
 
 
-def test_semi_markov_requires_sojourn_metadata():
+def test_semi_markov_requires_duration_hazard_metadata():
     model = _persistent_model()
-    model.metadata.pop("sojourn_durations")
+    model.metadata.pop("duration_hazards")
 
-    with pytest.raises(ValueError, match="sojourn_durations"):
+    with pytest.raises(ValueError, match="duration_hazards"):
         simulate_regime_paths(model, periods=6, paths=2, duration_model="semi_markov")
 
 

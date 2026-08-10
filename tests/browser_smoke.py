@@ -38,10 +38,18 @@ def main() -> None:
             page.locator("#simulation-settings > summary").click()
             page.locator("#paths").fill("1000")
             page.locator("#periods").fill("12")
+            page.locator("#target-wealth").fill("150")
             page.locator("#run-btn").click()
             page.locator("#growth-content").wait_for(state="visible", timeout=120_000)
             page.locator("#run-message").filter(has_text="Simulation complete").wait_for()
             assert page.locator("#metric-grid").get_by_text("Annualized return", exact=True).is_visible()
+            assert page.locator("#goal-metric-grid").get_by_text("Target success", exact=True).is_visible()
+            assert page.locator("#chart-goal-probability svg").is_visible()
+            assert page.locator("#chart-rolling-horizon svg").is_visible()
+            page.locator('[data-tab="tab-drawdowns"]').click()
+            assert page.locator("#chart-drawdown-fan svg").is_visible()
+            assert page.locator("#chart-drawdown-episodes svg").is_visible()
+            assert page.locator("#chart-recovery-required svg").is_visible()
             assert not browser_errors, f"Browser console errors: {browser_errors}"
 
             page.set_viewport_size({"width": 390, "height": 844})

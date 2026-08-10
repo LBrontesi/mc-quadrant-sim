@@ -5,12 +5,106 @@ import pytest
 from mc_quadrants.regimes import (
     REGIME_ORDER,
     Regime,
+    classify_persistent_quadrants,
     classify_quadrants,
+    estimate_duration_hazards,
     estimate_probabilistic_transition_matrix,
     estimate_transition_matrix,
+    expected_duration_from_hazards,
     quadrant_probabilities,
     sojourn_durations,
 )
+
+
+def test_persistent_classifier_smooths_one_month_macro_noise():
+    macro = pd.DataFrame(
+        {
+            "growth": [1.0, 1.0, 1.0, -1.0, 1.0, 1.0, 1.0],
+            "inflation": [-1.0] * 7,
+        },
+        index=pd.date_range("2020-01-31", periods=7, freq="ME"),
+    )
+
+    regimes = classify_persistent_quadrants(
+        macro,
+        growth_threshold=0.0,
+        inflation_threshold=0.0,
+        smoothing_window=3,
+        hysteresis=0.0,
+        confirmation_periods=2,
+    )
+
+    assert regimes.nunique() == 1
+    assert regimes.iloc[-1] == Regime.HIGH_GROWTH_LOW_INFLATION.value
+
+
+def test_persistent_classifier_confirms_a_transition_before_switching():
+    macro = pd.DataFrame(
+        {"growth": [1.0, 1.0, -1.0, -1.0, -1.0], "inflation": [-1.0] * 5}
+    )
+
+    regimes = classify_persistent_quadrants(
+        macro,
+        growth_threshold=0.0,
+        inflation_threshold=0.0,
+        smoothing_window=1,
+        hysteresis=0.0,
+        confirmation_periods=2,
+    )
+
+    assert regimes.iloc[2] == Regime.HIGH_GROWTH_LOW_INFLATION.value
+    assert regimes.iloc[3] == Regime.LOW_GROWTH_LOW_INFLATION.value
+
+
+def test_persistent_classifier_hysteresis_prevents_boundary_chatter():
+    macro = pd.DataFrame(
+        {"growth": [1.0, 0.1, -0.1, 0.1, -0.1, 0.1], "inflation": [-1.0] * 6}
+    )
+
+    regimes = classify_persistent_quadrants(
+        macro,
+        growth_threshold=0.0,
+        inflation_threshold=0.0,
+        smoothing_window=1,
+        hysteresis=0.5,
+        confirmation_periods=1,
+    )
+
+    assert regimes.nunique() == 1
+
+
+def test_persistent_classifier_is_prefix_invariant_with_causal_thresholds():
+    rng = np.random.default_rng(19)
+    macro = pd.DataFrame(
+        {"growth": rng.normal(size=30), "inflation": rng.normal(size=30)},
+        index=pd.date_range("2000-01-31", periods=30, freq="ME"),
+    )
+    kwargs = {
+        "threshold_window": 4,
+        "smoothing_window": 3,
+        "hysteresis": 0.15,
+        "confirmation_periods": 2,
+    }
+
+    prefix = classify_persistent_quadrants(macro.iloc[:20], **kwargs)
+    full = classify_persistent_quadrants(macro, **kwargs).iloc[:20]
+
+    pd.testing.assert_series_equal(prefix, full)
+
+
+def test_duration_hazards_are_regularized_age_dependent_and_respect_floor():
+    regimes = pd.Series(
+        ["a"] * 2 + ["b"] * 3 + ["a"] * 5 + ["b"] * 4 + ["a"] * 8,
+        index=pd.date_range("2000-01-31", periods=22, freq="ME"),
+    )
+
+    hazards = estimate_duration_hazards(regimes, states=["a", "b"], max_duration=24)
+
+    assert set(hazards) == {"a", "b"}
+    assert all(np.isfinite(values).all() for values in hazards.values())
+    assert all(((values > 0) & (values < 1)).all() for values in hazards.values())
+    assert not np.allclose(hazards["a"], hazards["a"][0])
+    assert expected_duration_from_hazards(hazards["a"], min_duration=5) >= 5.0
 
 
 def test_classify_quadrants_maps_growth_and_inflation_states():

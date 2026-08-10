@@ -145,8 +145,8 @@ class WebHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._send_json(400, {"ok": False, "error": str(exc)})
         except MemoryError:
-            LOGGER.exception("Simulation exhausted available memory")
-            self._send_json(503, {"ok": False, "error": "The scenario exceeded the server memory budget."})
+            LOGGER.exception("Simulation could not be completed by the server")
+            self._send_json(503, {"ok": False, "error": "The server could not complete this analysis."})
         except Exception:
             LOGGER.exception("Unhandled request failure for %s", path)
             self._send_json(500, {"ok": False, "error": "Unexpected server error."})

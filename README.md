@@ -12,11 +12,11 @@ macro quadrants:
 
 The model is designed to be calibrated from real historical data:
 
-1. Release-aware macro data is mapped to hard or probabilistic quadrants.
+1. Release-aware macro data is mapped to persistence-filtered quadrants, while soft probabilities weight return moments.
 2. Semi-Markov transitions and regime-conditioned macro dynamics are calibrated.
 3. Parametric return means are shrunk and covariance matrices use Ledoit-Wolf shrinkage.
 4. Optional stationary-bootstrap recalibrations measure parameter uncertainty.
-5. Growth, inflation, regimes, returns, dynamic correlations, and portfolio accounting are simulated together.
+5. Growth, inflation, the short rate, regimes, returns, dynamic correlations, and portfolio accounting are simulated together.
 6. Walk-forward validation compares the model with Gaussian and Student-t benchmarks.
 
 ## Methodology
@@ -25,8 +25,11 @@ The model is designed to be calibrated from real historical data:
 
 Asset prices are converted to log returns and, for the dashboard market-data
 path, aggregated to monthly frequency. FRED industrial production and CPI are
-converted to year-over-year percentage changes. Uploaded macro CSVs are assumed
-to already contain the growth and inflation measures selected by the user.
+converted to year-over-year percentage changes. The monthly effective federal
+funds rate (`FEDFUNDS`) is retained as an annual percentage-rate level rather
+than transformed into a year-over-year change. Uploaded macro CSVs are assumed
+to already contain the growth and inflation measures selected by the user and
+can optionally provide an annual short-rate column.
 When the requested market-data end date falls inside an unfinished month, that
 partial month is excluded so the final observation is never labeled as a future
 month-end. CSV asset inputs explicitly distinguish price levels, log returns,
@@ -129,18 +132,19 @@ UIs default to a 12-period window. Direct calibration keeps the full-sample
 behavior unless `threshold_window` is supplied; walk-forward validation always
 uses a causal 12-period window when none is supplied.
 
-The probabilistic mode replaces discontinuous high/low decisions with logistic
-probabilities whose width is controlled by `regime_temperature`. Joint
-probabilities still use the same four labels and sum to one. Expected
-transition counts and regime return moments are then weighted by these
-probabilities rather than forcing borderline observations into a single state.
+Regime transitions use a persistence-aware hard path: a causal three-month
+trailing macro average, threshold hysteresis (default `0.15` historical standard
+deviations), and two-month confirmation before accepting a new quadrant. Soft
+logistic probabilities remain available, with width controlled by
+`regime_temperature`, but they weight return moments only. They are deliberately
+not multiplied as independent adjacent memberships to estimate transitions.
 
 ### 3. Markov Regime Model
 
-The transition matrix counts adjacent historical regime changes and adds the
-configured smoothing value to every cell before normalizing each row. The
-default smoothing value is `1.0`, which prevents zero-probability transitions
-when history is sparse.
+The transition matrix counts adjacent observations from the persistence-filtered
+hard state path and adds the configured smoothing value to every cell before
+normalizing each row. The default smoothing value is `1.0`, which prevents
+zero-probability transitions when history is sparse.
 
 When transition uncertainty is non-zero, each transition row is sampled from a
 Dirichlet distribution. The dashboard maps uncertainty `u` in `[0, 1]` to a
@@ -154,15 +158,17 @@ thresholds, transition probabilities, durations, means, covariances, and joint
 macro dynamics. This separates uncertainty in fitted parameters from ordinary
 market-path randomness.
 
-A first-order Markov chain implies geometrically distributed regime run
-lengths, which understates how long real regimes persist. With **semi-Markov
-durations** the simulator draws each stay length from the empirical sojourn
-distribution observed in history (stored in the calibrated model's metadata),
-then transitions to a different state via the matrix with self-transitions
-renormalized away. A sampled duration of three therefore produces exactly three
-periods in that state, including for the initial regime. The dashboard defaults
-to semi-Markov; the core API uses the plain chain unless
-`duration_model="semi_markov"` is requested.
+A first-order Markov chain implies a constant exit hazard and geometrically
+distributed run lengths. With **semi-Markov durations**, the simulator instead
+uses regularized state- and age-specific discrete exit hazards. Each sparse
+state-age estimate is shrunk toward the pooled age-dependent hazard, and the
+final historical run is treated as right-censored. No short historical episode
+is discarded. The minimum simulated duration is five months by default; after
+that floor, exit risk can change with regime age. The dashboard and scenario API
+default to this semi-Markov model, while explicit `duration_model="markov"`
+retains the first-order chain. The age-dependent hazard design follows the
+motivation in the Federal Reserve Bank of Minneapolis discussion paper
+[A Markov-Switching Model of GNP Growth with Duration Dependence](https://www.minneapolisfed.org/research/discussion-papers/a-markov-switching-model-of-gnp-growth-with-duration-dependence).
 
 An alternative **HMM regime model** fits a Gaussian-emission hidden Markov
 model directly on asset returns with expectation-maximization (states learned
@@ -228,29 +234,37 @@ controls persistence, and `dcc_asymmetry` increases the response to joint
 negative shocks. ADCC works with Normal or Student-t returns and re-anchors to
 the relevant regime correlation after a state change.
 
-**Joint macro-financial paths** fit a regularized VAR(1) to growth and inflation,
-regime-conditioned innovation covariances, and a ridge return-factor link.
+**Joint macro-financial paths** fit a regularized VAR(1) to growth, inflation,
+and the effective federal funds rate when it is available, together with
+regime-conditioned innovation covariances and a ridge return-factor link.
 Simulated macro values influence time-varying transition probabilities, while
-the same macro innovations affect asset returns. Inflation therefore creates a
-different purchasing-power deflator for every path instead of using one fixed
-rate. This compact model improves internal consistency but is not a structural
-macroeconomic forecast or a full yield-curve model.
+the same macro innovations—including short-rate changes—affect asset returns.
+Only growth and inflation define quadrant membership; the rate is an additional
+state variable. Inflation creates a different purchasing-power deflator for
+every path, and the simulated short rate supplies the path-specific risk-free
+benchmark and leveraged financing base. This compact model improves internal
+consistency but is not a structural macroeconomic forecast, a Taylor-rule
+model, or a full yield-curve model.
 
 **Walk-forward validation** (quadrant model only, enabled by default in the
-dashboard) checks the regime model strictly out of sample: each split fits on
+dashboard) checks the regime model and selected portfolio strictly out of sample: each split fits on
 data up to period `t` and scores the next observation under the one-step
 regime mixture density versus unconditional Gaussian and Student-t models fitted
-on the same history. It also reports multiclass Brier scores, actual-state
-probabilities, portfolio probability-integral-transform diagnostics, 95% VaR
-breach frequency and clustering, and a Newey-West/HAC log-score comparison.
+on the same history. It also reports transition Brier and log scores, observed
+versus predicted switches per decade, completed-duration log scores and errors,
+stability of expected durations across rolling calibration vintages,
+actual-state probabilities, portfolio probability-integral-transform
+diagnostics, 95% VaR breach frequency and clustering, and a Newey-West/HAC
+log-score comparison. The UI shows expected months in every state and expected
+switches per decade, and warns when the implied persistence is unusually low.
 Weak or miscalibrated results are surfaced as warnings rather than hidden.
 
 ### 6. Portfolio Accounting
 
 Weights are normalized to sum to one. The legacy mode combines simulated log
-returns with the weighted-log approximation. Rebalancing mode instead tracks
-asset holdings, applies each asset's gross return, and rebalances monthly,
-quarterly, or annually. Transaction costs are charged as:
+returns with the weighted-log approximation. Buy-and-hold and rebalancing modes
+track asset holdings directly: buy-and-hold lets weights drift, while scheduled
+mode rebalances monthly, quarterly, or annually. Transaction costs are charged as:
 
 ```text
 cost = transaction_cost_bps / 10,000 * sum(abs(target_holdings - current_holdings))
@@ -278,20 +292,21 @@ to simulated asset growth. Historical ETF price returns may already include
 fund expenses, so applying an expense ratio is an explicit additional forward
 assumption rather than a historical fee reconstruction.
 
-Leverage is modeled with explicit borrowed balance and deterministic financing
-cost. A leverage multiple above `1.0` requires an explicit rebalancing
+Leverage is modeled with explicit borrowed balance and path-specific financing
+cost when joint short-rate paths are available, with a deterministic fallback.
+A leverage multiple above `1.0` requires an explicit rebalancing
 frequency. Optional maintenance margin liquidates paths when equity divided by
 asset value falls below the configured threshold. The model is monthly and
 does not represent intramonth margin calls.
 
-Financing costs can be linked to the inflation of the regime each path is
-currently in. With **Inflation-linked financing sensitivity** above zero, the
-monthly financing charge on a path uses `base rate + sensitivity * regime
-inflation`, where each state's inflation is its historical average from the
-calibration macro data (percent values are converted to decimals
-automatically). Higher-inflation regimes therefore carry a higher borrowing
-cost, and the reported `effective_financing_rate` is the simulated regime-mix
-weighted average of the per-state rates.
+With joint macro paths, each monthly financing charge uses `simulated short
+rate + financing spread + sensitivity * simulated inflation`. The financing
+input therefore acts as a spread above the policy rate; without a stochastic
+short rate it remains the fixed financing rate. For backward compatibility,
+models without joint macro paths can still apply inflation sensitivity to each
+regime's historical average inflation. The reported
+`effective_financing_rate` is the average rate actually applied across the
+simulated paths.
 
 ### 7. Reported Risk Metrics
 
@@ -304,8 +319,11 @@ peak.
 
 Annualized return and volatility are derived from the simulated periodic,
 time-weighted portfolio returns: arithmetic mean is multiplied by periods per
-year and periodic standard deviation by its square root. Sharpe and Sortino use
-those same return observations and the configured risk-free rate. Contributions
+year and periodic standard deviation by its square root. Sharpe, Sortino, and
+Omega use the path-specific simulated short rate when available and otherwise
+use the configured fallback risk-free rate. In real-wealth reports the nominal
+short rate is converted into a path-consistent real rate using that path's
+inflation. Contributions
 enter at the start of a period and withdrawals leave at its end, and real cash
 flows are inflation-adjusted exactly once. Terminal wealth percentiles, VaR,
 expected shortfall, and probability of loss remain terminal-distribution
@@ -318,6 +336,22 @@ deviation instead of total volatility. The Calmar ratio divides geometric
 annualized return by the mean maximum drawdown. Geometric annualized return
 compounds the mean logarithmic periodic return. Terminal skewness and excess
 kurtosis describe the shape of the terminal distribution.
+
+Planning metrics connect that risk distribution to an investor objective. A
+configurable wealth target drives the probability of success and the conditional
+expected shortfall among paths that miss it. The report also includes risk of
+ruin, the Omega ratio relative to the configured risk-free rate, worst rolling
+12-month returns, maximum time underwater, completed recovery time, and the
+share of paths still underwater at the horizon.
+
+Interactive risk charts complement the headline metrics. The goal-probability
+curve maps possible wealth targets to terminal success rates. Rolling-horizon
+bands show P05, median, and P95 annualized returns over the available holding
+periods. The Drawdowns view includes an underwater probability fan, a bounded
+depth-versus-duration episode scatter, and the gain required to recover the
+previous peak. Portfolio comparison adds terminal quantile curves so dominance
+can be inspected across the full distribution rather than inferred from one
+average or percentile.
 
 ### 8. Important Assumptions
 
@@ -362,8 +396,8 @@ in practice:
   every period and cannot drive wealth below zero.
 - Set **Inflation assumption** above zero to report inflation-adjusted
   (purchasing power) wealth, VaR, drawdowns, and annualized metrics.
-- Set **Risk-free rate** to compute a proper Sharpe ratio instead of a zero
-  risk-free baseline.
+- Set **Fallback risk-free rate** for scenarios without joint stochastic rate
+  paths. Joint macro scenarios use their simulated short rate automatically.
 - The **Portfolio preset** picker applies PortfolioCharts-style allocations
   (60/40, Three-Fund, Permanent Portfolio, Golden Butterfly, All Seasons,
   Core Four, Risk Parity) mapped onto the loaded tickers. Approximations are
@@ -439,9 +473,10 @@ Open `http://127.0.0.1:7860`. Set `PORT` to use a different port. The browser
 client calls the same `/api/load`, `/api/simulate`, `/api/compare`, and
 `/api/wealth` payload contracts used by the other frontends.
 
-The server uses adaptive path chunking, limits concurrent heavy jobs, caps request bodies, and exports a
-deterministic sample of at most 5,000 wealth paths instead of serializing the
-entire simulation. Production limits can be adjusted with
+The server uses adaptive path chunking, limits concurrent heavy jobs, caps request bodies, and sends a
+deterministic reporting sample of at most 5,000 paths to the browser instead of serializing every path.
+All requested paths still contribute to summary statistics, percentiles, and risk metrics.
+Production limits can be adjusted with
 `MAX_CONCURRENT_JOBS` and `MAX_REQUEST_BYTES`.
 
 During longer jobs the web interface shows the active stage and elapsed time;
@@ -470,7 +505,8 @@ shaping to the shared `mc_quadrants.api` layer, so the simulation methodology
 is identical regardless of the interface. The **Model methodology** section
 in each sidebar selects the regime model (quadrant or HMM), the regime
 duration model (Markov chain or semi-Markov), the causal threshold window,
-probabilistic regime membership, expected-return shrinkage, parameter
+three-month smoothing, hysteresis, transition confirmation, probabilistic
+moment weights, expected-return and duration-hazard shrinkage, parameter
 recalibrations, joint macro paths, GARCH/ADCC dynamics, and walk-forward
 validation.
 
@@ -495,13 +531,16 @@ wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, a monthly-return calendar, macro scatter,
 calibration diagnostics, scenario comparison, and bounded CSV path samples.
 
-The decision-reporting layer also provides survival, capital-preservation, and
-profit probabilities through time; representative worst/P05/median/P95/best
+The decision-reporting layer also provides survival, capital-preservation,
+profit, and target-success probabilities through time; representative worst/P05/median/P95/best
 paths with their regime histories; selectable metric distributions; and a
 sequence-risk view comparing CAGR with money-weighted returns when contributions
 are active. The **Research Lab** runs Portfolio B with the exact random seed and
 market-path assumptions used for Portfolio A, reports paired differences and
-path win rates, sweeps monthly/quarterly/annual/buy-and-hold rebalancing, and
+path win rates, a Monte Carlo confidence interval for the mean paired terminal
+difference, conditional regret, and an empirical quantile-dominance score. It
+also compares goal, ruin, Omega, and drawdown-duration metrics; sweeps
+monthly/quarterly/annual/buy-and-hold rebalancing; and
 stores up to 20 named scenarios locally. Share links serialize the controls,
 portfolio selection, weights, and seed so a run can be reconstructed without
 embedding uploaded CSV contents.
@@ -558,6 +597,10 @@ model = calibrate_quadrant_model(
     threshold_window=12,
     probabilistic_regimes=True,
     regime_temperature=0.35,
+    regime_smoothing_window=3,
+    regime_hysteresis=0.15,
+    regime_confirmation_periods=2,
+    min_regime_duration=5,
     mean_prior_strength=24,
     joint_macro=True,
     correlation_overrides={
@@ -575,6 +618,8 @@ result = simulate_returns(
     random_seed=7,
     distribution="student_t",
     degrees_of_freedom=5,
+    duration_model="semi_markov",
+    min_regime_duration=5,
     joint_macro=True,
     dynamic_correlation=True,
 )
@@ -609,6 +654,8 @@ Reasonable monthly macro choices:
 
 - Growth: industrial production year-over-year, real GDP nowcast, PMI diffusion index, or unemployment gap.
 - Inflation: CPI year-over-year, core CPI year-over-year, or inflation surprise.
+- Short rate: effective federal funds rate, SOFR, or a three-month Treasury rate
+  expressed as an annual level rather than a year-over-year change.
 
 Using medians as thresholds gives balanced historical states. Using fixed
 thresholds gives a more economic definition, for example growth above 0 and

@@ -14,11 +14,13 @@ from mc_quadrants.matrix import (
 from mc_quadrants.regimes import (
     REGIME_ORDER,
     ThresholdSpec,
-    classify_quadrants,
-    estimate_probabilistic_transition_matrix,
+    classify_persistent_quadrants,
+    estimate_duration_hazards,
     estimate_transition_matrix,
+    expected_duration_from_hazards,
     quadrant_probabilities,
     resolve_threshold,
+    smooth_macro_for_regimes,
     sojourn_durations,
 )
 from mc_quadrants.types import RegimeMoments, ScenarioModel
@@ -345,14 +347,25 @@ def _fit_joint_macro_dynamics(
     moments: dict[str, RegimeMoments],
     growth_col: str,
     inflation_col: str,
+    rate_col: str | None,
     growth_threshold: ThresholdSpec,
     inflation_threshold: ThresholdSpec,
     temperature: float,
     ridge: float = 1e-3,
 ) -> dict[str, object]:
-    """Fit a compact regime-conditioned macro VAR and return-factor link."""
+    """Fit a compact regime-conditioned macro VAR and return-factor link.
+
+    Growth and inflation always define the four economic quadrants.  When a
+    short-rate column is available it joins the VAR as a third state variable,
+    so policy-rate innovations can co-move with inflation, growth, and returns
+    without changing the meaning of the quadrant labels.
+    """
 
     columns = [growth_col, inflation_col]
+    active_rate_col = None
+    if rate_col and rate_col in macro.columns and rate_col not in columns:
+        active_rate_col = str(rate_col)
+        columns.append(active_rate_col)
     macro_clean = macro.loc[:, columns].apply(pd.to_numeric, errors="coerce").dropna().sort_index()
     if len(macro_clean) < 24:
         raise ValueError("Joint macro dynamics require at least 24 complete macro observations.")
@@ -420,8 +433,18 @@ def _fit_joint_macro_dynamics(
         resolve_threshold(macro_clean[growth_col], growth_threshold),
         resolve_threshold(macro_clean[inflation_col], inflation_threshold),
     ]
-    scales = np.maximum(macro_clean.std(ddof=1).to_numpy(dtype=float) * temperature, 1e-6)
+    scales = np.maximum(
+        macro_clean.loc[:, [growth_col, inflation_col]].std(ddof=1).to_numpy(dtype=float)
+        * temperature,
+        1e-6,
+    )
     inflation_scale_hint = float(macro_clean[inflation_col].abs().quantile(0.90))
+    rate_is_percent = False
+    rate_bounds = None
+    if active_rate_col is not None:
+        rate_values = macro_clean[active_rate_col]
+        rate_is_percent = float(rate_values.abs().quantile(0.90)) >= 0.50
+        rate_bounds = [-5.0, 50.0] if rate_is_percent else [-0.05, 0.50]
     return {
         "columns": columns,
         "latest": macro_values[-1].tolist(),
@@ -434,6 +457,9 @@ def _fit_joint_macro_dynamics(
         "thresholds": thresholds,
         "probability_scales": scales.tolist(),
         "inflation_is_percent": inflation_scale_hint >= 0.50,
+        "rate_col": active_rate_col,
+        "rate_is_percent": rate_is_percent,
+        "rate_bounds": rate_bounds,
     }
 
 
@@ -442,6 +468,7 @@ def calibrate_quadrant_model(
     macro: pd.DataFrame,
     growth_col: str = "growth",
     inflation_col: str = "inflation",
+    rate_col: str | None = "interest_rate",
     growth_threshold: ThresholdSpec = "median",
     inflation_threshold: ThresholdSpec = "median",
     transition_smoothing: float = 1.0,
@@ -452,37 +479,50 @@ def calibrate_quadrant_model(
     macro_lag_periods: int = 0,
     frequency: str = "M",
     threshold_window: int | None = None,
-    min_regime_duration: int = 1,
+    min_regime_duration: int = 5,
     probabilistic_regimes: bool = False,
     regime_temperature: float = 0.35,
+    regime_smoothing_window: int = 3,
+    regime_hysteresis: float = 0.15,
+    regime_confirmation_periods: int = 2,
+    duration_prior_strength: float = 8.0,
     mean_prior_strength: float = 0.0,
     joint_macro: bool = False,
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
 
-    regimes = classify_quadrants(
+    regimes = classify_persistent_quadrants(
         macro,
         growth_col=growth_col,
         inflation_col=inflation_col,
         growth_threshold=growth_threshold,
         inflation_threshold=inflation_threshold,
         threshold_window=threshold_window,
+        smoothing_window=regime_smoothing_window,
+        hysteresis=regime_hysteresis,
+        confirmation_periods=regime_confirmation_periods,
+    )
+    transition_matrix = estimate_transition_matrix(
+        regimes,
+        states=REGIME_ORDER,
+        smoothing=transition_smoothing,
     )
     probabilities = None
     if probabilistic_regimes:
-        probabilities = quadrant_probabilities(
+        smoothed_macro = smooth_macro_for_regimes(
             macro,
+            growth_col=growth_col,
+            inflation_col=inflation_col,
+            smoothing_window=regime_smoothing_window,
+        )
+        probabilities = quadrant_probabilities(
+            smoothed_macro,
             growth_col=growth_col,
             inflation_col=inflation_col,
             growth_threshold=growth_threshold,
             inflation_threshold=inflation_threshold,
             threshold_window=threshold_window,
             temperature=regime_temperature,
-        )
-        transition_matrix = estimate_probabilistic_transition_matrix(
-            probabilities,
-            states=REGIME_ORDER,
-            smoothing=transition_smoothing,
         )
         moments = estimate_weighted_regime_moments(
             returns=returns,
@@ -496,11 +536,6 @@ def calibrate_quadrant_model(
             mean_prior_strength=mean_prior_strength,
         )
     else:
-        transition_matrix = estimate_transition_matrix(
-            regimes,
-            states=REGIME_ORDER,
-            smoothing=transition_smoothing,
-        )
         moments = estimate_regime_moments(
             returns=returns,
             regimes=regimes,
@@ -532,9 +567,36 @@ def calibrate_quadrant_model(
     else:
         state_inflation = {}
 
+    active_rate_col = rate_col if rate_col and rate_col in macro.columns else None
+    state_short_rate: dict[str, float] = {}
+    rate_is_percent = False
+    if active_rate_col is not None:
+        rate_values = pd.to_numeric(macro[active_rate_col], errors="coerce")
+        if rate_values.notna().any():
+            rate_is_percent = float(rate_values.abs().quantile(0.90)) >= 0.50
+            rate_fraction = rate_values / 100.0 if rate_is_percent else rate_values
+            state_short_rate = {
+                state: float(rate_fraction[regimes == state].mean())
+                for state in REGIME_ORDER
+                if (regimes == state).any()
+            }
+
+    duration_hazards = estimate_duration_hazards(
+        regimes,
+        REGIME_ORDER,
+        prior_strength=duration_prior_strength,
+    )
+    expected_durations = {
+        state: expected_duration_from_hazards(
+            duration_hazards[state],
+            min_duration=min_regime_duration,
+        )
+        for state in REGIME_ORDER
+    }
     metadata: dict[str, object] = {
         "growth_col": growth_col,
         "inflation_col": inflation_col,
+        "rate_col": active_rate_col,
         "growth_threshold": growth_threshold,
         "inflation_threshold": inflation_threshold,
         "macro_lag_periods": macro_lag_periods,
@@ -543,11 +605,22 @@ def calibrate_quadrant_model(
         "mean_prior_strength": mean_prior_strength,
         "transition_smoothing": transition_smoothing,
         "threshold_window": threshold_window,
+        "regime_smoothing_window": int(regime_smoothing_window),
+        "regime_hysteresis": float(regime_hysteresis),
+        "regime_confirmation_periods": int(regime_confirmation_periods),
         "model_kind": "quadrant",
         "regime_assignment": "probabilistic" if probabilistic_regimes else "hard",
+        "transition_estimator": "persistence_filtered_hard_labels",
         "regime_temperature": regime_temperature,
-        "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER, min_length=min_regime_duration),
+        "duration_model_kind": "regularized_state_specific_hazard",
+        "duration_prior_strength": float(duration_prior_strength),
+        "min_regime_duration": int(min_regime_duration),
+        "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER, min_length=1),
+        "duration_hazards": duration_hazards,
+        "expected_duration_months": expected_durations,
         "state_inflation": state_inflation,
+        "state_short_rate": state_short_rate,
+        "rate_is_percent": rate_is_percent,
         "data_vintage": macro.attrs.get("data_vintage", "user_supplied"),
         "point_in_time": bool(macro.attrs.get("point_in_time", False)),
         "availability_aligned": bool(macro.attrs.get("availability_aligned", False)),
@@ -565,6 +638,7 @@ def calibrate_quadrant_model(
             moments,
             growth_col,
             inflation_col,
+            active_rate_col,
             growth_threshold,
             inflation_threshold,
             regime_temperature,

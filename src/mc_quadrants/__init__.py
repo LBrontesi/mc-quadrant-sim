@@ -21,10 +21,13 @@ from mc_quadrants.pipeline import SimulationRun, compare_distributions, run_scen
 from mc_quadrants.regimes import (
     REGIME_ORDER,
     Regime,
+    classify_persistent_quadrants,
     classify_quadrants,
+    estimate_duration_hazards,
     estimate_probabilistic_transition_matrix,
     estimate_transition_matrix,
     quadrant_probabilities,
+    smooth_macro_for_regimes,
     sojourn_durations,
 )
 from mc_quadrants.simulation import (
@@ -60,6 +63,8 @@ __all__ = [
     "convert_returns_to_base_currency",
     "calibrate_quadrant_model",
     "classify_quadrants",
+    "classify_persistent_quadrants",
+    "estimate_duration_hazards",
     "estimate_regime_moments",
     "estimate_weighted_regime_moments",
     "estimate_probabilistic_transition_matrix",
@@ -73,6 +78,7 @@ __all__ = [
     "summarize_wealth_risk",
     "inflation_adjust_wealth",
     "quadrant_probabilities",
+    "smooth_macro_for_regimes",
     "run_scenario",
     "fit_hmm_model",
     "walk_forward_validation",

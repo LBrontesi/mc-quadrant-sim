@@ -36,8 +36,14 @@ def test_web_ui_exposes_shared_methodology_controls():
         "parameter-draws",
         "joint-macro",
         "dynamic-correlation",
+        "regime-smoothing-window",
+        "regime-hysteresis",
+        "regime-confirmation-periods",
+        "duration-prior-strength",
+        "persistence-panel",
         "methodology-badges",
         "parameter-bands",
+        "csv-rate",
     ):
         assert f'id="{control}"' in html
     for control in ("synthetic-method", "synthetic-categories", "synthetic-report"):
@@ -51,6 +57,8 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert "renderParameterUncertainty" in javascript
     assert "renderMacroPaths" in javascript
     assert 'risk_free_rate: Number($("risk-free").value)' in javascript
+    assert 'payload.rate_col = $("csv-rate").value.trim()' in javascript
+    assert "Stochastic policy-rate paths" in javascript
     assert 'type="module" src="app.js?' in html
     assert 'id="resource-card"' not in html
     assert 'id="hero-title"' in html
@@ -68,8 +76,18 @@ def test_web_ui_exposes_shared_methodology_controls():
         "path-selector",
         "metric-explorer-select",
         "sequence-risk-card",
+        "initial-value",
+        "target-wealth",
+        "goal-metric-grid",
+        "chart-goal-probability",
+        "chart-rolling-horizon",
+        "chart-drawdown-fan",
+        "chart-drawdown-episodes",
+        "chart-recovery-required",
         "tab-lab",
         "portfolio-compare-btn",
+        "paired-evidence",
+        "chart-paired-quantiles",
         "rebalance-sensitivity-btn",
         "save-scenario-btn",
         "share-scenario-btn",
@@ -80,17 +98,27 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert "renderTickerComposer" in javascript
     assert "enhanceSelects" in javascript
     assert "renderDecisionAnalytics" in javascript
+    assert "renderPlanningCharts" in javascript
+    assert "bandChart" in javascript
+    assert "drawdown_episodes" in javascript
+    assert "rolling_horizons" in javascript
+    assert "goal_success_probability" in javascript
+    assert "95% Monte Carlo CI" in javascript
+    assert "B higher by quantile" in javascript
     assert "onPortfolioCompare" in javascript
     assert "onRebalancingSensitivity" in javascript
     assert "captureScenarioSnapshot" in javascript
     assert 'id="paths" value="100000"' in html
     assert 'id="periods" value="120"' in html
+    assert '<option value="buy_hold">Buy and hold (drifting weights)</option>' in html
     assert '<button id="run-btn" class="btn btn-primary btn-lg" disabled>Run analysis</button>' in html
     assert '$("run-btn").textContent = "Run analysis"' in javascript
     assert "Run ${paths.toLocaleString()} paths" not in javascript
     assert 'String(data.paths) === "10000"' in javascript
     assert "Estimated memory" not in javascript
     assert "MEMORY_LIMIT_MB" not in javascript
+    assert '"Buy and hold", "buy_hold"' in javascript
+    assert "Math.min(...values)" not in javascript
     assert 'setAttribute("height", "auto")' not in javascript
     assert 'setAttribute("height", String(height))' in javascript
 

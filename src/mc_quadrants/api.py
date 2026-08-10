@@ -42,8 +42,15 @@ _PERCENT_METRICS = {
     "annual_fee_drag",
     "annual_financing_cost",
     "effective_financing_rate",
+    "effective_risk_free_rate",
     "maintenance_margin",
     "probability_of_loss",
+    "goal_success_probability",
+    "risk_of_ruin",
+    "unrecovered_at_horizon",
+    "worst_rolling_return",
+    "worst_rolling_return_p05",
+    "median_worst_rolling_return",
     "max_drawdown_mean",
     "max_drawdown_p95",
     "max_drawdown_worst",
@@ -63,6 +70,8 @@ _CURRENCY_METRICS = {
     "total_contributed",
     "total_withdrawn",
     "net_external_cash_flow",
+    "target_wealth",
+    "expected_goal_shortfall",
 }
 
 
@@ -81,6 +90,8 @@ def format_metric_value(key: str, value: Any, currency: str = "USD") -> str:
         return f"{numeric:.1f}x"
     if key == "margin_calls":
         return f"{int(numeric):,}"
+    if "_months" in key:
+        return f"{numeric:.1f} mo"
     if key in _PERCENT_METRICS:
         return f"{numeric * 100:.2f}%"
     if key in _CURRENCY_METRICS:
@@ -125,6 +136,7 @@ DISTRIBUTION_KEYS = {
 }
 REBALANCE_KEYS = {
     "legacy": None,
+    "buy_hold": 0,
     "monthly": 1,
     "quarterly": 3,
     "annual": 12,
@@ -133,6 +145,7 @@ REBALANCE_KEYS = {
 MAX_PERIODS = 360
 MAX_PATHS = 120_000
 MAX_WORKERS = 16
+MAX_REPORTING_PATHS = 5_000
 DEFAULT_EXPORT_PATHS = 1_000
 MAX_EXPORT_PATHS = 5_000
 
@@ -356,6 +369,7 @@ def load_data_source(
             raise ValueError("Upload both an asset CSV and a macro CSV.")
         growth_col = str(payload.get("growth_col", "growth"))
         inflation_col = str(payload.get("inflation_col", "inflation"))
+        requested_rate_col = str(payload.get("rate_col", "interest_rate")).strip()
         if growth_col not in macro_data.columns:
             raise ValueError(f"Growth column not found in macro CSV: {growth_col}")
         if inflation_col not in macro_data.columns:
@@ -391,6 +405,11 @@ def load_data_source(
                 "data_vintage": "user_point_in_time" if available_date is not None else "user_supplied",
                 "point_in_time": available_date is not None,
                 "availability_aligned": available_date is not None,
+                "rate_col": (
+                    requested_rate_col
+                    if requested_rate_col and requested_rate_col in macro_data.columns
+                    else None
+                ),
             }
         )
         returns = _normalize_columns(returns)
@@ -443,16 +462,21 @@ def build_load_response(
     inflation_col: str,
     message: str,
 ) -> dict[str, Any]:
+    rate_col = macro.attrs.get("rate_col")
+    macro_columns = [growth_col, inflation_col]
+    if rate_col and rate_col in macro.columns:
+        macro_columns.append(str(rate_col))
     return {
         "ok": True,
         "tickers": tickers,
         "default_tickers": default_selected_tickers(tickers),
         "growth_col": growth_col,
         "inflation_col": inflation_col,
+        "rate_col": rate_col,
         "message": message,
         "coverage": _coverage(returns),
         "presets": [{"name": name, "weights": dict(weights)} for name, weights in PORTFOLIO_PRESETS.items()],
-        "macro": _frame_preview(macro, columns=[growth_col, inflation_col]),
+        "macro": _frame_preview(macro, columns=macro_columns),
         "returns": _frame_preview(returns),
         "synthetic": returns.attrs.get("synthetic_report", {}),
         "data_timing": {
@@ -533,6 +557,11 @@ def _validate_simulation_size(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(f"periods must be between 1 and {MAX_PERIODS}.")
     if estimate["paths"] < 1 or estimate["paths"] > MAX_PATHS:
         raise ValueError(f"paths must be between 1 and {MAX_PATHS:,}.")
+    for key in ("initial_value", "target_wealth"):
+        if key in payload:
+            value = float(payload[key])
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"{key} must be positive and finite.")
     return estimate
 
 
@@ -545,10 +574,10 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     model_kind = str(payload.get("model", "quadrant")).lower()
     if model_kind not in {"quadrant", "hmm"}:
         raise ValueError("Unknown model kind (expected 'quadrant' or 'hmm').")
-    duration_model = str(payload.get("duration_model", "markov")).lower()
+    duration_model = str(payload.get("duration_model", "semi_markov")).lower()
     if duration_model not in {"markov", "semi_markov"}:
         raise ValueError("Unknown duration model (expected 'markov' or 'semi_markov').")
-    min_regime_duration = int(payload.get("min_regime_duration", 3))
+    min_regime_duration = int(payload.get("min_regime_duration", 5))
     if min_regime_duration < 1:
         raise ValueError("min_regime_duration must be at least 1.")
     hmm_states = int(payload.get("hmm_states", 4))
@@ -561,19 +590,22 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     if rebalance_label not in REBALANCE_KEYS:
         raise ValueError(f"Unknown rebalancing frequency: {rebalance_label}")
     garch = bool(payload.get("garch", False))
-    cost_bps = float(payload.get("cost_bps", 10.0))
+    default_cost_bps = 0.0 if rebalance_label in {"legacy", "buy_hold"} else 10.0
+    cost_bps = float(payload.get("cost_bps", default_cost_bps))
     leverage_multiple = float(payload.get("leverage_multiple", 1.0))
     financing_rate = float(payload.get("financing_rate", 0.0)) / 100.0
     financing_inflation_sensitivity = float(payload.get("financing_inflation_sensitivity", 0.0))
     maintenance_margin = float(payload.get("maintenance_margin", 0.0)) / 100.0
-    if rebalance_label == "legacy" and not np.isclose(cost_bps, 0.0):
-        raise ValueError("Legacy rebalancing does not support transaction costs; set cost_bps to 0.")
+    if rebalance_label in {"legacy", "buy_hold"} and not np.isclose(cost_bps, 0.0):
+        raise ValueError(
+            "Legacy and buy-and-hold accounting do not support transaction costs; set cost_bps to 0."
+        )
     if garch and distribution != "normal":
         raise ValueError("GARCH volatility clustering requires the Normal return distribution.")
     if not np.isfinite(leverage_multiple) or leverage_multiple < 1:
         raise ValueError("leverage_multiple must be at least 1.0.")
-    if leverage_multiple != 1.0 and rebalance_label == "legacy":
-        raise ValueError("Leverage requires an explicit rebalancing frequency, not legacy accounting.")
+    if leverage_multiple != 1.0 and rebalance_label in {"legacy", "buy_hold"}:
+        raise ValueError("Leverage requires monthly, quarterly, or annual rebalancing.")
     if not np.isfinite(financing_rate) or financing_rate < 0:
         raise ValueError("financing_rate must be a finite, non-negative percentage.")
     if not np.isfinite(financing_inflation_sensitivity) or financing_inflation_sensitivity < 0:
@@ -614,6 +646,18 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     regime_temperature = float(payload.get("regime_temperature", 0.35))
     if not np.isfinite(regime_temperature) or regime_temperature <= 0:
         raise ValueError("regime_temperature must be positive and finite.")
+    regime_smoothing_window = int(payload.get("regime_smoothing_window", 3))
+    regime_hysteresis = float(payload.get("regime_hysteresis", 0.15))
+    regime_confirmation_periods = int(payload.get("regime_confirmation_periods", 2))
+    duration_prior_strength = float(payload.get("duration_prior_strength", 8.0))
+    if not 1 <= regime_smoothing_window <= 24:
+        raise ValueError("regime_smoothing_window must be between 1 and 24.")
+    if not np.isfinite(regime_hysteresis) or not 0 <= regime_hysteresis <= 2:
+        raise ValueError("regime_hysteresis must be between 0 and 2.")
+    if not 1 <= regime_confirmation_periods <= 12:
+        raise ValueError("regime_confirmation_periods must be between 1 and 12.")
+    if not np.isfinite(duration_prior_strength) or duration_prior_strength <= 0:
+        raise ValueError("duration_prior_strength must be positive and finite.")
     mean_prior_strength = float(payload.get("mean_prior_strength", 0.0))
     if not np.isfinite(mean_prior_strength) or mean_prior_strength < 0:
         raise ValueError("mean_prior_strength must be finite and non-negative.")
@@ -642,6 +686,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "growth_threshold": _threshold_value(payload.get("growth_threshold", "median")),
         "inflation_threshold": _threshold_value(payload.get("inflation_threshold", "median")),
+        "rate_col": str(payload.get("rate_col", "interest_rate")).strip() or None,
         "periods": int(payload.get("periods", 120)),
         "paths": int(payload.get("paths", 3000)),
         "random_seed": int(payload.get("seed", 7)),
@@ -661,6 +706,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "maintenance_margin": maintenance_margin,
         "contribution": float(payload.get("contribution", 0.0)),
         "withdrawal": float(payload.get("withdrawal", 0.0)),
+        "initial_value": float(payload.get("initial_value", 100.0)),
         "base_currency": base_currency,
         "risk_free_rate": float(payload.get("risk_free_rate", 0.0)) / 100.0,
         "annual_inflation": float(payload.get("annual_inflation", 0.0)) / 100.0,
@@ -675,6 +721,10 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "walk_forward": bool(payload.get("walk_forward", True)),
         "probabilistic_regimes": probabilistic_regimes,
         "regime_temperature": regime_temperature,
+        "regime_smoothing_window": regime_smoothing_window,
+        "regime_hysteresis": regime_hysteresis,
+        "regime_confirmation_periods": regime_confirmation_periods,
+        "duration_prior_strength": duration_prior_strength,
         "mean_prior_strength": mean_prior_strength,
         "parameter_draws": parameter_draws,
         "parameter_block_size": parameter_block_size,
@@ -741,7 +791,7 @@ def _median_period_returns(wealth: pd.DataFrame, payload: Mapping[str, Any]) -> 
     withdrawal = float(payload.get("withdrawal", 0.0))
     medians: list[float] = []
     for period in range(len(values)):
-        previous = 100.0 if period == 0 else values[period - 1]
+        previous = float(payload.get("initial_value", 100.0)) if period == 0 else values[period - 1]
         previous_deflator = (1.0 + annual_inflation) ** (-period / 12.0)
         current_deflator = (1.0 + annual_inflation) ** (-(period + 1) / 12.0)
         denominator = previous * previous_deflator + contribution * previous_deflator
@@ -777,6 +827,14 @@ def _sample_distribution(values: np.ndarray, limit: int = 4_000) -> list[float]:
     return clean[indices].tolist()
 
 
+def _reporting_indices(paths: int, limit: int = MAX_REPORTING_PATHS) -> np.ndarray:
+    """Select stable path indexes for browser reporting and paired analysis."""
+
+    if paths <= 0:
+        return np.empty(0, dtype=int)
+    return np.linspace(0, paths - 1, min(paths, limit), dtype=int)
+
+
 def _distribution_summary(values: np.ndarray) -> dict[str, float]:
     clean = np.asarray(values, dtype=float)
     clean = clean[np.isfinite(clean)]
@@ -796,11 +854,229 @@ def _distribution_summary(values: np.ndarray) -> dict[str, float]:
     }
 
 
+def _drawdown_duration_metrics(values: np.ndarray, initial_value: float) -> dict[str, float]:
+    """Summarize time underwater and completed recovery episodes."""
+
+    periods, paths = values.shape
+    running_peak = np.full(paths, initial_value, dtype=float)
+    current_duration = np.zeros(paths, dtype=np.int32)
+    maximum_duration = np.zeros(paths, dtype=np.int32)
+    recovery_histogram = np.zeros(periods + 1, dtype=np.int64)
+    for period_values in values:
+        recovered = period_values >= running_peak
+        completed = current_duration[recovered & (current_duration > 0)]
+        if completed.size:
+            recovery_histogram += np.bincount(completed, minlength=periods + 1)[: periods + 1]
+        running_peak = np.maximum(running_peak, period_values)
+        underwater = period_values < running_peak
+        current_duration = np.where(underwater, current_duration + 1, 0)
+        maximum_duration = np.maximum(maximum_duration, current_duration)
+
+    def recovery_quantile(probability: float) -> float:
+        total = int(recovery_histogram.sum())
+        if total == 0:
+            return 0.0
+        threshold = max(1, int(np.ceil(total * probability)))
+        return float(np.searchsorted(np.cumsum(recovery_histogram), threshold))
+
+    return {
+        "max_underwater_months_mean": float(maximum_duration.mean()),
+        "max_underwater_months_p95": float(np.quantile(maximum_duration, 0.95)),
+        "max_underwater_months_worst": float(maximum_duration.max()),
+        "recovery_months_median": recovery_quantile(0.50),
+        "recovery_months_p95": recovery_quantile(0.95),
+        "unrecovered_at_horizon": float((current_duration > 0).mean()),
+    }
+
+
+def _rolling_return_metrics(period_returns: np.ndarray, window: int = 12) -> dict[str, float]:
+    """Summarize each path's worst compounded rolling return."""
+
+    periods = period_returns.shape[0]
+    window = max(1, min(int(window), periods))
+    finite = np.isfinite(period_returns)
+    clipped = np.clip(np.where(finite, period_returns, 0.0), -0.999999999, None)
+    logs = np.where(finite, np.log1p(clipped), 0.0)
+    cumulative_logs = np.vstack([np.zeros((1, logs.shape[1])), np.cumsum(logs, axis=0)])
+    cumulative_counts = np.vstack([np.zeros((1, logs.shape[1]), dtype=int), np.cumsum(finite, axis=0)])
+    rolling_logs = cumulative_logs[window:] - cumulative_logs[:-window]
+    rolling_counts = cumulative_counts[window:] - cumulative_counts[:-window]
+    rolling_returns = np.where(rolling_counts == window, np.expm1(rolling_logs), np.inf)
+    path_worst = np.min(rolling_returns, axis=0)
+    path_worst = path_worst[np.isfinite(path_worst)]
+    if not path_worst.size:
+        return {
+            "rolling_window_months": float(window),
+            "worst_rolling_return": 0.0,
+            "worst_rolling_return_p05": 0.0,
+            "median_worst_rolling_return": 0.0,
+        }
+    return {
+        "rolling_window_months": float(window),
+        "worst_rolling_return": float(path_worst.min()),
+        "worst_rolling_return_p05": float(np.quantile(path_worst, 0.05)),
+        "median_worst_rolling_return": float(np.median(path_worst)),
+    }
+
+
+def _drawdown_chart_analytics(
+    values: np.ndarray,
+    initial_value: float,
+    max_episode_paths: int = 1_000,
+    max_episodes: int = 4_000,
+) -> dict[str, Any]:
+    """Build bounded drawdown bands and representative depth-duration episodes."""
+
+    periods, paths = values.shape
+    running_peak = np.full(paths, initial_value, dtype=float)
+    drawdown_bands = {key: [] for key in ("p05", "median", "p95")}
+    recovery_bands = {key: [] for key in ("p05", "median", "p95")}
+    recovery_capped = False
+    for period_values in values:
+        running_peak = np.maximum(running_peak, period_values)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            drawdown = period_values / running_peak - 1.0
+            raw_recovery = running_peak / np.maximum(period_values, initial_value * 1e-12) - 1.0
+        drawdown = np.nan_to_num(drawdown, nan=-1.0, neginf=-1.0, posinf=0.0)
+        recovery_capped = recovery_capped or bool(np.any(raw_recovery > 99.0))
+        recovery = np.nan_to_num(raw_recovery, nan=99.0, neginf=99.0, posinf=99.0)
+        recovery = np.clip(recovery, 0.0, 99.0)
+        drawdown_quantiles = np.quantile(drawdown, [0.05, 0.50, 0.95])
+        recovery_quantiles = np.quantile(recovery, [0.05, 0.50, 0.95])
+        for key, value in zip(drawdown_bands, drawdown_quantiles, strict=True):
+            drawdown_bands[key].append(float(value))
+        for key, value in zip(recovery_bands, recovery_quantiles, strict=True):
+            recovery_bands[key].append(float(value))
+
+    source_indices = _reporting_indices(paths, max_episode_paths)
+    episodes: list[tuple[int, int, float, bool]] = []
+    for path_index in source_indices:
+        peak = initial_value
+        duration = 0
+        maximum_depth = 0.0
+        for period_value in values[:, path_index]:
+            if period_value >= peak:
+                if duration:
+                    episodes.append((int(path_index), duration, maximum_depth, True))
+                peak = float(period_value)
+                duration = 0
+                maximum_depth = 0.0
+                continue
+            duration += 1
+            maximum_depth = max(maximum_depth, 1.0 - float(period_value) / peak)
+        if duration:
+            episodes.append((int(path_index), duration, maximum_depth, False))
+    if len(episodes) > max_episodes:
+        episode_indices = np.linspace(0, len(episodes) - 1, max_episodes, dtype=int)
+        episodes = [episodes[index] for index in episode_indices]
+
+    return {
+        "drawdown_fan": {
+            "periods": list(range(1, periods + 1)),
+            **drawdown_bands,
+        },
+        "recovery_required": {
+            "periods": list(range(1, periods + 1)),
+            **recovery_bands,
+            "capped": recovery_capped,
+            "cap": 99.0,
+        },
+        "drawdown_episodes": {
+            "points": [
+                {
+                    "path": path_index,
+                    "duration_months": duration,
+                    "depth": depth,
+                    "recovered": recovered,
+                }
+                for path_index, duration, depth, recovered in episodes
+            ],
+            "source_paths": int(len(source_indices)),
+            "total_paths": int(paths),
+            "sampled": bool(len(source_indices) < paths or len(episodes) == max_episodes),
+        },
+    }
+
+
+def _rolling_horizon_analytics(period_returns: np.ndarray) -> dict[str, Any]:
+    """Summarize annualized returns across rolling investment horizons."""
+
+    periods, paths = period_returns.shape
+    reporting_indices = _reporting_indices(paths)
+    sampled = period_returns[:, reporting_indices]
+    finite = np.isfinite(sampled) & (sampled > -1.0)
+    log_returns = np.where(finite, np.log1p(np.where(finite, sampled, 0.0)), 0.0)
+    cumulative_logs = np.vstack(
+        [np.zeros((1, sampled.shape[1])), np.cumsum(log_returns, axis=0)]
+    )
+    cumulative_counts = np.vstack(
+        [np.zeros((1, sampled.shape[1]), dtype=int), np.cumsum(finite, axis=0)]
+    )
+    horizons = sorted(
+        {horizon for horizon in (12, 36, 60, 120, 240, 360, periods) if 12 <= horizon <= periods}
+    )
+    response: dict[str, Any] = {
+        "months": [],
+        "p05": [],
+        "median": [],
+        "p95": [],
+        "probability_of_loss": [],
+        "sample_paths": int(len(reporting_indices)),
+        "total_paths": int(paths),
+    }
+    for horizon in horizons:
+        rolling_logs = cumulative_logs[horizon:] - cumulative_logs[:-horizon]
+        rolling_counts = cumulative_counts[horizon:] - cumulative_counts[:-horizon]
+        valid_logs = rolling_logs[rolling_counts == horizon]
+        if not valid_logs.size:
+            continue
+        with np.errstate(over="ignore", invalid="ignore"):
+            annualized = np.expm1(np.clip(valid_logs * 12.0 / horizon, -20.0, 20.0))
+        annualized = annualized[np.isfinite(annualized)]
+        if not annualized.size:
+            continue
+        quantiles = np.quantile(annualized, [0.05, 0.50, 0.95])
+        response["months"].append(int(horizon))
+        response["p05"].append(float(quantiles[0]))
+        response["median"].append(float(quantiles[1]))
+        response["p95"].append(float(quantiles[2]))
+        response["probability_of_loss"].append(float(np.mean(annualized < 0.0)))
+    return response
+
+
+def _goal_probability_curve(
+    terminal: np.ndarray,
+    initial_value: float,
+    target_wealth: float,
+) -> dict[str, list[float]]:
+    """Return an exact terminal target-success curve over useful wealth levels."""
+
+    clean = np.sort(np.asarray(terminal, dtype=float)[np.isfinite(terminal)])
+    if not clean.size:
+        return {"targets": [], "success_probability": []}
+    lower, upper = np.quantile(clean, [0.01, 0.99])
+    targets = np.unique(
+        np.concatenate(
+            [
+                np.linspace(max(0.0, float(lower)), float(upper), 31),
+                np.asarray([initial_value, target_wealth], dtype=float),
+            ]
+        )
+    )
+    successes = 1.0 - np.searchsorted(clean, targets, side="left") / clean.size
+    return {
+        "targets": targets.tolist(),
+        "success_probability": successes.tolist(),
+    }
+
+
 def _path_analytics(
     wealth: pd.DataFrame,
     result: Any,
     payload: Mapping[str, Any],
+    model: Any | None = None,
     initial_value: float = 100.0,
+    drawdowns: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Build decision-focused path analytics without retaining asset return cubes."""
 
@@ -809,6 +1085,9 @@ def _path_analytics(
     contribution = float(payload.get("contribution", 0.0))
     withdrawal = float(payload.get("withdrawal", 0.0))
     risk_free_rate = float(payload.get("risk_free_rate", 0.0)) / 100.0
+    target_wealth = float(payload.get("target_wealth", initial_value * 2.0))
+    if not np.isfinite(target_wealth) or target_wealth <= 0:
+        raise ValueError("target_wealth must be positive and finite.")
     previous = np.vstack([np.full(paths, initial_value), values[:-1]])
     denominator = previous + contribution
     numerator = values + withdrawal
@@ -825,11 +1104,60 @@ def _path_analytics(
         np.exp(log_sums / np.maximum(valid_counts, 1) * 12.0) - 1.0,
         0.0,
     )
+    nominal_risk_free = np.full((periods, paths), risk_free_rate, dtype=float)
+    annual_inflation = np.full(
+        (periods, paths),
+        float(payload.get("annual_inflation", 0.0)) / 100.0,
+        dtype=float,
+    )
+    if model is not None and result.macro_paths is not None:
+        dynamics = model.metadata.get("macro_dynamics", {})
+        rate_col = model.metadata.get("rate_col")
+        inflation_col = model.metadata.get("inflation_col")
+        if rate_col in result.macro_columns:
+            nominal_risk_free = result.macro_paths[:, :, result.macro_columns.index(rate_col)].astype(float)
+            if bool(dynamics.get("rate_is_percent", model.metadata.get("rate_is_percent", False))):
+                nominal_risk_free /= 100.0
+            nominal_risk_free = np.clip(nominal_risk_free, -0.05, 0.50)
+        if inflation_col in result.macro_columns:
+            annual_inflation = result.macro_paths[
+                :, :, result.macro_columns.index(inflation_col)
+            ].astype(float)
+            if bool(dynamics.get("inflation_is_percent", False)):
+                annual_inflation /= 100.0
+            annual_inflation = np.clip(annual_inflation, -0.10, 0.50)
+    real_risk_free = (1.0 + nominal_risk_free) / (1.0 + annual_inflation) - 1.0
+    path_risk_free = np.mean(real_risk_free, axis=0)
     with np.errstate(divide="ignore", invalid="ignore"):
-        sharpe = (annual_return - risk_free_rate) / annual_volatility
+        sharpe = (annual_return - path_risk_free) / annual_volatility
     sharpe[~np.isfinite(sharpe)] = 0.0
-    drawdowns = _max_drawdown_paths(wealth, initial_value=initial_value)
+    if drawdowns is None:
+        drawdowns = _max_drawdown_paths(wealth, initial_value=initial_value)
     terminal = values[-1]
+    misses = terminal < target_wealth
+    expected_goal_shortfall = (
+        float(np.mean(target_wealth - terminal[misses])) if misses.any() else 0.0
+    )
+    periodic_target = np.power(1.0 + real_risk_free, 1.0 / 12.0) - 1.0
+    finite_mask = np.isfinite(period_returns)
+    finite_period_returns = period_returns[finite_mask]
+    excess = finite_period_returns - periodic_target[finite_mask]
+    omega_gains = float(np.maximum(excess, 0.0).sum())
+    omega_losses = float(np.maximum(-excess, 0.0).sum())
+    duration_metrics = _drawdown_duration_metrics(values, initial_value)
+    rolling_metrics = _rolling_return_metrics(period_returns)
+    drawdown_charts = _drawdown_chart_analytics(values, initial_value)
+    rolling_horizons = _rolling_horizon_analytics(period_returns)
+    goal_curve = _goal_probability_curve(terminal, initial_value, target_wealth)
+    decision_metrics = {
+        "target_wealth": target_wealth,
+        "goal_success_probability": float((terminal >= target_wealth).mean()),
+        "expected_goal_shortfall": expected_goal_shortfall,
+        "risk_of_ruin": float(np.any(values <= 0.0, axis=0).mean()),
+        "omega_ratio": min(omega_gains / omega_losses, 999.0) if omega_losses > 1e-12 else 999.0,
+        **duration_metrics,
+        **rolling_metrics,
+    }
 
     invested = initial_value + (contribution - withdrawal) * np.arange(1, periods + 1)
     success = {
@@ -837,6 +1165,7 @@ def _path_analytics(
         "survival": np.mean(values > 0.0, axis=1).tolist(),
         "preservation": np.mean(values >= initial_value, axis=1).tolist(),
         "profit": np.mean(values >= np.maximum(invested, 0.0)[:, None], axis=1).tolist(),
+        "target": np.mean(values >= target_wealth, axis=1).tolist(),
     }
 
     metric_values = {
@@ -910,6 +1239,10 @@ def _path_analytics(
         }
 
     return {
+        "decision_metrics": decision_metrics,
+        **drawdown_charts,
+        "rolling_horizons": rolling_horizons,
+        "goal_curve": goal_curve,
         "success": success,
         "metric_distributions": metric_distributions,
         "representative_scenarios": scenarios,
@@ -939,11 +1272,60 @@ def _simulated_regime_summary(result: Any) -> pd.DataFrame:
     )
 
 
+def _persistence_response(model: Any, result: Any) -> dict[str, Any]:
+    """Summarize calibrated duration hazards and simulated switching."""
+
+    durations = model.metadata.get("sojourn_durations", {})
+    expected = model.metadata.get("expected_duration_months", {})
+    counts = _regime_counts(result)
+    total = max(sum(counts.values()), 1)
+    states: list[dict[str, Any]] = []
+    expected_switch_rate = 0.0
+    for state in model.states:
+        observed = np.asarray(durations.get(state, []), dtype=float)
+        expected_months = float(expected.get(state, np.nan))
+        share = float(counts.get(state, 0)) / total
+        if np.isfinite(expected_months) and expected_months > 0:
+            expected_switch_rate += share / expected_months
+        states.append(
+            {
+                "state": state,
+                "label": _state_label(state),
+                "expected_months": expected_months,
+                "historical_mean_months": float(observed.mean()) if len(observed) else None,
+                "historical_median_months": float(np.median(observed)) if len(observed) else None,
+                "historical_episodes": int(len(observed)),
+            }
+        )
+    regimes = np.asarray(result.regimes)
+    simulated_switch_rate = (
+        float(np.mean(regimes[1:] != regimes[:-1])) if regimes.shape[0] > 1 else 0.0
+    )
+    switches_per_decade = 120.0 * expected_switch_rate
+    low_persistence = bool(
+        switches_per_decade > 24.0
+        or any(
+            np.isfinite(item["expected_months"]) and item["expected_months"] < 5.0
+            for item in states
+        )
+    )
+    return {
+        "expected_switches_per_decade": float(switches_per_decade),
+        "simulated_switches_per_decade": float(simulated_switch_rate * 120.0),
+        "expected_months_between_switches": (
+            float(1.0 / expected_switch_rate) if expected_switch_rate > 0 else None
+        ),
+        "low_persistence_warning": low_persistence,
+        "states": states,
+    }
+
+
 def _json_value(value: Any) -> Any:
     if isinstance(value, (np.integer,)):
         return int(value)
-    if isinstance(value, (np.floating,)):
-        return float(value)
+    if isinstance(value, (float, np.floating)):
+        resolved = float(value)
+        return resolved if np.isfinite(resolved) else None
     if isinstance(value, (np.bool_,)):
         return bool(value)
     if isinstance(value, (pd.Timestamp,)):
@@ -1025,6 +1407,11 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
     percentiles = _wealth_percentiles(wealth)
     terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
+    drawdown_values = _max_drawdown_paths(
+        wealth,
+        initial_value=float(payload.get("initial_value", 100.0)),
+    )
+    reporting_indices = _reporting_indices(len(terminal_values))
     regime_timelines: dict[str, list[str]] = {}
     for label, target in (("p05", 0.05), ("median", 0.50), ("p95", 0.95)):
         target_value = float(np.quantile(terminal_values, target))
@@ -1087,8 +1474,18 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         wealth,
         result,
         payload,
+        model=model,
         initial_value=float(payload.get("initial_value", 100.0)),
+        drawdowns=drawdown_values,
     )
+    summary_values.update(path_analytics["decision_metrics"])
+    persistence = _persistence_response(model, result)
+    warnings = list(scenario.diagnostics.warnings)
+    if persistence["low_persistence_warning"]:
+        warnings.append(
+            "Regime persistence is unusually low for a macro-state model; review the "
+            "smoothing, hysteresis, confirmation, and duration assumptions."
+        )
 
     return {
         "ok": True,
@@ -1100,7 +1497,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             or model.metadata.get("inflation_model") == "joint_macro_path"
             else "nominal"
         ),
-        "warnings": list(scenario.diagnostics.warnings),
+        "warnings": warnings,
         "costs": costs,
         "wealth": {
             "periods": list(range(1, len(wealth) + 1)),
@@ -1112,12 +1509,18 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             wealth,
             {**dict(payload), "annual_inflation": 0.0},
         ),
-        "terminal": terminal_values.tolist(),
-        "drawdowns": _max_drawdown_paths(wealth).tolist(),
+        "terminal": terminal_values[reporting_indices].tolist(),
+        "drawdowns": drawdown_values[reporting_indices].tolist(),
+        "reporting_sample": {
+            "paths": int(len(reporting_indices)),
+            "total_paths": int(len(terminal_values)),
+            "sampled": bool(len(reporting_indices) < len(terminal_values)),
+        },
         **path_analytics,
         "regime_timeline": regime_timelines["median"],
         "regime_timelines": regime_timelines,
         "regime_mix": [{"label": label, "share": float(share)} for label, share in regime_mix.items()],
+        "persistence": persistence,
         "transition": {
             "labels": [_state_label(state) for state in model.transition_matrix.index],
             "values": model.transition_matrix.to_numpy(dtype=float).tolist(),
@@ -1150,11 +1553,20 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "availability_aligned": bool(model.metadata.get("availability_aligned", False)),
             "macro_lag_periods": int(model.metadata.get("macro_lag_periods", 0)),
             "regime_assignment": model.metadata.get("regime_assignment", "hard"),
+            "transition_estimator": model.metadata.get("transition_estimator", "hard_labels"),
+            "regime_smoothing_window": int(model.metadata.get("regime_smoothing_window", 1)),
+            "regime_hysteresis": float(model.metadata.get("regime_hysteresis", 0.0)),
+            "regime_confirmation_periods": int(
+                model.metadata.get("regime_confirmation_periods", 1)
+            ),
+            "duration_model_kind": model.metadata.get("duration_model_kind", "markov"),
+            "min_regime_duration": int(payload.get("min_regime_duration", 5)),
             "mean_prior_strength": float(model.metadata.get("mean_prior_strength", 0.0)),
             "parameter_draws": int(payload.get("parameter_draws", 0)),
             "joint_macro": bool(payload.get("joint_macro", False)),
             "dynamic_correlation": bool(payload.get("dynamic_correlation", False)),
             "inflation_model": model.metadata.get("inflation_model", "deterministic"),
+            "rate_model": model.metadata.get("rate_model", "deterministic"),
         },
         "model_kind": scenario.model.metadata.get("model_kind", "quadrant"),
         "diagnostics": {
