@@ -273,6 +273,24 @@ def test_drawdown_duration_metrics_track_recovery_episodes():
     assert metrics["unrecovered_at_horizon"] == pytest.approx(0.0)
 
 
+def test_drawdown_chart_analytics_handles_monotonic_and_recovery_paths():
+    monotonic = api._drawdown_chart_analytics(
+        np.array([[101.0], [102.0], [103.0]]),
+        initial_value=100.0,
+    )
+    assert monotonic["drawdown_episodes"]["points"] == []
+
+    recovered = api._drawdown_chart_analytics(
+        np.array([[110.0], [90.0], [100.0], [120.0]]),
+        initial_value=100.0,
+    )
+    point = recovered["drawdown_episodes"]["points"][0]
+    assert point["path"] == 0
+    assert point["duration_months"] == 2
+    assert point["depth"] == pytest.approx(1.0 - 90.0 / 110.0)
+    assert point["recovered"] is True
+
+
 def test_goal_probability_curve_uses_terminal_distribution():
     curve = api._goal_probability_curve(
         np.array([50.0, 100.0, 150.0]),
@@ -558,7 +576,7 @@ def test_simulate_reports_decision_analytics_and_sequence_risk():
     assert len(response["drawdown_fan"]["p05"]) == 24
     assert len(response["recovery_required"]["median"]) == 24
     assert response["drawdown_episodes"]["source_paths"] == 80
-    assert response["drawdown_episodes"]["points"]
+    assert isinstance(response["drawdown_episodes"]["points"], list)
     assert response["rolling_horizons"]["months"] == [12, 24]
     assert len(response["rolling_horizons"]["p05"]) == 2
     assert response["goal_curve"]["targets"]
