@@ -12,8 +12,8 @@ macro quadrants:
 
 The model is designed to be calibrated from real historical data:
 
-1. Release-aware macro data is mapped to persistence-filtered quadrants, while soft probabilities weight return moments.
-2. Semi-Markov transitions and regime-conditioned macro dynamics are calibrated.
+1. Release-aware macro data initializes semantically identified growth/inflation quadrants.
+2. An explicit-duration hidden semi-Markov model jointly estimates latent states, state-age hazards, and exit destinations.
 3. Parametric return means are shrunk and covariance matrices use Ledoit-Wolf shrinkage.
 4. Optional stationary-bootstrap recalibrations measure parameter uncertainty.
 5. Growth, inflation, the short rate, regimes, returns, dynamic correlations, and portfolio accounting are simulated together.
@@ -132,19 +132,39 @@ UIs default to a 12-period window. Direct calibration keeps the full-sample
 behavior unless `threshold_window` is supplied; walk-forward validation always
 uses a causal 12-period window when none is supplied.
 
-Regime transitions use a persistence-aware hard path: a causal three-month
+HSMM initialization uses a persistence-aware hard path: a causal three-month
 trailing macro average, threshold hysteresis (default `0.15` historical standard
 deviations), and two-month confirmation before accepting a new quadrant. Soft
-logistic probabilities remain available, with width controlled by
-`regime_temperature`, but they weight return moments only. They are deliberately
-not multiplied as independent adjacent memberships to estimate transitions.
+logistic quadrant probabilities remain part of the joint macro simulator, with
+width controlled by `regime_temperature`. They are deliberately not multiplied
+as independent adjacent memberships to estimate historical transitions.
 
-### 3. Markov Regime Model
+### 3. Explicit-Duration Hidden Semi-Markov Model
 
-The transition matrix counts adjacent observations from the persistence-filtered
-hard state path and adds the configured smoothing value to every cell before
-normalizing each row. The default smoothing value is `1.0`, which prevents
-zero-probability transitions when history is sparse.
+The default quadrant model is a Gaussian-emission hidden semi-Markov model
+(HSMM). Growth and inflation are the observed emissions, while the hidden state
+is expanded to `(quadrant, months in quadrant)`. The persistent classifier fixes
+the economic identity of the four emission distributions, but it does not
+provide the final transition counts.
+
+A scaled forward-backward pass returns filtered state probabilities, smoothed
+state-age posteriors, and joint expected transitions. EM updates two distinct
+objects from those joint posteriors:
+
+- a zero-diagonal exit-destination matrix describing where the economy moves
+  after leaving each quadrant;
+- state- and age-specific discrete exit hazards describing when it leaves.
+
+The Viterbi path provides a duration-consistent hard history for diagnostics and
+historical bootstrap pools. When probabilistic return moments are enabled, the
+causal filtered HSMM probabilities weight observations instead. Transition
+estimation never uses products of independent marginal memberships.
+
+The transition heatmap shown by the API and UI is a one-month summary of the
+HSMM: each state's expected exit rate is combined with its exit-destination
+probabilities. The underlying destination matrix, filtered/smoothed
+probabilities, convergence status, log likelihood, and state-age posterior are
+retained in model metadata.
 
 When transition uncertainty is non-zero, each transition row is sampled from a
 Dirichlet distribution. The dashboard maps uncertainty `u` in `[0, 1]` to a
@@ -159,16 +179,20 @@ macro dynamics. This separates uncertainty in fitted parameters from ordinary
 market-path randomness.
 
 A first-order Markov chain implies a constant exit hazard and geometrically
-distributed run lengths. With **semi-Markov durations**, the simulator instead
-uses regularized state- and age-specific discrete exit hazards. Each sparse
-state-age estimate is shrunk toward the pooled age-dependent hazard, and the
-final historical run is treated as right-censored. No short historical episode
-is discarded. The minimum simulated duration is five months by default; after
-that floor, exit risk can change with regime age. The dashboard and scenario API
-default to this semi-Markov model, while explicit `duration_model="markov"`
-retains the first-order chain. The age-dependent hazard design follows the
+distributed run lengths. The HSMM instead regularizes sparse state-age expected
+exit counts toward the pooled age-dependent hazard. The minimum duration is five
+months by default; after that floor, exit risk can change with regime age. No
+short historical episode is discarded before fitting. The dashboard and
+scenario API default to explicit HSMM durations, while
+`duration_model="markov"` remains a sensitivity benchmark using the one-month
+summary matrix. The age-dependent hazard design follows the
 motivation in the Federal Reserve Bank of Minneapolis discussion paper
 [A Markov-Switching Model of GNP Growth with Duration Dependence](https://www.minneapolisfed.org/research/discussion-papers/a-markov-switching-model-of-gnp-growth-with-duration-dependence).
+
+With joint macro paths enabled, simulated growth and inflation update the
+destination probabilities at each eligible exit. Consequently, simulated
+transitions depend on both regime age and current macro conditions rather than
+on age alone.
 
 An alternative **HMM regime model** fits a Gaussian-emission hidden Markov
 model directly on asset returns with expectation-maximization (states learned
@@ -504,7 +528,7 @@ Both frontends delegate all data loading, scenario building, and result
 shaping to the shared `mc_quadrants.api` layer, so the simulation methodology
 is identical regardless of the interface. The **Model methodology** section
 in each sidebar selects the regime model (quadrant or HMM), the regime
-duration model (Markov chain or semi-Markov), the causal threshold window,
+duration model (Markov benchmark or explicit-duration HSMM), the causal threshold window,
 three-month smoothing, hysteresis, transition confirmation, probabilistic
 moment weights, expected-return and duration-hazard shrinkage, parameter
 recalibrations, joint macro paths, GARCH/ADCC dynamics, and walk-forward

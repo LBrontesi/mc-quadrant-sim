@@ -52,6 +52,8 @@ def test_pipeline_supports_semi_markov_duration_model():
     scenario = run_scenario(**_scenario_kwargs({"duration_model": "semi_markov"}))
 
     assert scenario.result.regimes.shape == (4, 8)
+    assert scenario.result.regimes.dtype.kind in "iu"
+    assert scenario.reporting_wealth is scenario.wealth
     assert scenario.model.metadata["model_kind"] == "quadrant"
 
 

@@ -8,6 +8,7 @@ should only call these functions and render the returned dicts/frames.
 from __future__ import annotations
 
 import io
+import os
 import re
 from collections.abc import Mapping
 from datetime import date
@@ -523,7 +524,17 @@ def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
 def _workers_value(payload: Mapping[str, Any]) -> int:
     raw = payload.get("workers")
     if raw is None or raw == "":
-        return 1
+        paths = int(payload.get("paths", 3000))
+        periods = int(payload.get("periods", 120))
+        assets = _asset_count(payload)
+        chunk_size = min(_chunk_size_value(payload) or paths, paths)
+        chunk_count = max(1, (paths + chunk_size - 1) // chunk_size)
+        work_units = periods * paths * assets
+        if chunk_count < 2 or work_units < 2_000_000:
+            return 1
+        configured_cap = int(os.getenv("MC_SIM_MAX_AUTO_WORKERS", "4"))
+        auto_cap = max(1, min(configured_cap, MAX_WORKERS))
+        return min(max(os.cpu_count() or 1, 1), auto_cap, chunk_count)
     workers = int(raw)
     if workers < 1 or workers > MAX_WORKERS:
         raise ValueError(f"workers must be between 1 and {MAX_WORKERS}.")
@@ -1561,6 +1572,10 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             ),
             "duration_model_kind": model.metadata.get("duration_model_kind", "markov"),
             "min_regime_duration": int(payload.get("min_regime_duration", 5)),
+            "hsmm_log_likelihood": model.metadata.get("hsmm_log_likelihood"),
+            "hsmm_iterations": model.metadata.get("hsmm_iterations"),
+            "hsmm_converged": model.metadata.get("hsmm_converged"),
+            "hsmm_max_duration": model.metadata.get("hsmm_max_duration"),
             "mean_prior_strength": float(model.metadata.get("mean_prior_strength", 0.0)),
             "parameter_draws": int(payload.get("parameter_draws", 0)),
             "joint_macro": bool(payload.get("joint_macro", False)),

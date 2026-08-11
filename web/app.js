@@ -1091,7 +1091,7 @@ function gatherScenario() {
     financing_rate: Number($("financing-rate").value),
     financing_inflation_sensitivity: Number($("financing-inflation-sensitivity").value),
     maintenance_margin: Number($("maintenance-margin").value),
-    workers: Number($("workers").value || 1),
+    workers: $("workers").value === "" ? null : Number($("workers").value),
     risk_free_rate: Number($("risk-free").value),
     annual_inflation: Number($("annual-inflation").value),
     base_currency: $("base-currency").value,
@@ -1162,14 +1162,15 @@ function validateScenario() {
   }
   const periods = Number($("periods").value);
   const paths = Number($("paths").value);
-  const workers = Number($("workers").value);
+  const workerValue = $("workers").value;
+  const workers = workerValue === "" ? null : Number(workerValue);
   if (!Number.isInteger(periods) || periods < 1 || periods > 360) {
     errors.push("Periods must be between 1 and 360.");
   }
   if (!Number.isInteger(paths) || paths < 1 || paths > 120000) {
     errors.push("Paths must be between 1 and 120,000.");
   }
-  if (!Number.isInteger(workers) || workers < 1 || workers > 16) {
+  if (workers !== null && (!Number.isInteger(workers) || workers < 1 || workers > 16)) {
     errors.push("Workers must be between 1 and 16.");
   }
   return errors;
@@ -1493,8 +1494,8 @@ function renderScenarioChips(payload, data) {
   chips.push(data.currency);
   chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
   chips.push(payload.model === "hmm" ? `HMM · ${payload.hmm_states} states` : "Quadrant model");
-  chips.push(payload.duration_model === "semi_markov" ? "Semi-Markov durations" : "Markov durations");
-  if (payload.probabilistic_regimes) chips.push("Soft moment weights");
+  chips.push(payload.duration_model === "semi_markov" ? "HSMM explicit durations" : "Markov durations");
+  if (payload.probabilistic_regimes) chips.push("HSMM-filtered moment weights");
   if (Number(payload.parameter_draws) > 0) chips.push(`${payload.parameter_draws} parameter draws`);
   if (payload.joint_macro) chips.push("Joint macro paths");
   if (payload.dynamic_correlation) chips.push("Dynamic dependence");
@@ -1506,11 +1507,16 @@ function renderMethodologyReport(data) {
   const methodology = data.methodology || {};
   const validation = data.validation?.summary || {};
   const validationAvailable = Boolean(data.validation?.summary);
+  const hsmmActive = methodology.duration_model_kind === "hidden_semi_markov_explicit_duration";
   const safeguards = [
     [methodology.point_in_time, methodology.point_in_time ? "Point-in-time macro vintages" : "Latest-revised macro history"],
     [methodology.availability_aligned, methodology.availability_aligned ? "Release-calendar aligned" : "Period-lag approximation"],
     [methodology.regime_assignment === "probabilistic", "Soft regime weights for return moments"],
-    [methodology.transition_estimator === "persistence_filtered_hard_labels", "Persistence-filtered transitions"],
+    [methodology.transition_estimator === "hsmm_forward_backward_joint_posteriors", "HSMM joint-posterior transitions"],
+    [!hsmmActive || methodology.hsmm_converged,
+      hsmmActive && methodology.hsmm_converged
+        ? `HSMM converged in ${Number(methodology.hsmm_iterations)} iterations`
+        : hsmmActive ? "HSMM convergence limit reached" : "Return-state HMM selected"],
     [Number(methodology.parameter_draws) > 0, `${Number(methodology.parameter_draws) || 0} parameter recalibrations`],
     [Boolean(methodology.joint_macro), "Joint macro/market paths"],
     [methodology.rate_model === "joint_macro_path", "Stochastic policy-rate paths"],

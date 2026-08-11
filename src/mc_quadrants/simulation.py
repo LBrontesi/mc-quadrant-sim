@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
-from mc_quadrants.matrix import covariance_to_correlation, nearest_psd
+from mc_quadrants.matrix import nearest_psd
 from mc_quadrants.types import ScenarioModel, SimulationResult
 
 
@@ -44,23 +44,6 @@ def _rng(random_seed: int | None = None) -> np.random.Generator:
     return np.random.default_rng(random_seed)
 
 
-def _sample_multivariate_t(
-    rng: np.random.Generator,
-    mean: np.ndarray,
-    covariance: np.ndarray,
-    size: int,
-    degrees_of_freedom: float,
-) -> np.ndarray:
-    """Draw Student-t returns with the requested covariance matrix."""
-
-    # Scale the normal mixture so the resulting t distribution retains the
-    # calibrated covariance when degrees_of_freedom is finite.
-    scale = covariance * (degrees_of_freedom - 2.0) / degrees_of_freedom
-    normal_draws = rng.multivariate_normal(np.zeros(len(mean)), scale, size=size)
-    chi_squared = rng.chisquare(degrees_of_freedom, size=size)
-    return mean + normal_draws / np.sqrt(chi_squared / degrees_of_freedom)[:, None]
-
-
 def _sample_transition_matrix(
     rng: np.random.Generator,
     transition: np.ndarray,
@@ -73,22 +56,74 @@ def _sample_transition_matrix(
     return np.vstack([rng.dirichlet(np.maximum(row, 1e-12) * concentration) for row in transition])
 
 
-def _sample_sojourn(
+def _sample_sojourns(
     rng: np.random.Generator,
-    state: int,
+    state_indices: np.ndarray,
     hazard_map: dict[str, np.ndarray],
     states: list[str],
     min_duration: int = 5,
-) -> int:
-    """Draw a run length from a regularized, duration-dependent hazard."""
+) -> np.ndarray:
+    """Vectorized duration draws for a batch of state indexes."""
 
-    hazards = np.asarray(hazard_map.get(states[state], []), dtype=float)
-    if not len(hazards):
-        raise ValueError(f"No duration hazards are available for state {states[state]!r}.")
-    for age, hazard in enumerate(hazards, start=1):
-        if age >= min_duration and rng.random() < float(hazard):
-            return age
-    return max(len(hazards), min_duration)
+    state_indices = np.asarray(state_indices, dtype=int)
+    durations = np.empty(len(state_indices), dtype=np.int32)
+    for state_index, state in enumerate(states):
+        positions = np.flatnonzero(state_indices == state_index)
+        if not len(positions):
+            continue
+        hazards = np.asarray(hazard_map.get(state, []), dtype=float)
+        if not len(hazards):
+            raise ValueError(f"No duration hazards are available for state {state!r}.")
+        eligible = hazards.copy()
+        eligible[: max(min_duration - 1, 0)] = 0.0
+        cumulative_exit = 1.0 - np.cumprod(1.0 - np.clip(eligible, 0.0, 1.0))
+        sampled = np.searchsorted(cumulative_exit, rng.random(len(positions)), side="right") + 1
+        durations[positions] = np.where(
+            sampled > len(hazards),
+            max(len(hazards), min_duration),
+            sampled,
+        )
+    return durations
+
+
+def _decode_regime_codes(codes: np.ndarray, states: list[str]) -> np.ndarray:
+    """Map compact state codes to public string labels in one vectorized pass."""
+
+    return np.asarray(states, dtype=object)[codes]
+
+
+def _batched_cholesky(values: np.ndarray, epsilon: float = 1e-10) -> np.ndarray:
+    """Cholesky-factor a stack of small matrices across paths.
+
+    NumPy's general batched LAPACK dispatch has noticeable overhead for the
+    simulator's many 4-12 dimensional DCC matrices. This implementation loops
+    over the small asset dimension while vectorizing every operation across
+    paths, which keeps the hot path inside NumPy kernels.
+    """
+
+    matrices = np.asarray(values, dtype=float)
+    if matrices.ndim != 3 or matrices.shape[1] != matrices.shape[2]:
+        raise ValueError("values must contain a stack of square matrices.")
+    factors = np.zeros_like(matrices)
+    dimension = matrices.shape[1]
+    for column in range(dimension):
+        previous = factors[:, column, :column]
+        diagonal = matrices[:, column, column] - np.einsum("ni,ni->n", previous, previous)
+        factors[:, column, column] = np.sqrt(np.maximum(diagonal, epsilon))
+        if column + 1 >= dimension:
+            continue
+        if column:
+            cross = np.einsum(
+                "ni,nki->nk",
+                previous,
+                factors[:, column + 1 :, :column],
+            )
+        else:
+            cross = 0.0
+        factors[:, column + 1 :, column] = (
+            matrices[:, column + 1 :, column] - cross
+        ) / factors[:, column, column, None]
+    return factors
 
 
 def simulate_regime_paths(
@@ -100,6 +135,7 @@ def simulate_regime_paths(
     transition_concentration: float | None = None,
     duration_model: str = "markov",
     min_regime_duration: int = 5,
+    return_codes: bool = False,
 ) -> np.ndarray:
     """Simulate Markov (or semi-Markov) regime paths.
 
@@ -142,35 +178,30 @@ def simulate_regime_paths(
             raise ValueError(f"Unknown start_state: {start_state}")
         current = np.full(paths, states.index(start_state), dtype=int)
 
+    code_dtype = np.min_scalar_type(max(len(states) - 1, 0))
     if duration_model == "markov":
-        simulated = np.empty((periods, paths), dtype=object)
+        simulated = np.empty((periods, paths), dtype=code_dtype)
         for period in range(periods):
-            simulated[period] = [states[index] for index in current]
+            simulated[period] = current
             next_state = np.empty(paths, dtype=int)
             for state_index in range(len(states)):
                 mask = current == state_index
                 if mask.any():
                     next_state[mask] = rng.choice(len(states), size=mask.sum(), p=transition[state_index])
             current = next_state
-        return simulated
+        return simulated if return_codes else _decode_regime_codes(simulated, states)
 
-    simulated = np.empty((periods, paths), dtype=object)
+    simulated = np.empty((periods, paths), dtype=code_dtype)
     remaining = np.empty(paths, dtype=int)
-    for state_index in range(len(states)):
-        mask = current == state_index
-        if mask.any():
-            remaining[mask] = [
-                _sample_sojourn(
-                    rng,
-                    state_index,
-                    duration_hazards,
-                    states,
-                    min_regime_duration,
-                )
-                for _ in range(int(mask.sum()))
-            ]
+    remaining[:] = _sample_sojourns(
+        rng,
+        current,
+        duration_hazards,
+        states,
+        min_regime_duration,
+    )
     for period in range(periods):
-        simulated[period] = [states[index] for index in current]
+        simulated[period] = current
         remaining -= 1
         for state_index in range(len(states)):
             mask = (current == state_index) & (remaining <= 0)
@@ -180,22 +211,16 @@ def simulate_regime_paths(
             probabilities = transition[state_index, other_states]
             probabilities = probabilities / max(float(probabilities.sum()), 1e-300)
             following = rng.choice(other_states, size=mask.sum(), p=probabilities)
-            next_sojourns = np.array(
-                [
-                    _sample_sojourn(
-                        rng,
-                        int(index),
-                        duration_hazards,
-                        states,
-                        min_regime_duration,
-                    )
-                    for index in following
-                ],
-                dtype=int,
+            next_sojourns = _sample_sojourns(
+                rng,
+                following,
+                duration_hazards,
+                states,
+                min_regime_duration,
             )
             current[mask] = following
             remaining[mask] = next_sojourns
-    return simulated
+    return simulated if return_codes else _decode_regime_codes(simulated, states)
 
 
 def _macro_quadrant_probabilities(values: np.ndarray, dynamics: Mapping[str, object]) -> np.ndarray:
@@ -229,6 +254,7 @@ def simulate_joint_regime_macro_paths(
     duration_model: str = "markov",
     min_regime_duration: int = 5,
     macro_transition_weight: float = 0.35,
+    return_codes: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Simulate mutually consistent macro paths and time-varying regimes."""
 
@@ -282,7 +308,8 @@ def simulate_joint_regime_macro_paths(
         else None
     )
     rate_bounds = dynamics.get("rate_bounds")
-    regime_paths = np.empty((periods, paths), dtype=object)
+    code_dtype = np.min_scalar_type(max(len(states) - 1, 0))
+    regime_paths = np.empty((periods, paths), dtype=code_dtype)
     macro_paths = np.empty((periods, paths, current_macro.shape[1]), dtype=float)
     macro_shocks = np.empty_like(macro_paths)
 
@@ -291,21 +318,21 @@ def simulate_joint_regime_macro_paths(
     if duration_model == "semi_markov":
         if not isinstance(duration_hazards, dict):
             raise ValueError("semi_markov requires calibrated duration hazards.")
-        for state_index in range(len(states)):
-            mask = current == state_index
-            remaining[mask] = [
-                _sample_sojourn(
-                    rng,
-                    state_index,
-                    duration_hazards,
-                    states,
-                    min_regime_duration,
-                )
-                for _ in range(int(mask.sum()))
-            ]
+        remaining[:] = _sample_sojourns(
+            rng,
+            current,
+            duration_hazards,
+            states,
+            min_regime_duration,
+        )
+
+    powered_transition = np.power(
+        np.maximum(transition, 1e-12),
+        1.0 - macro_transition_weight,
+    )
 
     for period in range(periods):
-        regime_paths[period] = [states[index] for index in current]
+        regime_paths[period] = current
         next_macro = np.empty_like(current_macro)
         for state_index, state in enumerate(states):
             mask = current == state_index
@@ -339,10 +366,10 @@ def simulate_joint_regime_macro_paths(
             if not mask.any():
                 continue
             path_indexes = np.flatnonzero(mask)
-            base = np.broadcast_to(transition[state_index], (len(path_indexes), len(states)))
             macro_probability = macro_probabilities[path_indexes]
-            combined = np.power(np.maximum(base, 1e-12), 1.0 - macro_transition_weight)
-            combined *= np.power(np.maximum(macro_probability, 1e-12), macro_transition_weight)
+            combined = powered_transition[state_index] * np.power(
+                np.maximum(macro_probability, 1e-12), macro_transition_weight
+            )
             if duration_model == "semi_markov":
                 combined[:, state_index] = 0.0
             combined /= combined.sum(axis=1, keepdims=True)
@@ -351,27 +378,16 @@ def simulate_joint_regime_macro_paths(
             selected = (uniforms[:, None] > cumulative).sum(axis=1)
             following[path_indexes] = np.minimum(selected, len(states) - 1)
             if duration_model == "semi_markov":
-                remaining[path_indexes] = [
-                    _sample_sojourn(
-                        rng,
-                        int(next_state),
-                        duration_hazards,
-                        states,
-                        min_regime_duration,
-                    )
-                    for next_state in following[path_indexes]
-                ]
+                remaining[path_indexes] = _sample_sojourns(
+                    rng,
+                    following[path_indexes],
+                    duration_hazards,
+                    states,
+                    min_regime_duration,
+                )
         current = following
-    return regime_paths, macro_paths, macro_shocks
-
-
-def _normalize_correlation_stack(values: np.ndarray) -> np.ndarray:
-    diagonal = np.sqrt(np.clip(np.diagonal(values, axis1=1, axis2=2), 1e-10, None))
-    correlations = values / (diagonal[:, :, None] * diagonal[:, None, :])
-    correlations = np.clip(correlations, -0.9999, 0.9999)
-    indexes = np.arange(correlations.shape[1])
-    correlations[:, indexes, indexes] = 1.0
-    return correlations
+    public_regimes = regime_paths if return_codes else _decode_regime_codes(regime_paths, states)
+    return public_regimes, macro_paths, macro_shocks
 
 
 def simulate_returns(
@@ -395,6 +411,7 @@ def simulate_returns(
     dcc_alpha: float = 0.04,
     dcc_beta: float = 0.94,
     dcc_asymmetry: float = 0.01,
+    return_regime_codes: bool = False,
 ) -> SimulationResult:
     """Simulate regime-dependent multivariate asset returns.
 
@@ -456,6 +473,7 @@ def simulate_returns(
             duration_model=duration_model,
             min_regime_duration=min_regime_duration,
             macro_transition_weight=macro_transition_weight,
+            return_codes=True,
         )
     else:
         regime_paths = simulate_regime_paths(
@@ -467,6 +485,7 @@ def simulate_returns(
             transition_concentration=transition_concentration,
             duration_model=duration_model,
             min_regime_duration=min_regime_duration,
+            return_codes=True,
         )
     rng = _rng(None if random_seed is None else random_seed + 1)
     assets = model.assets
@@ -482,7 +501,7 @@ def simulate_returns(
         else None
     )
 
-    def state_covariance(state: str) -> np.ndarray:
+    def resolve_state_covariance(state: str) -> np.ndarray:
         if isinstance(macro_dynamics, Mapping):
             residuals = macro_dynamics.get("return_residual_covariances")
             if isinstance(residuals, Mapping) and state in residuals:
@@ -491,11 +510,61 @@ def simulate_returns(
             model.moments[state].covariance.reindex(index=assets, columns=assets).to_numpy(dtype=float)
         )
 
+    # All of these quantities are invariant across periods. Preparing them
+    # once removes repeated Pandas alignment, eigendecompositions, and
+    # covariance factorization from the simulation's inner loop.
+    state_means = np.stack(
+        [model.moments[state].mean.reindex(assets).to_numpy(dtype=float) for state in model.states]
+    )
+    state_covariances = np.stack(
+        [resolve_state_covariance(state) for state in model.states]
+    )
+    state_volatilities = np.sqrt(
+        np.clip(np.diagonal(state_covariances, axis1=1, axis2=2), 0.0, None)
+    )
+    correlation_denominator = state_volatilities[:, :, None] * state_volatilities[:, None, :]
+    state_correlations = np.divide(
+        state_covariances,
+        correlation_denominator,
+        out=np.zeros_like(state_covariances),
+        where=correlation_denominator > 0,
+    )
+    diagonal_indexes = np.arange(len(assets))
+    state_correlations[:, diagonal_indexes, diagonal_indexes] = 1.0
+    state_covariance_cholesky = np.linalg.cholesky(
+        state_covariances + np.eye(len(assets))[None, :, :] * 1e-10
+    )
+    state_correlation_cholesky = np.linalg.cholesky(
+        state_correlations + np.eye(len(assets))[None, :, :] * 1e-10
+    )
+
+    historical_by_state: list[np.ndarray] | None = None
+    if distribution in {"bootstrap", "block_bootstrap"}:
+        available = [
+            frame.loc[:, assets]
+            for frame in model.historical_returns.values()
+            if frame is not None and not frame.empty
+        ]
+        if not available:
+            raise ValueError("No historical returns are available for bootstrap sampling.")
+        fallback_history = pd.concat(available).sort_index().to_numpy(dtype=float)
+        historical_by_state = []
+        for state in model.states:
+            historical = model.historical_returns.get(state)
+            historical_by_state.append(
+                fallback_history
+                if historical is None or historical.empty
+                else historical.loc[:, assets].to_numpy(dtype=float)
+            )
+
     garch_levels: dict[str, np.ndarray] | None = None
     garch_omega: dict[str, np.ndarray] | None = None
     conditional_variance: np.ndarray | None = None
     if garch:
-        garch_levels = {state: np.diag(state_covariance(state)) for state in model.states}
+        garch_levels = {
+            state: state_volatilities[state_index] ** 2
+            for state_index, state in enumerate(model.states)
+        }
         garch_omega = {
             state: (1.0 - garch_alpha - garch_beta) * level for state, level in garch_levels.items()
         }
@@ -509,22 +578,12 @@ def simulate_returns(
 
     for period in range(periods):
         for state_index, state in enumerate(model.states):
-            mask = regime_paths[period] == state
+            mask = regime_paths[period] == state_index
             if not mask.any():
                 continue
             path_indices = np.flatnonzero(mask)
             if distribution in {"bootstrap", "block_bootstrap"}:
-                historical = model.historical_returns.get(state)
-                if historical is None or historical.empty:
-                    available = [
-                        frame
-                        for frame in model.historical_returns.values()
-                        if frame is not None and not frame.empty
-                    ]
-                    if not available:
-                        raise ValueError("No historical returns are available for bootstrap sampling.")
-                    historical = pd.concat(available).sort_index()
-                historical_values = historical.loc[:, assets].to_numpy(dtype=float)
+                historical_values = historical_by_state[state_index]
                 if distribution == "bootstrap":
                     row_indices = rng.integers(len(historical_values), size=len(path_indices))
                 else:
@@ -543,9 +602,7 @@ def simulate_returns(
                     bootstrap_offsets[state_index, path_indices] = state_offsets
                 draws = historical_values[row_indices]
             else:
-                moments = model.moments[state]
-                mean = moments.mean.reindex(assets).to_numpy(dtype=float)
-                covariance = state_covariance(state)
+                mean = state_means[state_index]
                 macro_effect = (
                     macro_shocks[period, path_indices] @ macro_betas
                     if macro_shocks is not None and macro_betas is not None
@@ -553,8 +610,7 @@ def simulate_returns(
                 )
                 reanchored = (period == 0) | (previous_state_indices[path_indices] != state_index)
                 if dynamic_correlation:
-                    covariance_frame = pd.DataFrame(covariance, index=assets, columns=assets)
-                    base_correlation = covariance_to_correlation(covariance_frame).to_numpy(dtype=float)
+                    base_correlation = state_correlations[state_index]
                     if reanchored.any():
                         dcc_q[path_indices[reanchored]] = base_correlation
                     continuing = ~reanchored
@@ -570,9 +626,15 @@ def simulate_returns(
                             + dcc_beta * dcc_q[continuing_paths]
                             + dcc_asymmetry * negative_outer
                         )
-                    correlations = _normalize_correlation_stack(dcc_q[path_indices])
-                    identity = np.eye(len(assets))[None, :, :] * 1e-10
-                    cholesky = np.linalg.cholesky(correlations + identity)
+                    q_values = dcc_q[path_indices]
+                    # If R = D^-1 Q D^-1, then chol(R) = D^-1 chol(Q).
+                    # Factoring Q directly avoids materializing and clipping a
+                    # second full stack of correlation matrices.
+                    cholesky = _batched_cholesky(q_values)
+                    q_scale = np.sqrt(
+                        np.clip(np.diagonal(q_values, axis1=1, axis2=2), 1e-10, None)
+                    )
+                    cholesky /= q_scale[:, :, None]
                     standardized = np.einsum(
                         "nij,nj->ni",
                         cholesky,
@@ -596,7 +658,7 @@ def simulate_returns(
                             + garch_beta * conditional_variance[path_indices]
                         )
                     else:
-                        residual_draws = standardized * np.sqrt(np.diag(covariance))
+                        residual_draws = standardized * state_volatilities[state_index]
                     draws = mean + macro_effect + residual_draws
                     previous_standardized[path_indices] = standardized
                 elif garch:
@@ -604,14 +666,8 @@ def simulate_returns(
                     omega = garch_omega[state]
                     if reanchored.any():
                         conditional_variance[path_indices[reanchored]] = levels
-                    correlation = covariance_to_correlation(
-                        pd.DataFrame(covariance, index=assets, columns=assets)
-                    ).to_numpy(dtype=float)
-                    innovations = rng.multivariate_normal(
-                        np.zeros(len(assets)),
-                        correlation,
-                        size=mask.sum(),
-                    )
+                    innovations = rng.standard_normal((len(path_indices), len(assets)))
+                    innovations = innovations @ state_correlation_cholesky[state_index].T
                     scale = np.sqrt(conditional_variance[path_indices])
                     draws = mean + macro_effect + innovations * scale
                     conditional_variance[path_indices] = (
@@ -620,23 +676,27 @@ def simulate_returns(
                         + garch_beta * conditional_variance[path_indices]
                     )
                 elif distribution == "normal":
-                    draws = mean + macro_effect + rng.multivariate_normal(
-                        np.zeros(len(assets)), covariance, size=mask.sum()
-                    )
+                    residual_draws = rng.standard_normal((len(path_indices), len(assets)))
+                    residual_draws = residual_draws @ state_covariance_cholesky[state_index].T
+                    draws = mean + macro_effect + residual_draws
                 else:
-                    draws = mean + macro_effect + _sample_multivariate_t(
-                        rng,
-                        np.zeros(len(assets)),
-                        covariance,
-                        size=mask.sum(),
-                        degrees_of_freedom=float(degrees_of_freedom),
-                    )
+                    residual_draws = rng.standard_normal((len(path_indices), len(assets)))
+                    residual_draws = residual_draws @ state_covariance_cholesky[state_index].T
+                    residual_draws *= np.sqrt(
+                        (degrees_of_freedom - 2.0)
+                        / rng.chisquare(degrees_of_freedom, size=len(path_indices))
+                    )[:, None]
+                    draws = mean + macro_effect + residual_draws
             returns[period, mask, :] = draws
             previous_state_indices[path_indices] = state_index
 
     return SimulationResult(
         returns=returns,
-        regimes=regime_paths,
+        regimes=(
+            regime_paths
+            if return_regime_codes
+            else _decode_regime_codes(regime_paths, model.states)
+        ),
         assets=assets,
         states=model.states.copy(),
         frequency=model.frequency,
@@ -939,7 +999,11 @@ def simulate_portfolio_paths(
             maintenance_margin,
             contribution,
             withdrawal,
-            regimes=result.regimes if state_financing_rates else None,
+            regimes=(
+                _decode_regime_codes(result.regimes, result.states)
+                if state_financing_rates and result.regimes.dtype.kind in "iu"
+                else result.regimes if state_financing_rates else None
+            ),
             state_financing_rates=state_financing_rates,
             financing_rate_paths=path_financing_rates,
         )
@@ -994,7 +1058,7 @@ def inflation_deflators(
     if inflation_paths is None:
         period = np.arange(1, periods + 1, dtype=float)
         scalar = (1.0 + annual_inflation) ** (-period / periods_per_year)
-        return np.broadcast_to(scalar[:, None], (periods, paths)).copy()
+        return np.broadcast_to(scalar[:, None], (periods, paths))
     rates = np.asarray(inflation_paths, dtype=float)
     if rates.shape != (periods, paths):
         raise ValueError("inflation_paths must have shape (periods, paths).")
@@ -1071,38 +1135,56 @@ def summarize_wealth_risk(
         raise ValueError("wealth must contain only finite values.")
 
     periods, paths = wealth_values.shape
-    deflator = inflation_deflators(
-        periods,
-        paths,
-        periods_per_year=periods_per_year,
-        annual_inflation=annual_inflation,
-        inflation_paths=inflation_paths,
-    )
-    wealth_values = wealth_values * deflator
-    if risk_free_paths is None:
-        nominal_risk_free = np.full((periods, paths), float(risk_free_rate), dtype=float)
+    if inflation_paths is None:
+        period = np.arange(1, periods + 1, dtype=float)
+        deflator = ((1.0 + annual_inflation) ** (-period / periods_per_year))[:, None]
+        if not np.isclose(annual_inflation, 0.0):
+            wealth_values = wealth_values * deflator
     else:
+        deflator = inflation_deflators(
+            periods,
+            paths,
+            periods_per_year=periods_per_year,
+            annual_inflation=annual_inflation,
+            inflation_paths=inflation_paths,
+        )
+        wealth_values = wealth_values * deflator
+
+    if risk_free_paths is not None:
         nominal_risk_free = np.asarray(risk_free_paths, dtype=float)
         if nominal_risk_free.shape != (periods, paths):
             raise ValueError("risk_free_paths must have shape (periods, paths).")
         if not np.isfinite(nominal_risk_free).all() or (nominal_risk_free <= -1.0).any():
             raise ValueError("risk_free_paths must contain finite annual rates above -100%.")
-    if inflation_paths is not None:
-        annual_inflation_paths = np.asarray(inflation_paths, dtype=float)
-    else:
-        annual_inflation_paths = np.full(
-            (periods, paths),
-            float(annual_inflation),
-            dtype=float,
+    if risk_free_paths is None and inflation_paths is None:
+        real_risk_free = (1.0 + float(risk_free_rate)) / (1.0 + annual_inflation) - 1.0
+        periodic_risk_free: float | np.ndarray = float(
+            (1.0 + real_risk_free) ** (1.0 / periods_per_year) - 1.0
         )
-    real_risk_free = (1.0 + nominal_risk_free) / (1.0 + annual_inflation_paths) - 1.0
-    periodic_risk_free = np.power(1.0 + real_risk_free, 1.0 / periods_per_year) - 1.0
-    effective_risk_free_rate = float(real_risk_free.mean())
+        effective_risk_free_rate = float(real_risk_free)
+    else:
+        nominal_risk_free = (
+            nominal_risk_free
+            if risk_free_paths is not None
+            else float(risk_free_rate)
+        )
+        annual_inflation_values = (
+            np.asarray(inflation_paths, dtype=float)
+            if inflation_paths is not None
+            else float(annual_inflation)
+        )
+        real_risk_free_values = (
+            (1.0 + nominal_risk_free) / (1.0 + annual_inflation_values) - 1.0
+        )
+        periodic_risk_free = (
+            np.power(1.0 + real_risk_free_values, 1.0 / periods_per_year) - 1.0
+        )
+        effective_risk_free_rate = float(np.mean(real_risk_free_values))
     terminal = wealth_values[-1]
     tail_probability = 1.0 - confidence
     lower_tail = float(np.quantile(terminal, tail_probability))
     tail = terminal[terminal <= lower_tail]
-    contribution_deflator = np.vstack([np.ones((1, paths)), deflator[:-1]])
+    contribution_deflator = np.vstack([np.ones((1, deflator.shape[1])), deflator[:-1]])
     withdrawal_deflator = deflator
     real_contributions = contribution * contribution_deflator
     real_withdrawals = withdrawal * withdrawal_deflator
@@ -1129,15 +1211,28 @@ def summarize_wealth_risk(
         ulcer[start:start + values.shape[1]] = np.sqrt(np.mean(drawdown**2, axis=0))
 
         previous = np.vstack([np.full(values.shape[1], initial_value), values[:-1]])
-        denominator = previous + real_contributions[:, start:start + values.shape[1]]
-        numerator = values + real_withdrawals[:, start:start + values.shape[1]]
+        contribution_values = (
+            real_contributions
+            if real_contributions.shape[1] == 1
+            else real_contributions[:, start:start + values.shape[1]]
+        )
+        withdrawal_values = (
+            real_withdrawals
+            if real_withdrawals.shape[1] == 1
+            else real_withdrawals[:, start:start + values.shape[1]]
+        )
+        denominator = previous + contribution_values
+        numerator = values + withdrawal_values
         with np.errstate(divide="ignore", invalid="ignore"):
             period_returns = numerator / denominator - 1.0
         period_returns[(denominator <= 0) | (numerator < 0)] = np.nan
         finite_returns = period_returns[np.isfinite(period_returns)]
         finite_mask = np.isfinite(period_returns)
-        finite_risk_free = periodic_risk_free[:, start:start + values.shape[1]][finite_mask]
-        excess_returns = finite_returns - finite_risk_free
+        if np.ndim(periodic_risk_free) == 0:
+            excess_returns = finite_returns - float(periodic_risk_free)
+        else:
+            finite_risk_free = periodic_risk_free[:, start:start + values.shape[1]][finite_mask]
+            excess_returns = finite_returns - finite_risk_free
         return_sum += float(finite_returns.sum())
         return_squares += float(np.square(finite_returns).sum())
         return_count += int(finite_returns.size)

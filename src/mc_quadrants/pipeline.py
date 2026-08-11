@@ -72,12 +72,12 @@ def _init_chunk_worker(state: dict[str, Any]) -> None:
 
 def _run_chunk(
     args: tuple[int, int, int],
-) -> tuple[int, np.ndarray, np.ndarray, np.ndarray | None]:
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray | None, int]:
     """Simulate one path chunk in a worker process.
 
-    Returns ``(start, wealth_values, regime_codes)`` for the chunk so the
-    caller can scatter the results into the preallocated arrays. Each chunk
-    draws its own RNG from ``random_seed + chunk_index``, so results are
+    Returns the start offset, wealth values, regime codes, macro paths, and
+    margin-call count so the caller can scatter results into preallocated
+    arrays. Each chunk draws its own RNG from ``random_seed + chunk_index``, so results are
     identical whether chunks run sequentially or in parallel.
     """
     start, count, seed = args
@@ -103,6 +103,7 @@ def _run_chunk(
         dcc_alpha=state["dcc_alpha"],
         dcc_beta=state["dcc_beta"],
         dcc_asymmetry=state["dcc_asymmetry"],
+        return_regime_codes=True,
     )
     chunk_wealth = simulate_portfolio_paths(
         chunk_result,
@@ -133,12 +134,13 @@ def _run_chunk(
         withdrawal=state["withdrawal"],
     )
     wealth_values = chunk_wealth.to_numpy(dtype=float)
-    regime_codes = np.empty((state["periods"], count), dtype=np.int8)
-    state_codes = state["state_codes"]
-    for period in range(state["periods"]):
-        column = chunk_result.regimes[period]
-        regime_codes[period] = [state_codes[state_name] for state_name in column]
-    return start, wealth_values, regime_codes, chunk_result.macro_paths
+    return (
+        start,
+        wealth_values,
+        chunk_result.regimes,
+        chunk_result.macro_paths,
+        int(chunk_wealth.attrs.get("margin_calls", 0)),
+    )
 
 
 def _chunk_specs(total: int, chunk_size: int, random_seed: int) -> list[tuple[int, int, int]]:
@@ -224,6 +226,7 @@ def _simulate_chunked(
             dcc_alpha=dcc_alpha,
             dcc_beta=dcc_beta,
             dcc_asymmetry=dcc_asymmetry,
+            return_regime_codes=True,
         )
         chunk_wealth = simulate_portfolio_paths(
             chunk_result,
@@ -260,8 +263,10 @@ def _simulate_chunked(
 
     total = int(paths)
     chunk_size = max(1, int(chunk_size))
-    state_codes = {state: index for index, state in enumerate(model.states)}
-    regime_codes = np.empty((periods, total), dtype=np.int8)
+    regime_codes = np.empty(
+        (periods, total),
+        dtype=np.min_scalar_type(max(len(model.states) - 1, 0)),
+    )
     macro_columns = (
         list(model.metadata.get("macro_dynamics", {}).get("columns", []))
         if joint_macro
@@ -272,12 +277,8 @@ def _simulate_chunked(
         if macro_columns
         else None
     )
-    wealth = pd.DataFrame(
-        np.nan,
-        index=pd.RangeIndex(periods),
-        columns=[f"path_{i}" for i in range(total)],
-        dtype=float,
-    )
+    wealth_values = np.empty((periods, total), dtype=float)
+    margin_calls = 0
     specs = _chunk_specs(total, chunk_size, random_seed)
 
     if workers is not None and workers > 1:
@@ -315,7 +316,6 @@ def _simulate_chunked(
             "maintenance_margin": float(maintenance_margin),
             "contribution": float(contribution),
             "withdrawal": float(withdrawal),
-            "state_codes": state_codes,
         }
         try:
             with ProcessPoolExecutor(
@@ -324,35 +324,43 @@ def _simulate_chunked(
                 initializer=_init_chunk_worker,
                 initargs=(worker_state,),
             ) as executor:
-                for start, chunk_wealth_values, chunk_regime_codes, chunk_macro in executor.map(
+                for (
+                    start,
+                    chunk_wealth_values,
+                    chunk_regime_codes,
+                    chunk_macro,
+                    chunk_margin_calls,
+                ) in executor.map(
                     _run_chunk, specs
                 ):
                     count = chunk_wealth_values.shape[1]
-                    wealth.iloc[:, start:start + count] = chunk_wealth_values
+                    wealth_values[:, start:start + count] = chunk_wealth_values
                     regime_codes[:, start:start + count] = chunk_regime_codes
+                    margin_calls += chunk_margin_calls
                     if macro_paths is not None and chunk_macro is not None:
                         macro_paths[:, start:start + count, :] = chunk_macro
         except (NotImplementedError, PermissionError):
             for start, count, seed in specs:
                 chunk_result, chunk_wealth = _single(count, seed)
-                wealth.iloc[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
-                for period in range(periods):
-                    column = chunk_result.regimes[period]
-                    regime_codes[period, start:start + count] = [
-                        state_codes[state] for state in column
-                    ]
+                wealth_values[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
+                regime_codes[:, start:start + count] = chunk_result.regimes
+                margin_calls += int(chunk_wealth.attrs.get("margin_calls", 0))
                 if macro_paths is not None and chunk_result.macro_paths is not None:
                     macro_paths[:, start:start + count, :] = chunk_result.macro_paths
     else:
         for start, count, seed in specs:
             chunk_result, chunk_wealth = _single(count, seed)
-            wealth.iloc[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
-            for period in range(periods):
-                column = chunk_result.regimes[period]
-                regime_codes[period, start:start + count] = [state_codes[state] for state in column]
+            wealth_values[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
+            regime_codes[:, start:start + count] = chunk_result.regimes
+            margin_calls += int(chunk_wealth.attrs.get("margin_calls", 0))
             if macro_paths is not None and chunk_result.macro_paths is not None:
                 macro_paths[:, start:start + count, :] = chunk_result.macro_paths
 
+    wealth = pd.DataFrame(
+        wealth_values,
+        columns=[f"path_{index}" for index in range(total)],
+    )
+    wealth.attrs["margin_calls"] = margin_calls
     combined = SimulationResult(
         returns=np.empty((periods, 0, len(model.assets)), dtype=float),
         regimes=regime_codes,
@@ -760,10 +768,14 @@ def run_scenario(
         model.metadata["rate_model"] = "joint_macro_path"
     else:
         model.metadata["rate_model"] = "deterministic"
-    reporting_wealth = inflation_adjust_wealth(
-        wealth,
-        annual_inflation=annual_inflation,
-        inflation_paths=inflation_paths,
+    reporting_wealth = (
+        wealth
+        if inflation_paths is None and np.isclose(annual_inflation, 0.0)
+        else inflation_adjust_wealth(
+            wealth,
+            annual_inflation=annual_inflation,
+            inflation_paths=inflation_paths,
+        )
     )
     summary = summarize_wealth_risk(
         wealth,

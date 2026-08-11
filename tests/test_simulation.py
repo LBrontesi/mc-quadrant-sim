@@ -5,6 +5,7 @@ import pytest
 from mc_quadrants.calibration import calibrate_quadrant_model
 from mc_quadrants.regimes import Regime
 from mc_quadrants.simulation import (
+    _batched_cholesky,
     simulate_portfolio_paths,
     simulate_regime_paths,
     simulate_returns,
@@ -53,6 +54,33 @@ def test_calibration_and_simulation_shapes():
     assert result.returns.shape == (6, 10, 2)
     assert result.regimes.shape == (6, 10)
     assert wealth.shape == (6, 10)
+
+
+def test_compact_regime_codes_match_public_labels():
+    model = _calibrated_model()
+
+    labels = simulate_regime_paths(model, periods=12, paths=20, random_seed=9)
+    codes = simulate_regime_paths(
+        model,
+        periods=12,
+        paths=20,
+        random_seed=9,
+        return_codes=True,
+    )
+
+    assert codes.dtype.kind in "iu"
+    assert np.array_equal(labels, np.asarray(model.states, dtype=object)[codes])
+
+
+def test_vectorized_cholesky_matches_numpy():
+    rng = np.random.default_rng(12)
+    samples = rng.standard_normal((40, 6, 6))
+    positive_definite = samples @ np.swapaxes(samples, 1, 2) + np.eye(6)[None] * 0.1
+
+    actual = _batched_cholesky(positive_definite)
+    expected = np.linalg.cholesky(positive_definite)
+
+    assert np.allclose(actual, expected, rtol=1e-10, atol=1e-12)
 
 
 def test_student_t_sampling_is_reproducible():

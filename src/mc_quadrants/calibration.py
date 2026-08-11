@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
+from mc_quadrants.hsmm import fit_quadrant_hsmm
 from mc_quadrants.matrix import (
     covariance_to_correlation,
     nearest_correlation,
@@ -15,10 +16,6 @@ from mc_quadrants.regimes import (
     REGIME_ORDER,
     ThresholdSpec,
     classify_persistent_quadrants,
-    estimate_duration_hazards,
-    estimate_transition_matrix,
-    expected_duration_from_hazards,
-    quadrant_probabilities,
     resolve_threshold,
     smooth_macro_for_regimes,
     sojourn_durations,
@@ -491,7 +488,7 @@ def calibrate_quadrant_model(
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
 
-    regimes = classify_persistent_quadrants(
+    initial_regimes = classify_persistent_quadrants(
         macro,
         growth_col=growth_col,
         inflation_col=inflation_col,
@@ -502,28 +499,26 @@ def calibrate_quadrant_model(
         hysteresis=regime_hysteresis,
         confirmation_periods=regime_confirmation_periods,
     )
-    transition_matrix = estimate_transition_matrix(
-        regimes,
-        states=REGIME_ORDER,
-        smoothing=transition_smoothing,
+    smoothed_macro = smooth_macro_for_regimes(
+        macro,
+        growth_col=growth_col,
+        inflation_col=inflation_col,
+        smoothing_window=regime_smoothing_window,
     )
-    probabilities = None
+    hsmm = fit_quadrant_hsmm(
+        smoothed_macro,
+        initial_regimes,
+        states=REGIME_ORDER,
+        columns=(growth_col, inflation_col),
+        min_duration=min_regime_duration,
+        duration_prior_strength=duration_prior_strength,
+        transition_smoothing=transition_smoothing,
+    )
+    regimes = hsmm.viterbi_path
+    transition_matrix = hsmm.transition_matrix
+    probabilities: pd.DataFrame | None = None
     if probabilistic_regimes:
-        smoothed_macro = smooth_macro_for_regimes(
-            macro,
-            growth_col=growth_col,
-            inflation_col=inflation_col,
-            smoothing_window=regime_smoothing_window,
-        )
-        probabilities = quadrant_probabilities(
-            smoothed_macro,
-            growth_col=growth_col,
-            inflation_col=inflation_col,
-            growth_threshold=growth_threshold,
-            inflation_threshold=inflation_threshold,
-            threshold_window=threshold_window,
-            temperature=regime_temperature,
-        )
+        probabilities = hsmm.filtered_probabilities
         moments = estimate_weighted_regime_moments(
             returns=returns,
             probabilities=probabilities,
@@ -581,18 +576,8 @@ def calibrate_quadrant_model(
                 if (regimes == state).any()
             }
 
-    duration_hazards = estimate_duration_hazards(
-        regimes,
-        REGIME_ORDER,
-        prior_strength=duration_prior_strength,
-    )
-    expected_durations = {
-        state: expected_duration_from_hazards(
-            duration_hazards[state],
-            min_duration=min_regime_duration,
-        )
-        for state in REGIME_ORDER
-    }
+    duration_hazards = hsmm.duration_hazards
+    expected_durations = hsmm.expected_duration_months
     metadata: dict[str, object] = {
         "growth_col": growth_col,
         "inflation_col": inflation_col,
@@ -609,15 +594,25 @@ def calibrate_quadrant_model(
         "regime_hysteresis": float(regime_hysteresis),
         "regime_confirmation_periods": int(regime_confirmation_periods),
         "model_kind": "quadrant",
-        "regime_assignment": "probabilistic" if probabilistic_regimes else "hard",
-        "transition_estimator": "persistence_filtered_hard_labels",
+        "regime_assignment": "probabilistic" if probabilistic_regimes else "hsmm_viterbi",
+        "transition_estimator": "hsmm_forward_backward_joint_posteriors",
         "regime_temperature": regime_temperature,
-        "duration_model_kind": "regularized_state_specific_hazard",
+        "duration_model_kind": "hidden_semi_markov_explicit_duration",
         "duration_prior_strength": float(duration_prior_strength),
         "min_regime_duration": int(min_regime_duration),
         "sojourn_durations": sojourn_durations(regimes, REGIME_ORDER, min_length=1),
         "duration_hazards": duration_hazards,
         "expected_duration_months": expected_durations,
+        "hsmm_exit_transition_matrix": hsmm.exit_transition_matrix,
+        "hsmm_filtered_probabilities": hsmm.filtered_probabilities,
+        "hsmm_smoothed_probabilities": hsmm.smoothed_probabilities,
+        "hsmm_latest_state_age_probabilities": hsmm.latest_state_age_probabilities,
+        "hsmm_log_likelihood": hsmm.log_likelihood,
+        "hsmm_iterations": hsmm.iterations,
+        "hsmm_converged": hsmm.converged,
+        "hsmm_max_duration": hsmm.max_duration,
+        "hsmm_emission_means": hsmm.emission_means,
+        "hsmm_emission_covariances": hsmm.emission_covariances,
         "state_inflation": state_inflation,
         "state_short_rate": state_short_rate,
         "rate_is_percent": rate_is_percent,
@@ -625,9 +620,9 @@ def calibrate_quadrant_model(
         "point_in_time": bool(macro.attrs.get("point_in_time", False)),
         "availability_aligned": bool(macro.attrs.get("availability_aligned", False)),
     }
+    latest_probabilities = hsmm.filtered_probabilities.dropna().iloc[-1]
+    metadata["latest_regime_probabilities"] = latest_probabilities.to_dict()
     if probabilities is not None:
-        latest_probabilities = probabilities.dropna().iloc[-1]
-        metadata["latest_regime_probabilities"] = latest_probabilities.to_dict()
         metadata["historical_regime_probabilities"] = probabilities
     if joint_macro:
         metadata["macro_dynamics"] = _fit_joint_macro_dynamics(

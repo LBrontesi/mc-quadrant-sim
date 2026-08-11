@@ -166,8 +166,12 @@ def build_hmm_diagnostics(
 def simulation_regime_summary(result: SimulationResult) -> pd.DataFrame:
     """Return simulated regime frequency by state."""
 
-    counts = pd.Series(result.regimes.ravel(), dtype="string").value_counts()
-    total = max(int(counts.sum()), 1)
+    if result.regimes.dtype.kind in "iu":
+        histogram = np.bincount(result.regimes.ravel(), minlength=len(result.states))
+        counts = {state: int(count) for state, count in zip(result.states, histogram)}
+    else:
+        counts = pd.Series(result.regimes.ravel(), dtype="string").value_counts().to_dict()
+    total = max(sum(counts.values()), 1)
     return pd.DataFrame(
         {
             "regime": result.states,

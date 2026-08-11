@@ -308,12 +308,12 @@
             <label>Regime duration
               <select id="duration-model">
                 <option value="markov">Markov chain</option>
-                <option value="semi_markov" selected>Semi-Markov (regularized hazards)</option>
+                <option value="semi_markov" selected>HSMM (latent states + explicit durations)</option>
               </select>
             </label>
             <label id="min-duration-group">Min regime months
               <input type="number" id="min-regime-duration" value="5" min="1" max="24" step="1">
-              <span class="hint">No simulated exit occurs before this age. All historical runs still inform the regularized hazard estimate.</span>
+              <span class="hint">The latent state cannot exit before this age; forward-backward inference estimates later exit hazards.</span>
             </label>
           </div>
           <label id="threshold-window-group">Causal threshold window
@@ -321,7 +321,7 @@
             <span class="hint">Prior observations required before classification; 0 uses full-sample thresholds for calibration.</span>
           </label>
           <div id="advanced-regime-controls" class="methodology-stack">
-            <label class="check-inline"><input type="checkbox" id="probabilistic-regimes" checked> Soft quadrant weights for return moments</label>
+            <label class="check-inline"><input type="checkbox" id="probabilistic-regimes" checked> HSMM filtered probabilities for return moments</label>
             <div class="three-col">
               <label>Macro smoothing (months)
                 <input type="number" id="regime-smoothing-window" value="3" min="1" max="24" step="1">
@@ -347,7 +347,7 @@
               </label>
               <label>Duration-hazard prior strength
                 <input type="number" id="duration-prior-strength" value="8" min="0.1" max="60" step="1">
-                <span class="hint">Shrinks sparse state-age exit hazards toward the pooled historical pattern.</span>
+                <span class="hint">Regularizes sparse state-age exit counts produced by HSMM forward-backward inference.</span>
               </label>
             </div>
             <div class="two-col">
@@ -389,8 +389,8 @@
             <label>Paths <input type="number" id="paths" value="100000" min="1000" max="120000" step="1000">
               <span class="hint">Adaptive chunking scales with the horizon and selected assets.</span>
             </label>
-            <label>Parallel workers <input type="number" id="workers" value="1" min="1" max="16" step="1">
-              <span class="hint">Simulate path chunks in parallel. Additional workers can reduce runtime on multi-core hosts.</span>
+            <label>Parallel workers <input type="number" id="workers" value="" placeholder="Auto" min="1" max="16" step="1">
+              <span class="hint">Auto uses up to four available cores for large chunked simulations.</span>
             </label>
           </div>
           <div class="two-col">
@@ -651,7 +651,7 @@
         <div id="correlations-content" class="hidden">
           <div class="chart-grid">
             <div class="card card-wide"><h3>Correlation Matrix <select id="correlation-regime"></select></h3><div class="chart" id="chart-correlation"></div></div>
-            <div class="card card-wide"><h3>Transition Matrix</h3><div class="chart" id="chart-transition"></div></div>
+            <div class="card card-wide"><h3>HSMM One-Month Transition Summary</h3><div class="chart" id="chart-transition"></div></div>
           </div>
         </div>
       </div>
@@ -749,7 +749,7 @@
             </div>
             <div id="persistence-panel" class="hidden">
               <div class="card-heading-row"><h3>Regime persistence</h3><span id="persistence-status" class="research-label">Calibrated</span></div>
-              <p class="caption">Expected durations come from regularized state-specific hazards; simulated switching verifies the generated paths.</p>
+              <p class="caption">Expected durations come from latent state-age posteriors and regularized HSMM hazards; simulated switching verifies the generated paths.</p>
               <div class="metric-grid" id="persistence-summary"></div>
               <div class="table-wrap" id="persistence-table"></div>
               <p class="warning hidden" id="persistence-warning"></p>

@@ -459,6 +459,26 @@ def test_execution_plan_scales_with_scenario_dimensions():
     assert kwargs["paths"] == 120000
 
 
+def test_execution_plan_selects_workers_automatically(monkeypatch):
+    monkeypatch.setattr(api.os, "cpu_count", lambda: 8)
+    monkeypatch.setenv("MC_SIM_MAX_AUTO_WORKERS", "4")
+
+    large = api.simulation_resource_estimate(
+        {
+            "weights": {ticker: 1 for ticker in ASSET_TICKERS},
+            "selected_tickers": ASSET_TICKERS,
+            "periods": 120,
+            "paths": 100000,
+        }
+    )
+    compact = api.simulation_resource_estimate(
+        {"weights": {"SPY": 1}, "periods": 12, "paths": 1000}
+    )
+
+    assert large["workers"] == 4
+    assert compact["workers"] == 1
+
+
 def test_wealth_export_is_bounded_sample():
     response = api.build_wealth_csv(_csv_payload(paths=50, export_paths=7))
     exported = pd.read_csv(io.StringIO(response["csv"]))
@@ -527,6 +547,11 @@ def test_simulate_response_separates_model_and_market_uncertainty():
     assert response["parameter_uncertainty"]["draws"] == 3
     assert response["macro_paths"]["series"]["inflation"]
     assert response["methodology"]["regime_assignment"] == "probabilistic"
+    assert response["methodology"]["transition_estimator"] == "hsmm_forward_backward_joint_posteriors"
+    assert response["methodology"]["duration_model_kind"] == "hidden_semi_markov_explicit_duration"
+    assert np.isfinite(response["methodology"]["hsmm_log_likelihood"])
+    assert response["methodology"]["hsmm_iterations"] >= 1
+    assert response["methodology"]["hsmm_max_duration"] >= 5
     assert response["methodology"]["joint_macro"] is True
     assert response["methodology"]["dynamic_correlation"] is True
     assert response["terms"] == "real"

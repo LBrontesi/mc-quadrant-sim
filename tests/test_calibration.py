@@ -8,9 +8,7 @@ from mc_quadrants.calibration import (
 )
 from mc_quadrants.regimes import (
     Regime,
-    classify_persistent_quadrants,
     classify_quadrants,
-    estimate_transition_matrix,
 )
 
 
@@ -116,7 +114,7 @@ def test_calibrate_model_records_threshold_window_in_metadata():
     assert set(model.metadata["sojourn_durations"]) == set(Regime)
 
 
-def test_probabilistic_calibration_uses_persistent_hard_path_for_transitions():
+def test_probabilistic_calibration_uses_explicit_duration_hsmm():
     returns, macro = _sample_data()
     model = calibrate_quadrant_model(
         returns,
@@ -126,15 +124,17 @@ def test_probabilistic_calibration_uses_persistent_hard_path_for_transitions():
         regime_hysteresis=0.15,
         regime_confirmation_periods=2,
     )
-    regimes = classify_persistent_quadrants(
-        macro,
-        smoothing_window=3,
-        hysteresis=0.15,
-        confirmation_periods=2,
-    )
-
-    expected = estimate_transition_matrix(regimes)
-    pd.testing.assert_frame_equal(model.transition_matrix, expected)
-    assert model.metadata["transition_estimator"] == "persistence_filtered_hard_labels"
-    assert model.metadata["duration_model_kind"] == "regularized_state_specific_hazard"
+    assert np.allclose(model.transition_matrix.sum(axis=1), 1.0)
+    assert model.metadata["transition_estimator"] == "hsmm_forward_backward_joint_posteriors"
+    assert model.metadata["duration_model_kind"] == "hidden_semi_markov_explicit_duration"
     assert set(model.metadata["duration_hazards"]) == set(Regime)
+    assert all(
+        np.allclose(hazards[:4], 0.0)
+        for hazards in model.metadata["duration_hazards"].values()
+    )
+    exit_matrix = model.metadata["hsmm_exit_transition_matrix"]
+    assert np.allclose(np.diag(exit_matrix), 0.0)
+    assert np.allclose(exit_matrix.sum(axis=1), 1.0)
+    assert np.isfinite(model.metadata["hsmm_log_likelihood"])
+    probabilities = model.metadata["historical_regime_probabilities"].dropna()
+    assert np.allclose(probabilities.sum(axis=1), 1.0)
