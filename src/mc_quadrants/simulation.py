@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from mc_quadrants.matrix import nearest_psd
+from mc_quadrants.native import simulate_parametric_native
 from mc_quadrants.types import ScenarioModel, SimulationResult
 
 
@@ -537,6 +538,56 @@ def simulate_returns(
     state_correlation_cholesky = np.linalg.cholesky(
         state_correlations + np.eye(len(assets))[None, :, :] * 1e-10
     )
+
+    if distribution in {"normal", "student_t"}:
+        native_seed = (
+            int(np.random.SeedSequence().generate_state(1, dtype=np.uint64)[0])
+            if random_seed is None
+            else int(random_seed) + 1
+        )
+        native_returns = simulate_parametric_native(
+            regime_codes=regime_paths,
+            means=state_means,
+            covariance_cholesky=state_covariance_cholesky,
+            correlation_cholesky=state_correlation_cholesky,
+            base_correlations=state_correlations,
+            volatilities=state_volatilities,
+            random_seed=native_seed,
+            distribution=distribution,
+            degrees_of_freedom=degrees_of_freedom,
+            garch=garch,
+            garch_alpha=garch_alpha,
+            garch_beta=garch_beta,
+            dynamic_correlation=dynamic_correlation,
+            dcc_alpha=dcc_alpha,
+            dcc_beta=dcc_beta,
+            dcc_asymmetry=dcc_asymmetry,
+            macro_shocks=macro_shocks,
+            macro_betas=macro_betas,
+        )
+        if native_returns is not None:
+            return SimulationResult(
+                returns=native_returns,
+                regimes=(
+                    regime_paths
+                    if return_regime_codes
+                    else _decode_regime_codes(regime_paths, model.states)
+                ),
+                assets=assets,
+                states=model.states.copy(),
+                frequency=model.frequency,
+                distribution=distribution,
+                degrees_of_freedom=(
+                    float(degrees_of_freedom) if distribution == "student_t" else None
+                ),
+                transition_concentration=transition_concentration,
+                macro_paths=macro_paths,
+                macro_columns=(
+                    list(macro_dynamics["columns"])
+                    if isinstance(macro_dynamics, Mapping)
+                    else []
+                ),
+            )
 
     historical_by_state: list[np.ndarray] | None = None
     if distribution in {"bootstrap", "block_bootstrap"}:
