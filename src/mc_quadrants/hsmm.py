@@ -310,6 +310,8 @@ def fit_quadrant_hsmm(
         raise ValueError("duration_prior_strength must be positive and finite.")
     if not np.isfinite(transition_smoothing) or transition_smoothing <= 0:
         raise ValueError("transition_smoothing must be positive and finite.")
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be positive.")
     missing = set(columns).difference(macro.columns)
     if missing:
         raise KeyError(f"Macro data is missing HSMM emission columns: {sorted(missing)}")

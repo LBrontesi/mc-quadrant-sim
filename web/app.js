@@ -2294,7 +2294,7 @@ const CONTROL_IDS = [
 ];
 
 function saveControls() {
-  const data = { schemaVersion: 5 };
+  const data = { schemaVersion: 6 };
   CONTROL_IDS.forEach((id) => {
     const el = $(id);
     if (el) data[id] = el.value;
@@ -2351,6 +2351,9 @@ function restoreControls() {
       }
       if (Number(data.schemaVersion || 0) < 4 && String(data["min-regime-duration"]) === "3") {
         data["min-regime-duration"] = "5";
+      }
+      if (Number(data.schemaVersion || 0) < 6 && String(data.workers) === "1") {
+        data.workers = "";
       }
       applyControlSnapshot(data);
     }

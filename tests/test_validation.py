@@ -179,3 +179,32 @@ def test_walk_forward_rejects_zero_portfolio_weights():
             min_train_periods=60,
             weights={"Stocks": 0.0, "Bonds": 0.0},
         )
+
+
+def test_walk_forward_bounds_default_refits(monkeypatch):
+    returns, macro = _sample_history()
+    calls = 0
+
+    from mc_quadrants import validation
+
+    original = validation.calibrate_quadrant_model
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert kwargs["hsmm_max_iterations"] == 5
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(validation, "calibrate_quadrant_model", counted)
+
+    result = walk_forward_validation(
+        returns,
+        macro,
+        growth_col="growth",
+        inflation_col="inflation",
+        growth_threshold="median",
+        inflation_threshold="median",
+    )
+
+    assert calls == len(result.splits)
+    assert calls <= 36

@@ -148,7 +148,7 @@ def walk_forward_validation(
     step: int | None = None,
     macro_lag_periods: int = 0,
     threshold_window: int | None = None,
-    max_splits: int = 120,
+    max_splits: int = 36,
     min_observations: int = 12,
     probabilistic_regimes: bool = False,
     regime_temperature: float = 0.35,
@@ -159,6 +159,7 @@ def walk_forward_validation(
     min_regime_duration: int = 5,
     mean_prior_strength: float = 24.0,
     weights: Mapping[str, float] | None = None,
+    hsmm_max_iterations: int = 5,
 ) -> WalkForwardResult:
     """Evaluate the regime model strictly out of sample.
 
@@ -175,6 +176,10 @@ def walk_forward_validation(
 
     if min_train_periods < 12:
         raise ValueError("min_train_periods must be at least 12.")
+    if max_splits < 1:
+        raise ValueError("max_splits must be positive.")
+    if hsmm_max_iterations < 1:
+        raise ValueError("hsmm_max_iterations must be positive.")
     effective_threshold_window = threshold_window if threshold_window is not None else 12
     if effective_threshold_window <= 0:
         raise ValueError("threshold_window must be positive for walk-forward validation.")
@@ -244,6 +249,7 @@ def walk_forward_validation(
             regime_confirmation_periods=regime_confirmation_periods,
             duration_prior_strength=duration_prior_strength,
             mean_prior_strength=mean_prior_strength,
+            hsmm_max_iterations=hsmm_max_iterations,
         )
         next_observation = observations[split]
         unconditional_mean = observations[:split].mean(axis=0)
@@ -277,14 +283,12 @@ def walk_forward_validation(
                 for state in model.states
             ]
         )
-        gaussian_maximum = gaussian_densities.max()
+        gaussian_weighted = gaussian_densities + np.log(
+            np.maximum(state_probabilities, 1e-300)
+        )
+        gaussian_maximum = gaussian_weighted.max()
         regime_llk = gaussian_maximum + np.log(
-            float(
-                np.sum(
-                    state_probabilities
-                    * np.exp(gaussian_densities - gaussian_maximum)
-                )
-            )
+            float(np.exp(gaussian_weighted - gaussian_maximum).sum())
         )
         conditional_t_densities = np.array(
             [
@@ -296,14 +300,12 @@ def walk_forward_validation(
                 for state in model.states
             ]
         )
-        student_t_maximum = conditional_t_densities.max()
+        student_t_weighted = conditional_t_densities + np.log(
+            np.maximum(state_probabilities, 1e-300)
+        )
+        student_t_maximum = student_t_weighted.max()
         regime_student_t_llk = student_t_maximum + np.log(
-            float(
-                np.sum(
-                    state_probabilities
-                    * np.exp(conditional_t_densities - student_t_maximum)
-                )
-            )
+            float(np.exp(student_t_weighted - student_t_maximum).sum())
         )
         predicted_state = model.states[int(np.argmax(state_probabilities))]
         actual_state = str(aligned_regimes.iloc[split])

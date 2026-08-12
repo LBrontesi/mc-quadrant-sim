@@ -485,6 +485,7 @@ def calibrate_quadrant_model(
     duration_prior_strength: float = 8.0,
     mean_prior_strength: float = 0.0,
     joint_macro: bool = False,
+    hsmm_max_iterations: int = 30,
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
 
@@ -513,6 +514,7 @@ def calibrate_quadrant_model(
         min_duration=min_regime_duration,
         duration_prior_strength=duration_prior_strength,
         transition_smoothing=transition_smoothing,
+        max_iterations=hsmm_max_iterations,
     )
     regimes = hsmm.viterbi_path
     transition_matrix = hsmm.transition_matrix
