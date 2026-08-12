@@ -7,6 +7,7 @@ import pandas as pd
 
 from mc_quadrants.matrix import nearest_psd
 from mc_quadrants.native import simulate_parametric_native
+from mc_quadrants.taxes import ITALY_DEFAULT_WEALTH_TAX_RATE, simulate_italian_portfolio_tax
 from mc_quadrants.types import ScenarioModel, SimulationResult
 
 
@@ -898,6 +899,10 @@ def simulate_portfolio_paths(
     maintenance_margin: float = 0.0,
     contribution: float = 0.0,
     withdrawal: float = 0.0,
+    tax_regime: str = "none",
+    asset_tax_categories: Mapping[str, str] | None = None,
+    italy_annual_wealth_tax: float = ITALY_DEFAULT_WEALTH_TAX_RATE,
+    tax_terminal_liquidation: bool = True,
 ) -> pd.DataFrame:
     """Convert simulated asset returns into portfolio wealth paths.
 
@@ -936,6 +941,13 @@ def simulate_portfolio_paths(
         raise ValueError("maintenance_margin only applies when leverage_multiple is greater than 1.")
     if leverage_multiple > 1.0 and maintenance_margin >= 1.0 / leverage_multiple:
         raise ValueError("maintenance_margin must be below the initial equity margin for the selected leverage.")
+    tax_regime = str(tax_regime).strip().lower()
+    if tax_regime not in {"none", "italy_administered"}:
+        raise ValueError("tax_regime must be 'none' or 'italy_administered'.")
+    if tax_regime == "italy_administered" and rebalance_frequency is None:
+        raise ValueError("Italian tax accounting requires holdings-based accounting, not legacy weighted returns.")
+    if tax_regime == "italy_administered" and not np.isclose(leverage_multiple, 1.0):
+        raise ValueError("Italian tax accounting is not available with leveraged portfolios.")
 
     provided_weights = pd.Series(weights, dtype=float)
     weight_vector = provided_weights.reindex(result.assets)
@@ -1010,6 +1022,20 @@ def simulate_portfolio_paths(
 
     periods, paths, assets = result.returns.shape
     target_weights = weight_vector.to_numpy(dtype=float)
+    if tax_regime == "italy_administered":
+        return simulate_italian_portfolio_tax(
+            asset_growth,
+            assets=result.assets,
+            target_weights=target_weights,
+            initial_value=initial_value,
+            rebalance_frequency=int(rebalance_frequency),
+            transaction_cost_bps=transaction_cost_bps,
+            contribution=contribution,
+            withdrawal=withdrawal,
+            asset_tax_categories=asset_tax_categories,
+            annual_wealth_tax=italy_annual_wealth_tax,
+            terminal_liquidation=tax_terminal_liquidation,
+        )
     if (
         not np.isclose(leverage_multiple, 1.0)
         or not np.isclose(financing_rate, 0.0)

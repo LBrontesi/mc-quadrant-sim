@@ -176,6 +176,122 @@ def test_buy_and_hold_tracks_drifting_asset_holdings():
     assert buy_and_hold.iloc[-1, 0] != pytest.approx(legacy.iloc[-1, 0])
 
 
+def test_italian_tax_applies_standard_and_government_bond_rates_at_liquidation():
+    result = SimulationResult(
+        returns=np.array([[[0.10]]]),
+        regimes=np.empty((1, 1), dtype=object),
+        assets=["Asset"],
+        states=[],
+        frequency="M",
+    )
+
+    standard = simulate_portfolio_paths(
+        result,
+        {"Asset": 1.0},
+        return_kind="simple",
+        rebalance_frequency=0,
+        tax_regime="italy_administered",
+        italy_annual_wealth_tax=0.0,
+    )
+    government_bond = simulate_portfolio_paths(
+        result,
+        {"Asset": 1.0},
+        return_kind="simple",
+        rebalance_frequency=0,
+        tax_regime="italy_administered",
+        asset_tax_categories={"Asset": "government_bond"},
+        italy_annual_wealth_tax=0.0,
+    )
+
+    assert standard.iloc[-1, 0] == pytest.approx(107.40)
+    assert standard.attrs["terminal_liquidation_tax_total"] == pytest.approx(2.60)
+    assert government_bond.iloc[-1, 0] == pytest.approx(108.75)
+    assert government_bond.attrs["terminal_liquidation_tax_total"] == pytest.approx(1.25)
+
+
+def test_italian_tax_loss_ledger_offsets_standard_but_not_fund_income():
+    result = SimulationResult(
+        returns=np.array([[[-0.20]], [[0.50]]]),
+        regimes=np.empty((2, 1), dtype=object),
+        assets=["Asset"],
+        states=[],
+        frequency="M",
+    )
+
+    standard = simulate_portfolio_paths(
+        result,
+        {"Asset": 1.0},
+        return_kind="simple",
+        rebalance_frequency=0,
+        withdrawal=10.0,
+        tax_regime="italy_administered",
+        italy_annual_wealth_tax=0.0,
+    )
+    fund = simulate_portfolio_paths(
+        result,
+        {"Asset": 1.0},
+        return_kind="simple",
+        rebalance_frequency=0,
+        withdrawal=10.0,
+        tax_regime="italy_administered",
+        asset_tax_categories={"Asset": "fund"},
+        italy_annual_wealth_tax=0.0,
+    )
+
+    assert standard.iloc[-1, 0] == pytest.approx(91.10)
+    assert standard.attrs["terminal_liquidation_tax_total"] == pytest.approx(3.90)
+    assert standard.attrs["loss_carryforward_total"] == pytest.approx(0.0)
+    assert fund.iloc[-1, 0] == pytest.approx(90.45)
+    assert fund.attrs["taxes_paid_total"] == pytest.approx(4.55)
+    assert fund.attrs["loss_carryforward_total"] == pytest.approx(2.50)
+
+
+def test_italian_wealth_tax_is_monthly_and_terminal_liquidation_is_optional():
+    result = SimulationResult(
+        returns=np.zeros((12, 1, 1)),
+        regimes=np.empty((12, 1), dtype=object),
+        assets=["Asset"],
+        states=[],
+        frequency="M",
+    )
+
+    wealth = simulate_portfolio_paths(
+        result,
+        {"Asset": 1.0},
+        return_kind="simple",
+        rebalance_frequency=0,
+        tax_regime="italy_administered",
+        italy_annual_wealth_tax=0.002,
+        tax_terminal_liquidation=False,
+    )
+
+    expected = 100.0 * (1.0 - 0.002 / 12.0) ** 12
+    assert wealth.iloc[-1, 0] == pytest.approx(expected)
+    assert wealth.attrs["wealth_tax_total"] == pytest.approx(100.0 - expected)
+    assert wealth.attrs["terminal_liquidation_tax_total"] == pytest.approx(0.0)
+
+
+def test_italian_tax_rejects_legacy_accounting_and_leverage():
+    result = SimulationResult(
+        returns=np.zeros((1, 1, 1)),
+        regimes=np.empty((1, 1), dtype=object),
+        assets=["Asset"],
+        states=[],
+        frequency="M",
+    )
+
+    with pytest.raises(ValueError, match="holdings-based"):
+        simulate_portfolio_paths(result, {"Asset": 1.0}, tax_regime="italy_administered")
+    with pytest.raises(ValueError, match="leveraged"):
+        simulate_portfolio_paths(
+            result,
+            {"Asset": 1.0},
+            rebalance_frequency=1,
+            leverage_multiple=2.0,
+            tax_regime="italy_administered",
+        )
+
+
 def test_buy_and_hold_rejects_rebalancing_costs_and_leverage():
     result = _two_period_result()
 

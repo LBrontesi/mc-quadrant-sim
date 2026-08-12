@@ -69,12 +69,17 @@ const COST_METRIC_FIELDS = [
   ["leverage_multiple", "Leverage"], ["weighted_expense_ratio", "Weighted ETF fee"],
   ["annual_fee_drag", "Annual fee drag"], ["annual_financing_cost", "Annual financing cost"],
   ["effective_financing_rate", "Effective financing rate"], ["margin_calls", "Margin calls"],
+  ["capital_gains_tax", "In-horizon disposal tax"], ["wealth_tax", "Stamp duty / IVAFE"],
+  ["terminal_liquidation_tax", "Final liquidation tax"], ["taxes_paid", "Total taxes"],
+  ["realized_gains", "Realized gains"], ["realized_losses", "Realized losses"],
+  ["loss_carryforward", "Unused tax-loss base"], ["annual_wealth_tax_rate", "Annual wealth-tax rate"],
 ];
 
 const PERCENT_METRICS = new Set([
   "annualized_return", "annualized_volatility", "cash_flow_adjusted_annualized_return",
   "cash_flow_adjusted_volatility", "geometric_annualized_return", "probability_of_loss",
   "effective_risk_free_rate", "effective_financing_rate",
+  "annual_wealth_tax_rate",
   "max_drawdown_mean", "max_drawdown_p95", "max_drawdown_worst", "ulcer_index_mean", "ulcer_index_p95",
   "goal_success_probability", "risk_of_ruin", "unrecovered_at_horizon", "worst_rolling_return",
   "worst_rolling_return_p05", "median_worst_rolling_return",
@@ -83,6 +88,8 @@ const CURRENCY_METRICS = new Set([
   "mean", "std", "p05", "p50", "p95", "var_95", "expected_shortfall_95", "periodic_contribution",
   "periodic_withdrawal", "total_contributed", "total_withdrawn", "net_external_cash_flow",
   "target_wealth", "expected_goal_shortfall",
+  "capital_gains_tax", "wealth_tax", "terminal_liquidation_tax", "taxes_paid",
+  "realized_gains", "realized_losses", "loss_carryforward",
 ]);
 
 const state = {
@@ -1091,6 +1098,10 @@ function gatherScenario() {
     financing_rate: Number($("financing-rate").value),
     financing_inflation_sensitivity: Number($("financing-inflation-sensitivity").value),
     maintenance_margin: Number($("maintenance-margin").value),
+    tax_regime: $("tax-regime").value,
+    asset_tax_categories: $("asset-tax-categories").value,
+    italy_wealth_tax: Number($("italy-wealth-tax").value),
+    tax_terminal_liquidation: $("tax-terminal-liquidation").checked,
     workers: $("workers").value === "" ? null : Number($("workers").value),
     risk_free_rate: Number($("risk-free").value),
     annual_inflation: Number($("annual-inflation").value),
@@ -1154,6 +1165,12 @@ function validateScenario() {
   if (leverage > 1 && margin >= 1 / leverage) {
     errors.push("Maintenance margin must be below the initial equity margin for the selected leverage.");
   }
+  if ($("tax-regime").value === "italy_administered" && $("rebalance").value === "legacy") {
+    errors.push("Italian tax accounting requires holdings-based accounting, not legacy weighted returns.");
+  }
+  if ($("tax-regime").value === "italy_administered" && leverage > 1) {
+    errors.push("Italian tax accounting is not available with leveraged portfolios.");
+  }
   if (!(Number($("initial-value").value) > 0)) {
     errors.push("Initial portfolio value must be positive.");
   }
@@ -1180,6 +1197,7 @@ function updateMethodologyControls() {
   const isHMM = $("model-kind").value === "hmm";
   const distribution = $("distribution").value;
   const legacy = ["legacy", "buy_hold"].includes($("rebalance").value);
+  const italianTaxes = $("tax-regime").value === "italy_administered";
   $("quadrant-calibration").classList.toggle("hidden", isHMM);
   $("hmm-states-group").classList.toggle("hidden", !isHMM);
   $("threshold-window-group").classList.toggle("hidden", isHMM);
@@ -1193,6 +1211,7 @@ function updateMethodologyControls() {
   $("block-size-group").classList.toggle("hidden", distribution !== "block_bootstrap");
   $("cost-bps").disabled = legacy;
   $("cost-bps-group").classList.toggle("methodology-muted", legacy);
+  document.querySelectorAll(".tax-settings").forEach((element) => element.classList.toggle("hidden", !italianTaxes));
   $("garch").disabled = distribution !== "normal";
   const parametric = distribution === "normal" || distribution === "student_t";
   $("joint-macro").disabled = !parametric || isHMM;
@@ -1490,6 +1509,7 @@ function renderScenarioChips(payload, data) {
   chips.push(`Target ${formatMetricValue("target_wealth", payload.target_wealth, data.currency)}`);
   if (Number(payload.contribution) > 0) chips.push(`+${fmt(payload.contribution, 0)}/period`);
   if (Number(payload.withdrawal) > 0) chips.push(`−${fmt(payload.withdrawal, 0)}/period`);
+  if (payload.tax_regime === "italy_administered") chips.push("Italy after tax");
   chips.push(data.terms === "real" ? "Real terms" : "Nominal");
   chips.push(data.currency);
   chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
@@ -1952,7 +1972,10 @@ function renderResults(data) {
   $("cash-flow-performance").classList.toggle("hidden", !hasCashFlows);
   if (hasCashFlows) renderMetricGrid("flow-metric-grid", FLOW_METRIC_FIELDS, data);
   const costs = data.costs || {};
-  const hasCosts = Number(costs.leverage_multiple || 1) > 1 || Number(costs.weighted_expense_ratio || 0) > 0;
+  const hasCosts = Number(costs.leverage_multiple || 1) > 1
+    || Number(costs.weighted_expense_ratio || 0) > 0
+    || Number(costs.taxes_paid || 0) > 0
+    || state.lastSimPayload?.tax_regime === "italy_administered";
   $("cost-assumptions").classList.toggle("hidden", !hasCosts);
   if (hasCosts) renderMetricGrid("cost-metric-grid", COST_METRIC_FIELDS, { summary: costs, currency: data.currency });
   $("stale-results").classList.add("hidden");
@@ -2262,6 +2285,7 @@ const CONTROL_IDS = [
   "initial-value", "target-wealth",
   "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate",
   "financing-inflation-sensitivity", "maintenance-margin",
+  "tax-regime", "asset-tax-categories", "italy-wealth-tax",
   "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
   "regime-temperature", "regime-smoothing-window", "regime-hysteresis",
   "regime-confirmation-periods", "duration-prior-strength", "mean-prior-strength",
@@ -2270,7 +2294,7 @@ const CONTROL_IDS = [
 ];
 
 function saveControls() {
-  const data = { schemaVersion: 4 };
+  const data = { schemaVersion: 5 };
   CONTROL_IDS.forEach((id) => {
     const el = $(id);
     if (el) data[id] = el.value;
@@ -2284,6 +2308,7 @@ function saveControls() {
   data.probabilisticRegimes = $("probabilistic-regimes").checked;
   data.jointMacro = $("joint-macro").checked;
   data.dynamicCorrelation = $("dynamic-correlation").checked;
+  data.taxTerminalLiquidation = $("tax-terminal-liquidation").checked;
   data.corrTargets = gatherCorrelationTargets();
   localStorage.setItem("mcq-controls", JSON.stringify(data));
 }
@@ -2304,6 +2329,7 @@ function applyControlSnapshot(data) {
   if (data.probabilisticRegimes !== undefined) $("probabilistic-regimes").checked = data.probabilisticRegimes;
   if (data.jointMacro !== undefined) $("joint-macro").checked = data.jointMacro;
   if (data.dynamicCorrelation !== undefined) $("dynamic-correlation").checked = data.dynamicCorrelation;
+  if (data.taxTerminalLiquidation !== undefined) $("tax-terminal-liquidation").checked = data.taxTerminalLiquidation;
   document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
     if (data.corrTargets && data.corrTargets[slider.dataset.state] !== undefined) slider.value = data.corrTargets[slider.dataset.state];
   });

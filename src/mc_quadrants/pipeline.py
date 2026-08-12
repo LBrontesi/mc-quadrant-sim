@@ -45,6 +45,16 @@ class SimulationRun:
 
 
 _CHUNK_WORKER_STATE: dict[str, Any] = {}
+_ADDITIVE_WEALTH_ATTRS = (
+    "margin_calls",
+    "capital_gains_tax_total",
+    "wealth_tax_total",
+    "terminal_liquidation_tax_total",
+    "taxes_paid_total",
+    "realized_gains_total",
+    "realized_losses_total",
+    "loss_carryforward_total",
+)
 
 
 def _annual_macro_paths(
@@ -72,11 +82,11 @@ def _init_chunk_worker(state: dict[str, Any]) -> None:
 
 def _run_chunk(
     args: tuple[int, int, int],
-) -> tuple[int, np.ndarray, np.ndarray, np.ndarray | None, int]:
+) -> tuple[int, np.ndarray, np.ndarray, np.ndarray | None, dict[str, float]]:
     """Simulate one path chunk in a worker process.
 
     Returns the start offset, wealth values, regime codes, macro paths, and
-    margin-call count so the caller can scatter results into preallocated
+    additive accounting attributes so the caller can scatter results into preallocated
     arrays. Each chunk draws its own RNG from ``random_seed + chunk_index``, so results are
     identical whether chunks run sequentially or in parallel.
     """
@@ -132,6 +142,10 @@ def _run_chunk(
         maintenance_margin=state["maintenance_margin"],
         contribution=state["contribution"],
         withdrawal=state["withdrawal"],
+        tax_regime=state["tax_regime"],
+        asset_tax_categories=state["asset_tax_categories"],
+        italy_annual_wealth_tax=state["italy_annual_wealth_tax"],
+        tax_terminal_liquidation=state["tax_terminal_liquidation"],
     )
     wealth_values = chunk_wealth.to_numpy(dtype=float)
     return (
@@ -139,7 +153,7 @@ def _run_chunk(
         wealth_values,
         chunk_result.regimes,
         chunk_result.macro_paths,
-        int(chunk_wealth.attrs.get("margin_calls", 0)),
+        {key: float(chunk_wealth.attrs.get(key, 0.0)) for key in _ADDITIVE_WEALTH_ATTRS},
     )
 
 
@@ -184,6 +198,10 @@ def _simulate_chunked(
     maintenance_margin: float,
     contribution: float,
     withdrawal: float,
+    tax_regime: str,
+    asset_tax_categories: Mapping[str, str] | None,
+    italy_annual_wealth_tax: float,
+    tax_terminal_liquidation: bool,
     return_kind: str,
     rate_col: str | None,
     inflation_col: str,
@@ -255,6 +273,10 @@ def _simulate_chunked(
             maintenance_margin=maintenance_margin,
             contribution=contribution,
             withdrawal=withdrawal,
+            tax_regime=tax_regime,
+            asset_tax_categories=asset_tax_categories,
+            italy_annual_wealth_tax=italy_annual_wealth_tax,
+            tax_terminal_liquidation=tax_terminal_liquidation,
         )
         return chunk_result, chunk_wealth
 
@@ -278,7 +300,7 @@ def _simulate_chunked(
         else None
     )
     wealth_values = np.empty((periods, total), dtype=float)
-    margin_calls = 0
+    aggregate_attrs = {key: 0.0 for key in _ADDITIVE_WEALTH_ATTRS}
     specs = _chunk_specs(total, chunk_size, random_seed)
 
     if workers is not None and workers > 1:
@@ -316,6 +338,10 @@ def _simulate_chunked(
             "maintenance_margin": float(maintenance_margin),
             "contribution": float(contribution),
             "withdrawal": float(withdrawal),
+            "tax_regime": tax_regime,
+            "asset_tax_categories": dict(asset_tax_categories or {}),
+            "italy_annual_wealth_tax": float(italy_annual_wealth_tax),
+            "tax_terminal_liquidation": bool(tax_terminal_liquidation),
         }
         try:
             with ProcessPoolExecutor(
@@ -329,14 +355,15 @@ def _simulate_chunked(
                     chunk_wealth_values,
                     chunk_regime_codes,
                     chunk_macro,
-                    chunk_margin_calls,
+                    chunk_attrs,
                 ) in executor.map(
                     _run_chunk, specs
                 ):
                     count = chunk_wealth_values.shape[1]
                     wealth_values[:, start:start + count] = chunk_wealth_values
                     regime_codes[:, start:start + count] = chunk_regime_codes
-                    margin_calls += chunk_margin_calls
+                    for key in _ADDITIVE_WEALTH_ATTRS:
+                        aggregate_attrs[key] += float(chunk_attrs.get(key, 0.0))
                     if macro_paths is not None and chunk_macro is not None:
                         macro_paths[:, start:start + count, :] = chunk_macro
         except (NotImplementedError, PermissionError):
@@ -344,7 +371,8 @@ def _simulate_chunked(
                 chunk_result, chunk_wealth = _single(count, seed)
                 wealth_values[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
                 regime_codes[:, start:start + count] = chunk_result.regimes
-                margin_calls += int(chunk_wealth.attrs.get("margin_calls", 0))
+                for key in _ADDITIVE_WEALTH_ATTRS:
+                    aggregate_attrs[key] += float(chunk_wealth.attrs.get(key, 0.0))
                 if macro_paths is not None and chunk_result.macro_paths is not None:
                     macro_paths[:, start:start + count, :] = chunk_result.macro_paths
     else:
@@ -352,7 +380,8 @@ def _simulate_chunked(
             chunk_result, chunk_wealth = _single(count, seed)
             wealth_values[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
             regime_codes[:, start:start + count] = chunk_result.regimes
-            margin_calls += int(chunk_wealth.attrs.get("margin_calls", 0))
+            for key in _ADDITIVE_WEALTH_ATTRS:
+                aggregate_attrs[key] += float(chunk_wealth.attrs.get(key, 0.0))
             if macro_paths is not None and chunk_result.macro_paths is not None:
                 macro_paths[:, start:start + count, :] = chunk_result.macro_paths
 
@@ -360,7 +389,15 @@ def _simulate_chunked(
         wealth_values,
         columns=[f"path_{index}" for index in range(total)],
     )
-    wealth.attrs["margin_calls"] = margin_calls
+    wealth.attrs.update(aggregate_attrs)
+    wealth.attrs.update(
+        {
+            "tax_regime": tax_regime,
+            "asset_tax_categories": dict(asset_tax_categories or {}),
+            "annual_wealth_tax": float(italy_annual_wealth_tax),
+            "tax_terminal_liquidation": bool(tax_terminal_liquidation),
+        }
+    )
     combined = SimulationResult(
         returns=np.empty((periods, 0, len(model.assets)), dtype=float),
         regimes=regime_codes,
@@ -406,6 +443,10 @@ def run_scenario(
     maintenance_margin: float = 0.0,
     contribution: float = 0.0,
     withdrawal: float = 0.0,
+    tax_regime: str = "none",
+    asset_tax_categories: Mapping[str, str] | None = None,
+    italy_annual_wealth_tax: float = 0.002,
+    tax_terminal_liquidation: bool = True,
     initial_value: float = 100.0,
     base_currency: str = "USD",
     asset_currencies: Mapping[str, str] | None = None,
@@ -484,6 +525,10 @@ def run_scenario(
     normalized_expense_ratios = {
         available_columns.get(str(asset).strip().upper(), asset): float(rate)
         for asset, rate in (asset_expense_ratios or {}).items()
+    }
+    normalized_tax_categories = {
+        available_columns.get(str(asset).strip().upper(), asset): str(category).strip().lower()
+        for asset, category in (asset_tax_categories or {}).items()
     }
     scenario_returns = convert_returns_to_base_currency(
         returns.loc[:, selected],
@@ -648,6 +693,10 @@ def run_scenario(
                 maintenance_margin=float(maintenance_margin),
                 contribution=float(contribution),
                 withdrawal=float(withdrawal),
+                tax_regime=tax_regime,
+                asset_tax_categories=normalized_tax_categories,
+                italy_annual_wealth_tax=float(italy_annual_wealth_tax),
+                tax_terminal_liquidation=bool(tax_terminal_liquidation),
                 return_kind=return_kind,
                 rate_col=rate_col,
                 inflation_col=inflation_col,
@@ -673,8 +722,17 @@ def run_scenario(
     else:
         wealth = pd.concat([run_wealth for _, run_wealth in simulation_runs], axis=1, ignore_index=True)
         wealth.columns = [f"path_{index}" for index in range(wealth.shape[1])]
-        wealth.attrs["margin_calls"] = int(
-            sum(run_wealth.attrs.get("margin_calls", 0) for _, run_wealth in simulation_runs)
+        for key in _ADDITIVE_WEALTH_ATTRS:
+            wealth.attrs[key] = float(
+                sum(run_wealth.attrs.get(key, 0.0) for _, run_wealth in simulation_runs)
+            )
+        wealth.attrs.update(
+            {
+                "tax_regime": tax_regime,
+                "asset_tax_categories": normalized_tax_categories,
+                "annual_wealth_tax": float(italy_annual_wealth_tax),
+                "tax_terminal_liquidation": bool(tax_terminal_liquidation),
+            }
         )
         regimes_combined = np.concatenate(
             [run_result.regimes for run_result, _ in simulation_runs], axis=1
@@ -819,8 +877,30 @@ def run_scenario(
         "leverage_multiple": float(leverage_multiple),
         "maintenance_margin": float(maintenance_margin),
         "margin_calls": int(wealth.attrs.get("margin_calls", 0)),
+        "capital_gains_tax": float(wealth.attrs.get("capital_gains_tax_total", 0.0))
+        / max(int(paths), 1),
+        "wealth_tax": float(wealth.attrs.get("wealth_tax_total", 0.0)) / max(int(paths), 1),
+        "terminal_liquidation_tax": float(
+            wealth.attrs.get("terminal_liquidation_tax_total", 0.0)
+        )
+        / max(int(paths), 1),
+        "taxes_paid": float(wealth.attrs.get("taxes_paid_total", 0.0)) / max(int(paths), 1),
+        "realized_gains": float(wealth.attrs.get("realized_gains_total", 0.0))
+        / max(int(paths), 1),
+        "realized_losses": float(wealth.attrs.get("realized_losses_total", 0.0))
+        / max(int(paths), 1),
+        "loss_carryforward": float(wealth.attrs.get("loss_carryforward_total", 0.0))
+        / max(int(paths), 1),
+        "annual_wealth_tax_rate": (
+            float(italy_annual_wealth_tax) if tax_regime == "italy_administered" else 0.0
+        ),
     }.items():
         summary[key] = value
+    model.metadata["tax_regime"] = tax_regime
+    if tax_regime == "italy_administered":
+        model.metadata["asset_tax_categories"] = normalized_tax_categories
+        model.metadata["italy_annual_wealth_tax"] = float(italy_annual_wealth_tax)
+        model.metadata["tax_terminal_liquidation"] = bool(tax_terminal_liquidation)
     if parameter_summary is not None:
         terminal_offset = 0
         real_terminal_metrics: list[dict[str, float]] = []

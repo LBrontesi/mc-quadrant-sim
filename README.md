@@ -332,6 +332,49 @@ regime's historical average inflation. The reported
 `effective_financing_rate` is the average rate actually applied across the
 simulated paths.
 
+#### Italian tax accounting (optional)
+
+Selecting **Italy — simplified administered regime** switches portfolio
+accounting from pre-tax wealth to an after-tax planning approximation. Market
+returns and regime calibration are unchanged. The account tracks average cost
+per asset, realizes gains and losses on withdrawals and rebalancing sales,
+funds the requested withdrawal plus its disposal tax, and can tax all remaining
+unrealized gains through a final liquidation. Unused eligible losses are kept
+for the current tax year and the next four tax years, oldest first. Because a
+scenario has no calendar start date, each consecutive 12-month block is treated
+as a tax year. Modeled purchase and sale transaction costs adjust tax basis and
+disposal proceeds.
+
+The default `STANDARD` category applies 26%. `GOVERNMENT_BOND` applies the
+12.5%-equivalent taxable fraction. `FUND` models positive proceeds as
+non-offsettable fund income while negative results enter the eligible loss
+ledger. `GOVERNMENT_BOND_FUND` applies both approximations. Categories are
+entered as `ASSET:CATEGORY`, for example
+`SPY:FUND, BTP:GOVERNMENT_BOND`; unspecified assets default to `STANDARD`.
+The annual stamp-duty/IVAFE proxy defaults to 0.20% and is applied monthly.
+
+These defaults follow the current statutory 26% rate in
+[Decree-Law 66/2014, Article 3](https://www.normattiva.it/uri-res/N2Ls?urn%3Anir%3Astato%3Adecreto.legge%3A2014-04-24%3B66~art3=),
+the 12.5% government-security treatment retained by
+[Legislative Decree 461/1997](https://www.normattiva.it/atto/caricaDettaglioAtto?atto.articolo.numero=0&atto.codiceRedazionale=097G0497&atto.dataPubblicazioneGazzetta=1998-01-03&tabID=0.6902947756616171),
+the four-subsequent-year loss rule in
+[TUIR Article 68(6)](https://www.normattiva.it/uri-res/N2Ls?urn%3Anir%3Apresidente.repubblica%3Adecreto%3A1986-12-22%3B917~art68-com6=),
+and the two-per-thousand financial-product levy in
+[Decree-Law 201/2011, Article 19](https://www.normattiva.it/uri-res/N2Ls?urn%3Anir%3Astato%3Adecreto.legge%3A2011-12-06%3B201~art19-com15=).
+The acquisition-cost basis is consistent with the current
+[Agenzia delle Entrate capital-gains instructions](https://infoprecompilata.agenziaentrate.gov.it/portale/semplificata-mod-plusvalenze-natura-finanziaria).
+
+This is intentionally not a tax-return engine. It does not distinguish every
+ETF domicile, UCITS status, government-bond percentage, intermediary regime,
+dividend/coupon component, account-level exemption, or individual taxpayer
+circumstance. Historical adjusted returns combine price and distributions, so
+the simulator does not separately tax dividends or coupons. The 0.20% input is
+one configurable account-level proxy—not a claim that stamp duty and IVAFE are
+both due. Leverage is disabled with Italian tax accounting, and the legacy
+weighted-return mode is unavailable because neither exposes asset-level
+disposals or cost basis. Verify classifications and current rules with a
+qualified Italian tax adviser.
+
 ### 7. Reported Risk Metrics
 
 Terminal wealth includes the mean, standard deviation, 5th/50th/95th
@@ -384,6 +427,7 @@ average or percentile.
 - Parameter bootstrap quantifies historical estimation instability, not every possible future structural break.
 - Parametric tail and ADCC specifications remain model assumptions; empirical bootstrap remains a useful benchmark.
 - Transaction costs are charged only at modeled rebalancing events.
+- Italian taxes are an optional simplified planning approximation, not tax advice or a filing calculation.
 - Results are scenario estimates, not forecasts or investment advice.
 
 ### 9. Coherence With Market Reality

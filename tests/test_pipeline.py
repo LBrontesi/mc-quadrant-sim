@@ -57,6 +57,37 @@ def test_pipeline_supports_semi_markov_duration_model():
     assert scenario.model.metadata["model_kind"] == "quadrant"
 
 
+def test_pipeline_reports_italian_tax_accounting_across_chunks():
+    scenario = run_scenario(
+        **_scenario_kwargs(
+            {
+                "periods": 12,
+                "paths": 12,
+                "chunk_size": 4,
+                "workers": 1,
+                "walk_forward": False,
+                "rebalance_frequency": 3,
+                "tax_regime": "italy_administered",
+                "asset_tax_categories": {
+                    "Stocks": "fund",
+                    "Bonds": "government_bond",
+                },
+                "italy_annual_wealth_tax": 0.002,
+            }
+        )
+    )
+
+    assert scenario.model.metadata["tax_regime"] == "italy_administered"
+    assert scenario.model.metadata["asset_tax_categories"] == {
+        "Stocks": "fund",
+        "Bonds": "government_bond",
+    }
+    assert scenario.summary["taxes_paid"] > 0
+    assert scenario.summary["wealth_tax"] > 0
+    assert scenario.summary["annual_wealth_tax_rate"] == 0.002
+    assert scenario.wealth.attrs["taxes_paid_total"] == scenario.summary["taxes_paid"] * 12
+
+
 def test_pipeline_supports_garch_and_threshold_window():
     scenario = run_scenario(
         **_scenario_kwargs({"garch": True, "threshold_window": 12, "walk_forward": False})

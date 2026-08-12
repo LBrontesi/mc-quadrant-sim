@@ -245,6 +245,8 @@ def test_metric_formatter_respects_units():
     assert api.format_metric_value("target_wealth", 500.0, "EUR") == "EUR 500.00"
     assert api.format_metric_value("recovery_months_p95", 14.25) == "14.2 mo"
     assert api.format_metric_value("sharpe_ratio", 1.234) == "1.23"
+    assert api.format_metric_value("annual_wealth_tax_rate", 0.002) == "0.20%"
+    assert api.format_metric_value("taxes_paid", 42.5, "EUR") == "EUR 42.50"
 
 
 def test_scenario_kwargs_reject_invalid_wealth_targets():
@@ -325,6 +327,51 @@ def test_scenario_kwargs_parse_fees_and_leverage():
     assert kwargs["maintenance_margin"] == pytest.approx(0.25)
 
 
+def test_scenario_kwargs_parse_italian_tax_settings():
+    kwargs = api.scenario_kwargs(
+        {
+            "weights": {"SPY": 60, "BTP": 40},
+            "rebalance": "quarterly",
+            "tax_regime": "italy_administered",
+            "asset_tax_categories": "SPY:FUND, BTP:GOVERNMENT_BOND",
+            "italy_wealth_tax": 0.20,
+            "tax_terminal_liquidation": False,
+        }
+    )
+
+    assert kwargs["tax_regime"] == "italy_administered"
+    assert kwargs["asset_tax_categories"] == {
+        "SPY": "fund",
+        "BTP": "government_bond",
+    }
+    assert kwargs["italy_annual_wealth_tax"] == pytest.approx(0.002)
+    assert kwargs["tax_terminal_liquidation"] is False
+
+
+def test_scenario_kwargs_reject_invalid_italian_tax_settings():
+    with pytest.raises(ValueError, match="tax category"):
+        api.scenario_kwargs(
+            {
+                "weights": {"SPY": 100},
+                "tax_regime": "italy_administered",
+                "asset_tax_categories": "SPY:CRYPTO",
+            }
+        )
+    with pytest.raises(ValueError, match="holdings-based"):
+        api.scenario_kwargs(
+            {"weights": {"SPY": 100}, "tax_regime": "italy_administered", "rebalance": "legacy"}
+        )
+    with pytest.raises(ValueError, match="leveraged"):
+        api.scenario_kwargs(
+            {
+                "weights": {"SPY": 100},
+                "tax_regime": "italy_administered",
+                "rebalance": "monthly",
+                "leverage_multiple": 2.0,
+            }
+        )
+
+
 def test_scenario_kwargs_rejects_negative_inflation_sensitivity():
     with pytest.raises(ValueError, match="financing_inflation_sensitivity"):
         api.scenario_kwargs(
@@ -372,6 +419,27 @@ def test_simulate_reports_fee_and_leverage_assumptions():
     assert response["costs"]["annual_financing_cost"] == pytest.approx(0.03)
     assert response["costs"]["weighted_expense_ratio"] > 0
     assert response["costs"]["effective_financing_rate"] == pytest.approx(0.06)
+
+
+def test_simulate_reports_italian_tax_assumptions():
+    response = api.build_simulate_response(
+        _csv_payload(
+            tax_regime="italy_administered",
+            asset_tax_categories="SPY:FUND, IEF:GOVERNMENT_BOND",
+            italy_wealth_tax=0.20,
+        )
+    )
+
+    assert response["taxes"]["regime"] == "italy_administered"
+    assert response["taxes"]["standard_rate"] == pytest.approx(0.26)
+    assert response["taxes"]["government_bond_rate"] == pytest.approx(0.125)
+    assert response["taxes"]["annual_wealth_tax_rate"] == pytest.approx(0.002)
+    assert response["taxes"]["loss_carry_years"] == 4
+    assert response["costs"]["taxes_paid"] > 0
+    assert response["costs"]["wealth_tax"] > 0
+    assert response["costs"]["realized_gains"] >= 0
+    assert response["costs"]["realized_losses"] >= 0
+    assert any("simplified administered-regime" in warning for warning in response["warnings"])
 
 
 def test_simulate_reports_inflation_linked_financing():

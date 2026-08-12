@@ -111,6 +111,11 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert 'id="paths" value="100000"' in html
     assert 'id="periods" value="120"' in html
     assert '<option value="buy_hold">Buy and hold (drifting weights)</option>' in html
+    assert '<option value="italy_administered">Italy — simplified administered regime</option>' in html
+    assert 'id="italy-wealth-tax" value="0.20"' in html
+    assert 'id="tax-terminal-liquidation" checked' in html
+    assert 'tax_regime: $("tax-regime").value' in javascript
+    assert '["taxes_paid", "Total taxes"]' in javascript
     assert '<button id="run-btn" class="btn btn-primary btn-lg" disabled>Run analysis</button>' in html
     assert '$("run-btn").textContent = "Run analysis"' in javascript
     assert "Run ${paths.toLocaleString()} paths" not in javascript
