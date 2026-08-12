@@ -476,23 +476,31 @@
             </label>
           </div>
           <div class="two-col">
-            <label>Tax regime
-              <select id="tax-regime">
-                <option value="none" selected>No tax model</option>
-                <option value="italy_administered">Italy — simplified administered regime</option>
+            <label>Tax country
+              <select id="tax-country">
+                <option value="none" selected>No taxation</option>
+                <option value="IT">Italy</option>
               </select>
-              <span class="hint">Optional after-tax accounting; it does not change calibration or simulated market returns.</span>
+              <span class="hint">The neutral simulation is country-agnostic. Select a country to apply its tax policy to the same market paths.</span>
             </label>
+            <label class="tax-settings hidden">Tax regime
+              <select id="tax-regime">
+                <option value="italy_administered" selected>Simplified administered regime</option>
+              </select>
+              <span class="hint">Additional country regimes can be registered without changing the neutral simulation engine.</span>
+            </label>
+          </div>
+          <div class="two-col tax-settings hidden">
             <label class="tax-settings hidden">Annual stamp duty / IVAFE proxy (%)
               <input type="number" id="italy-wealth-tax" value="0.20" min="0" max="10" step="0.01">
               <span class="hint">Defaults to 0.20% and is charged monthly on modeled holdings.</span>
             </label>
-          </div>
-          <div class="tax-settings hidden">
             <label>Asset tax categories (optional)
               <input type="text" id="asset-tax-categories" placeholder="SPY:FUND, BTP:GOVERNMENT_BOND">
               <span class="hint">STANDARD is the default. Also accepts FUND, GOVERNMENT_BOND, and GOVERNMENT_BOND_FUND.</span>
             </label>
+          </div>
+          <div class="tax-settings hidden">
             <label class="check-inline"><input type="checkbox" id="tax-terminal-liquidation" checked> Tax unrealized gains through a final liquidation</label>
             <span class="hint">Uses average cost and a four-year loss carryforward. Fund income treatment and government-bond shares are approximations, not tax advice.</span>
           </div>

@@ -24,6 +24,7 @@ from mc_quadrants.data import (
 )
 from mc_quadrants.pipeline import compare_distributions, run_scenario
 from mc_quadrants.regimes import REGIME_ORDER
+from mc_quadrants.tax_policy import available_tax_countries, resolve_tax_selection
 from mc_quadrants.taxes import ITALY_TAX_CATEGORIES
 
 REGIME_NAMES = {
@@ -47,6 +48,7 @@ _PERCENT_METRICS = {
     "effective_risk_free_rate",
     "maintenance_margin",
     "annual_wealth_tax_rate",
+    "terminal_tax_drag_percent",
     "probability_of_loss",
     "goal_success_probability",
     "risk_of_ruin",
@@ -82,6 +84,9 @@ _CURRENCY_METRICS = {
     "realized_gains",
     "realized_losses",
     "loss_carryforward",
+    "gross_terminal_wealth_median",
+    "after_tax_terminal_wealth_median",
+    "terminal_tax_drag_median",
 }
 
 
@@ -151,12 +156,6 @@ REBALANCE_KEYS = {
     "quarterly": 3,
     "annual": 12,
 }
-TAX_REGIME_KEYS = {
-    "none": "none",
-    "italy": "italy_administered",
-    "italy_administered": "italy_administered",
-}
-
 MAX_PERIODS = 360
 MAX_PATHS = 120_000
 MAX_WORKERS = 16
@@ -660,10 +659,12 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     if np.isclose(sum(weights.values()), 0.0):
         raise ValueError("Portfolio weights must have a non-zero sum.")
     expense_ratios = parse_expense_ratios(payload.get("expense_ratios"))
-    tax_regime_label = str(payload.get("tax_regime", "none")).strip().lower()
-    if tax_regime_label not in TAX_REGIME_KEYS:
-        raise ValueError("Unknown tax regime (expected 'none' or 'italy_administered').")
-    tax_regime = TAX_REGIME_KEYS[tax_regime_label]
+    tax_selection = resolve_tax_selection(
+        payload.get("tax_country"),
+        payload.get("tax_regime"),
+    )
+    tax_country = tax_selection.country
+    tax_regime = tax_selection.regime
     raw_tax_categories = payload.get("asset_tax_categories", "")
     if isinstance(raw_tax_categories, Mapping):
         tax_categories = {
@@ -676,7 +677,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
             for asset, category in parse_pair_map(str(raw_tax_categories or ""), "tax category").items()
         }
     unknown_tax_categories = sorted(set(tax_categories.values()) - ITALY_TAX_CATEGORIES)
-    if unknown_tax_categories:
+    if tax_country == "IT" and unknown_tax_categories:
         allowed = ", ".join(sorted(ITALY_TAX_CATEGORIES))
         raise ValueError(
             f"Unknown Italian tax category '{unknown_tax_categories[0]}'. Expected one of: {allowed}."
@@ -684,12 +685,12 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     italy_wealth_tax = float(payload.get("italy_wealth_tax", 0.20)) / 100.0
     if not np.isfinite(italy_wealth_tax) or not 0 <= italy_wealth_tax < 1:
         raise ValueError("italy_wealth_tax must be between 0 and 100 percent.")
-    if tax_regime == "italy_administered" and rebalance_label == "legacy":
-        raise ValueError("Italian tax accounting requires holdings-based accounting, not legacy weighted returns.")
-    if tax_regime == "italy_administered" and not np.isclose(leverage_multiple, 1.0):
-        raise ValueError("Italian tax accounting is not available with leveraged portfolios.")
-    if tax_regime == "italy_administered" and any(weight < 0 for weight in weights.values()):
-        raise ValueError("Italian tax accounting requires non-negative portfolio weights.")
+    if tax_selection.policy is not None:
+        tax_selection.policy.validate(
+            rebalance_frequency=REBALANCE_KEYS[rebalance_label],
+            leverage_multiple=leverage_multiple,
+            target_weights=np.asarray(list(weights.values()), dtype=float),
+        )
     base_currency = str(payload.get("base_currency", "USD")).strip().upper()
     if len(base_currency) != 3:
         raise ValueError("Portfolio currency must be a three-letter ISO code.")
@@ -755,6 +756,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "rebalance_frequency": REBALANCE_KEYS[rebalance_label],
         "transaction_cost_bps": cost_bps,
         "asset_expense_ratios": expense_ratios,
+        "tax_country": tax_country,
         "tax_regime": tax_regime,
         "asset_tax_categories": tax_categories,
         "italy_annual_wealth_tax": italy_wealth_tax,
@@ -1461,10 +1463,18 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     model = scenario.model
     result = scenario.result
     wealth = scenario.reporting_wealth if scenario.reporting_wealth is not None else scenario.wealth
+    gross_wealth = (
+        scenario.gross_reporting_wealth
+        if scenario.gross_reporting_wealth is not None
+        else wealth
+    )
     summary = scenario.summary
     growth_col = scenario.model.metadata.get("growth_col", "growth")
     inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
     percentiles = _wealth_percentiles(wealth)
+    gross_percentiles = (
+        percentiles if gross_wealth is wealth else _wealth_percentiles(gross_wealth)
+    )
     terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
     drawdown_values = _max_drawdown_paths(
         wealth,
@@ -1536,6 +1546,16 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "realized_losses": summary_values.get("realized_losses", 0.0),
         "loss_carryforward": summary_values.get("loss_carryforward", 0.0),
         "annual_wealth_tax_rate": summary_values.get("annual_wealth_tax_rate", 0.0),
+        "gross_terminal_wealth_median": summary_values.get(
+            "gross_terminal_wealth_median", 0.0
+        ),
+        "after_tax_terminal_wealth_median": summary_values.get(
+            "after_tax_terminal_wealth_median", 0.0
+        ),
+        "terminal_tax_drag_median": summary_values.get("terminal_tax_drag_median", 0.0),
+        "terminal_tax_drag_percent": summary_values.get(
+            "terminal_tax_drag_percent", 0.0
+        ),
     }
     path_analytics = _path_analytics(
         wealth,
@@ -1553,8 +1573,10 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "Regime persistence is unusually low for a macro-state model; review the "
             "smoothing, hysteresis, confirmation, and duration assumptions."
         )
+    tax_country = str(model.metadata.get("tax_country", "none"))
     tax_regime = str(model.metadata.get("tax_regime", "none"))
-    if tax_regime == "italy_administered":
+    tax_selection = resolve_tax_selection(tax_country, tax_regime)
+    if tax_selection.enabled:
         warnings.append(
             "Italian taxes use a simplified administered-regime approximation; verify fund classification, "
             "government-bond components, and personal circumstances with a qualified tax adviser."
@@ -1573,18 +1595,38 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "warnings": warnings,
         "costs": costs,
         "taxes": {
-            "regime": tax_regime,
-            "label": (
-                "Italy — simplified administered regime"
-                if tax_regime == "italy_administered"
-                else "No tax model"
+            **(
+                tax_selection.policy.metadata()
+                if tax_selection.policy is not None
+                else {
+                    "country": "none",
+                    "country_label": "No taxation",
+                    "regime": "none",
+                    "label": "No tax model",
+                    "standard_rate": 0.0,
+                    "government_bond_rate": 0.0,
+                    "loss_carry_years": 0,
+                }
             ),
+            "enabled": tax_selection.enabled,
+            "available_countries": available_tax_countries(),
             "asset_categories": model.metadata.get("asset_tax_categories", {}),
-            "standard_rate": 0.26 if tax_regime == "italy_administered" else 0.0,
-            "government_bond_rate": 0.125 if tax_regime == "italy_administered" else 0.0,
             "annual_wealth_tax_rate": summary_values.get("annual_wealth_tax_rate", 0.0),
             "terminal_liquidation": bool(model.metadata.get("tax_terminal_liquidation", False)),
-            "loss_carry_years": 4 if tax_regime == "italy_administered" else 0,
+            "impact": {
+                "gross_terminal_median": summary_values.get(
+                    "gross_terminal_wealth_median", 0.0
+                ),
+                "after_tax_terminal_median": summary_values.get(
+                    "after_tax_terminal_wealth_median", 0.0
+                ),
+                "terminal_drag_median": summary_values.get(
+                    "terminal_tax_drag_median", 0.0
+                ),
+                "terminal_drag_percent": summary_values.get(
+                    "terminal_tax_drag_percent", 0.0
+                ),
+            },
         },
         "wealth": {
             "periods": list(range(1, len(wealth) + 1)),
@@ -1592,6 +1634,16 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "median": percentiles[0.50].tolist(),
             "p95": percentiles[0.95].tolist(),
         },
+        "gross_wealth": (
+            {
+                "periods": list(range(1, len(gross_wealth) + 1)),
+                "p05": gross_percentiles[0.05].tolist(),
+                "median": gross_percentiles[0.50].tolist(),
+                "p95": gross_percentiles[0.95].tolist(),
+            }
+            if tax_selection.enabled
+            else None
+        ),
         "monthly_returns": _median_period_returns(
             wealth,
             {**dict(payload), "annual_inflation": 0.0},

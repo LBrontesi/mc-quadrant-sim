@@ -54,7 +54,23 @@ def test_pipeline_supports_semi_markov_duration_model():
     assert scenario.result.regimes.shape == (4, 8)
     assert scenario.result.regimes.dtype.kind in "iu"
     assert scenario.reporting_wealth is scenario.wealth
+    assert scenario.gross_wealth is scenario.wealth
+    assert scenario.gross_reporting_wealth is scenario.reporting_wealth
     assert scenario.model.metadata["model_kind"] == "quadrant"
+
+
+def test_neutral_gross_reporting_reuses_inflation_adjusted_wealth():
+    scenario = run_scenario(
+        **_scenario_kwargs(
+            {
+                "annual_inflation": 0.02,
+                "walk_forward": False,
+            }
+        )
+    )
+
+    assert scenario.gross_wealth is scenario.wealth
+    assert scenario.gross_reporting_wealth is scenario.reporting_wealth
 
 
 def test_pipeline_reports_italian_tax_accounting_across_chunks():
@@ -67,6 +83,7 @@ def test_pipeline_reports_italian_tax_accounting_across_chunks():
                 "workers": 1,
                 "walk_forward": False,
                 "rebalance_frequency": 3,
+                "tax_country": "IT",
                 "tax_regime": "italy_administered",
                 "asset_tax_categories": {
                     "Stocks": "fund",
@@ -77,6 +94,7 @@ def test_pipeline_reports_italian_tax_accounting_across_chunks():
         )
     )
 
+    assert scenario.model.metadata["tax_country"] == "IT"
     assert scenario.model.metadata["tax_regime"] == "italy_administered"
     assert scenario.model.metadata["asset_tax_categories"] == {
         "Stocks": "fund",
@@ -86,6 +104,39 @@ def test_pipeline_reports_italian_tax_accounting_across_chunks():
     assert scenario.summary["wealth_tax"] > 0
     assert scenario.summary["annual_wealth_tax_rate"] == 0.002
     assert scenario.wealth.attrs["taxes_paid_total"] == scenario.summary["taxes_paid"] * 12
+    assert scenario.gross_wealth is not None
+    assert scenario.gross_wealth.attrs["tax_country"] == "none"
+    assert scenario.summary["gross_terminal_wealth_median"] >= scenario.summary[
+        "after_tax_terminal_wealth_median"
+    ]
+    assert scenario.summary["terminal_tax_drag_median"] > 0
+
+
+def test_taxed_scenario_reuses_the_country_neutral_gross_paths():
+    shared = {
+        "periods": 12,
+        "paths": 12,
+        "chunk_size": 4,
+        "workers": 1,
+        "walk_forward": False,
+        "rebalance_frequency": 3,
+    }
+    neutral = run_scenario(**_scenario_kwargs(shared))
+    italian = run_scenario(
+        **_scenario_kwargs(
+            {
+                **shared,
+                "tax_country": "IT",
+                "tax_regime": "italy_administered",
+                "italy_annual_wealth_tax": 0.002,
+            }
+        )
+    )
+
+    assert italian.gross_wealth is not None
+    assert np.array_equal(italian.result.regimes, neutral.result.regimes)
+    assert np.allclose(italian.gross_wealth, neutral.wealth)
+    assert np.all(italian.gross_wealth.to_numpy() >= italian.wealth.to_numpy())
 
 
 def test_pipeline_supports_garch_and_threshold_window():

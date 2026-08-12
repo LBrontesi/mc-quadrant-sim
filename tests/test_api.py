@@ -332,6 +332,7 @@ def test_scenario_kwargs_parse_italian_tax_settings():
         {
             "weights": {"SPY": 60, "BTP": 40},
             "rebalance": "quarterly",
+            "tax_country": "IT",
             "tax_regime": "italy_administered",
             "asset_tax_categories": "SPY:FUND, BTP:GOVERNMENT_BOND",
             "italy_wealth_tax": 0.20,
@@ -339,6 +340,7 @@ def test_scenario_kwargs_parse_italian_tax_settings():
         }
     )
 
+    assert kwargs["tax_country"] == "IT"
     assert kwargs["tax_regime"] == "italy_administered"
     assert kwargs["asset_tax_categories"] == {
         "SPY": "fund",
@@ -346,6 +348,19 @@ def test_scenario_kwargs_parse_italian_tax_settings():
     }
     assert kwargs["italy_annual_wealth_tax"] == pytest.approx(0.002)
     assert kwargs["tax_terminal_liquidation"] is False
+
+
+def test_scenario_kwargs_keeps_legacy_regime_only_italy_selection_compatible():
+    kwargs = api.scenario_kwargs(
+        {
+            "weights": {"SPY": 100},
+            "rebalance": "monthly",
+            "tax_regime": "italy_administered",
+        }
+    )
+
+    assert kwargs["tax_country"] == "IT"
+    assert kwargs["tax_regime"] == "italy_administered"
 
 
 def test_scenario_kwargs_reject_invalid_italian_tax_settings():
@@ -382,6 +397,8 @@ def test_scenario_kwargs_rejects_negative_inflation_sensitivity():
 def test_simulate_response_reports_model_kind_and_validation():
     response = api.build_simulate_response(_csv_payload())
     assert response["model_kind"] == "quadrant"
+    assert response["taxes"]["enabled"] is False
+    assert response["gross_wealth"] is None
     validation = response["validation"]
     assert validation is not None
     assert validation["summary"]["splits"] > 0
@@ -424,13 +441,25 @@ def test_simulate_reports_fee_and_leverage_assumptions():
 def test_simulate_reports_italian_tax_assumptions():
     response = api.build_simulate_response(
         _csv_payload(
+            tax_country="IT",
             tax_regime="italy_administered",
             asset_tax_categories="SPY:FUND, IEF:GOVERNMENT_BOND",
             italy_wealth_tax=0.20,
         )
     )
 
+    assert response["taxes"]["enabled"] is True
+    assert response["taxes"]["country"] == "IT"
     assert response["taxes"]["regime"] == "italy_administered"
+    assert response["taxes"]["available_countries"] == [
+        {
+            "code": "IT",
+            "label": "Italy",
+            "regimes": [
+                {"value": "italy_administered", "label": "Simplified administered regime"}
+            ],
+        }
+    ]
     assert response["taxes"]["standard_rate"] == pytest.approx(0.26)
     assert response["taxes"]["government_bond_rate"] == pytest.approx(0.125)
     assert response["taxes"]["annual_wealth_tax_rate"] == pytest.approx(0.002)
@@ -439,6 +468,11 @@ def test_simulate_reports_italian_tax_assumptions():
     assert response["costs"]["wealth_tax"] > 0
     assert response["costs"]["realized_gains"] >= 0
     assert response["costs"]["realized_losses"] >= 0
+    assert response["costs"]["gross_terminal_wealth_median"] >= response["costs"][
+        "after_tax_terminal_wealth_median"
+    ]
+    assert response["taxes"]["impact"]["terminal_drag_median"] > 0
+    assert response["gross_wealth"]["median"] != response["wealth"]["median"]
     assert any("simplified administered-regime" in warning for warning in response["warnings"])
 
 

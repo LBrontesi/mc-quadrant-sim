@@ -332,11 +332,25 @@ regime's historical average inflation. The reported
 `effective_financing_rate` is the average rate actually applied across the
 simulated paths.
 
-#### Italian tax accounting (optional)
+#### Country-neutral accounting and optional tax policies
 
-Selecting **Italy — simplified administered regime** switches portfolio
-accounting from pre-tax wealth to an after-tax planning approximation. Market
-returns and regime calibration are unchanged. The account tracks average cost
+Every run first produces a country-neutral gross ledger. If taxation is
+enabled, the selected country policy consumes the exact same simulated market
+paths and produces a second, path-dependent after-tax ledger. The API and UI
+therefore report both gross and net terminal wealth plus their tax drag; with
+taxation disabled, the gross and active ledgers are the same object and no
+duplicate accounting pass is performed.
+
+Country policies are registered through `TaxPolicy` in
+`src/mc_quadrants/tax_policy.py`. A new country can supply validation,
+path-dependent accounting, and metadata without modifying return simulation or
+calibration. The request contract uses `tax_country` and `tax_regime`; legacy
+requests that send only `tax_regime=italy_administered` remain compatible.
+Italy is the only registered country for now.
+
+Selecting **Italy — simplified administered regime** applies an after-tax
+planning approximation. Market returns and regime calibration are unchanged.
+The account tracks average cost
 per asset, realizes gains and losses on withdrawals and rebalancing sales,
 funds the requested withdrawal plus its disposal tax, and can tax all remaining
 unrealized gains through a final liquidation. Unused eligible losses are kept

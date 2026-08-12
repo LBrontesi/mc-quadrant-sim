@@ -38,6 +38,14 @@ from mc_quadrants.simulation import (
     simulate_returns,
     summarize_wealth_risk,
 )
+from mc_quadrants.tax_policy import (
+    TaxPolicy,
+    TaxSelection,
+    TaxSimulationContext,
+    available_tax_countries,
+    register_tax_policy,
+    resolve_tax_selection,
+)
 from mc_quadrants.types import RegimeMoments, ScenarioModel, SimulationResult
 from mc_quadrants.uncertainty import bootstrap_quadrant_models, stationary_bootstrap_indices
 from mc_quadrants.validation import WalkForwardResult, walk_forward_validation
@@ -52,6 +60,12 @@ __all__ = [
     "SimulationRun",
     "WalkForwardResult",
     "HmmFit",
+    "TaxPolicy",
+    "TaxSelection",
+    "TaxSimulationContext",
+    "available_tax_countries",
+    "register_tax_policy",
+    "resolve_tax_selection",
     "compare_distributions",
     "build_calibration_diagnostics",
     "backfill_prices",

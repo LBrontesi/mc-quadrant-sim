@@ -7,7 +7,8 @@ import pandas as pd
 
 from mc_quadrants.matrix import nearest_psd
 from mc_quadrants.native import simulate_parametric_native
-from mc_quadrants.taxes import ITALY_DEFAULT_WEALTH_TAX_RATE, simulate_italian_portfolio_tax
+from mc_quadrants.tax_policy import TaxSimulationContext, resolve_tax_selection
+from mc_quadrants.taxes import ITALY_DEFAULT_WEALTH_TAX_RATE
 from mc_quadrants.types import ScenarioModel, SimulationResult
 
 
@@ -877,6 +878,8 @@ def _simulate_leveraged_portfolio_paths(
         {
             "margin_calls": int(margin_calls.sum()),
             "effective_financing_rate": effective_financing_rate,
+            "tax_country": "none",
+            "tax_regime": "none",
         }
     )
     return frame
@@ -903,6 +906,7 @@ def simulate_portfolio_paths(
     asset_tax_categories: Mapping[str, str] | None = None,
     italy_annual_wealth_tax: float = ITALY_DEFAULT_WEALTH_TAX_RATE,
     tax_terminal_liquidation: bool = True,
+    tax_country: str | None = None,
 ) -> pd.DataFrame:
     """Convert simulated asset returns into portfolio wealth paths.
 
@@ -941,13 +945,7 @@ def simulate_portfolio_paths(
         raise ValueError("maintenance_margin only applies when leverage_multiple is greater than 1.")
     if leverage_multiple > 1.0 and maintenance_margin >= 1.0 / leverage_multiple:
         raise ValueError("maintenance_margin must be below the initial equity margin for the selected leverage.")
-    tax_regime = str(tax_regime).strip().lower()
-    if tax_regime not in {"none", "italy_administered"}:
-        raise ValueError("tax_regime must be 'none' or 'italy_administered'.")
-    if tax_regime == "italy_administered" and rebalance_frequency is None:
-        raise ValueError("Italian tax accounting requires holdings-based accounting, not legacy weighted returns.")
-    if tax_regime == "italy_administered" and not np.isclose(leverage_multiple, 1.0):
-        raise ValueError("Italian tax accounting is not available with leveraged portfolios.")
+    tax_selection = resolve_tax_selection(tax_country, tax_regime)
 
     provided_weights = pd.Series(weights, dtype=float)
     weight_vector = provided_weights.reindex(result.assets)
@@ -979,6 +977,14 @@ def simulate_portfolio_paths(
     ):
         raise ValueError("Leverage and financing require a rebalancing frequency.")
 
+    target_weights = weight_vector.to_numpy(dtype=float)
+    if tax_selection.policy is not None:
+        tax_selection.policy.validate(
+            rebalance_frequency=rebalance_frequency,
+            leverage_multiple=leverage_multiple,
+            target_weights=target_weights,
+        )
+
     provided_expense_ratios = pd.Series(asset_expense_ratios or {}, dtype=float)
     expense_ratios = provided_expense_ratios.reindex(result.assets).fillna(0.0)
     if not np.isfinite(expense_ratios.to_numpy(dtype=float)).all() or (expense_ratios < 0).any() or (expense_ratios >= 1).any():
@@ -1008,7 +1014,9 @@ def simulate_portfolio_paths(
         if not np.isfinite(wealth).all():
             raise ValueError("Portfolio wealth contains non-finite values.")
         frame = pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(result.returns.shape[1])])
-        frame.attrs.update({"margin_calls": 0})
+        frame.attrs.update(
+            {"margin_calls": 0, "tax_country": "none", "tax_regime": "none"}
+        )
         return frame
 
     if return_kind == "log":
@@ -1021,10 +1029,9 @@ def simulate_portfolio_paths(
         raise ValueError("Asset growth contains non-finite values.")
 
     periods, paths, assets = result.returns.shape
-    target_weights = weight_vector.to_numpy(dtype=float)
-    if tax_regime == "italy_administered":
-        return simulate_italian_portfolio_tax(
-            asset_growth,
+    if tax_selection.policy is not None:
+        context = TaxSimulationContext(
+            asset_growth=asset_growth,
             assets=result.assets,
             target_weights=target_weights,
             initial_value=initial_value,
@@ -1032,10 +1039,18 @@ def simulate_portfolio_paths(
             transaction_cost_bps=transaction_cost_bps,
             contribution=contribution,
             withdrawal=withdrawal,
-            asset_tax_categories=asset_tax_categories,
+            asset_categories=asset_tax_categories,
             annual_wealth_tax=italy_annual_wealth_tax,
             terminal_liquidation=tax_terminal_liquidation,
         )
+        frame = tax_selection.policy.simulate(context)
+        frame.attrs.update(
+            {
+                "tax_country": tax_selection.country,
+                "tax_regime": tax_selection.regime,
+            }
+        )
+        return frame
     if (
         not np.isclose(leverage_multiple, 1.0)
         or not np.isclose(financing_rate, 0.0)
@@ -1113,7 +1128,9 @@ def simulate_portfolio_paths(
     if not np.isfinite(wealth).all():
         raise ValueError("Portfolio wealth contains non-finite values.")
     frame = pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(result.returns.shape[1])])
-    frame.attrs.update({"margin_calls": 0})
+    frame.attrs.update(
+        {"margin_calls": 0, "tax_country": "none", "tax_regime": "none"}
+    )
     return frame
 
 

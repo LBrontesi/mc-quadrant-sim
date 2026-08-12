@@ -69,6 +69,10 @@ const COST_METRIC_FIELDS = [
   ["leverage_multiple", "Leverage"], ["weighted_expense_ratio", "Weighted ETF fee"],
   ["annual_fee_drag", "Annual fee drag"], ["annual_financing_cost", "Annual financing cost"],
   ["effective_financing_rate", "Effective financing rate"], ["margin_calls", "Margin calls"],
+  ["gross_terminal_wealth_median", "Median terminal wealth before tax"],
+  ["after_tax_terminal_wealth_median", "Median terminal wealth after tax"],
+  ["terminal_tax_drag_median", "Median terminal tax drag"],
+  ["terminal_tax_drag_percent", "Median terminal tax drag (%)"],
   ["capital_gains_tax", "In-horizon disposal tax"], ["wealth_tax", "Stamp duty / IVAFE"],
   ["terminal_liquidation_tax", "Final liquidation tax"], ["taxes_paid", "Total taxes"],
   ["realized_gains", "Realized gains"], ["realized_losses", "Realized losses"],
@@ -79,7 +83,7 @@ const PERCENT_METRICS = new Set([
   "annualized_return", "annualized_volatility", "cash_flow_adjusted_annualized_return",
   "cash_flow_adjusted_volatility", "geometric_annualized_return", "probability_of_loss",
   "effective_risk_free_rate", "effective_financing_rate",
-  "annual_wealth_tax_rate",
+  "annual_wealth_tax_rate", "terminal_tax_drag_percent",
   "max_drawdown_mean", "max_drawdown_p95", "max_drawdown_worst", "ulcer_index_mean", "ulcer_index_p95",
   "goal_success_probability", "risk_of_ruin", "unrecovered_at_horizon", "worst_rolling_return",
   "worst_rolling_return_p05", "median_worst_rolling_return",
@@ -90,6 +94,7 @@ const CURRENCY_METRICS = new Set([
   "target_wealth", "expected_goal_shortfall",
   "capital_gains_tax", "wealth_tax", "terminal_liquidation_tax", "taxes_paid",
   "realized_gains", "realized_losses", "loss_carryforward",
+  "gross_terminal_wealth_median", "after_tax_terminal_wealth_median", "terminal_tax_drag_median",
 ]);
 
 const state = {
@@ -457,6 +462,7 @@ function lineChart(container, labels, series, options = {}) {
     path.setAttribute("stroke", s.color);
     path.setAttribute("stroke-width", "2.2");
     path.setAttribute("stroke-linejoin", "round");
+    if (s.dash) path.setAttribute("stroke-dasharray", s.dash);
     svg.appendChild(path);
   });
   container.appendChild(svg);
@@ -1075,6 +1081,7 @@ async function fillCsvPayload(payload) {
 function gatherScenario() {
   const quadrantModel = $("model-kind").value === "quadrant";
   const parametricReturns = ["normal", "student_t"].includes($("distribution").value);
+  const taxCountry = $("tax-country").value;
   return {
     growth_threshold: thresholdPayload("growth-threshold", "growth-fixed"),
     inflation_threshold: thresholdPayload("inflation-threshold", "inflation-fixed"),
@@ -1098,7 +1105,8 @@ function gatherScenario() {
     financing_rate: Number($("financing-rate").value),
     financing_inflation_sensitivity: Number($("financing-inflation-sensitivity").value),
     maintenance_margin: Number($("maintenance-margin").value),
-    tax_regime: $("tax-regime").value,
+    tax_country: taxCountry,
+    tax_regime: taxCountry === "IT" ? $("tax-regime").value : "none",
     asset_tax_categories: $("asset-tax-categories").value,
     italy_wealth_tax: Number($("italy-wealth-tax").value),
     tax_terminal_liquidation: $("tax-terminal-liquidation").checked,
@@ -1165,10 +1173,11 @@ function validateScenario() {
   if (leverage > 1 && margin >= 1 / leverage) {
     errors.push("Maintenance margin must be below the initial equity margin for the selected leverage.");
   }
-  if ($("tax-regime").value === "italy_administered" && $("rebalance").value === "legacy") {
+  const italianTaxes = $("tax-country").value === "IT" && $("tax-regime").value === "italy_administered";
+  if (italianTaxes && $("rebalance").value === "legacy") {
     errors.push("Italian tax accounting requires holdings-based accounting, not legacy weighted returns.");
   }
-  if ($("tax-regime").value === "italy_administered" && leverage > 1) {
+  if (italianTaxes && leverage > 1) {
     errors.push("Italian tax accounting is not available with leveraged portfolios.");
   }
   if (!(Number($("initial-value").value) > 0)) {
@@ -1197,7 +1206,7 @@ function updateMethodologyControls() {
   const isHMM = $("model-kind").value === "hmm";
   const distribution = $("distribution").value;
   const legacy = ["legacy", "buy_hold"].includes($("rebalance").value);
-  const italianTaxes = $("tax-regime").value === "italy_administered";
+  const italianTaxes = $("tax-country").value === "IT" && $("tax-regime").value === "italy_administered";
   $("quadrant-calibration").classList.toggle("hidden", isHMM);
   $("hmm-states-group").classList.toggle("hidden", !isHMM);
   $("threshold-window-group").classList.toggle("hidden", isHMM);
@@ -1509,7 +1518,7 @@ function renderScenarioChips(payload, data) {
   chips.push(`Target ${formatMetricValue("target_wealth", payload.target_wealth, data.currency)}`);
   if (Number(payload.contribution) > 0) chips.push(`+${fmt(payload.contribution, 0)}/period`);
   if (Number(payload.withdrawal) > 0) chips.push(`−${fmt(payload.withdrawal, 0)}/period`);
-  if (payload.tax_regime === "italy_administered") chips.push("Italy after tax");
+  if (payload.tax_country === "IT" && payload.tax_regime === "italy_administered") chips.push("Italy after tax");
   chips.push(data.terms === "real" ? "Real terms" : "Nominal");
   chips.push(data.currency);
   chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
@@ -1975,7 +1984,7 @@ function renderResults(data) {
   const hasCosts = Number(costs.leverage_multiple || 1) > 1
     || Number(costs.weighted_expense_ratio || 0) > 0
     || Number(costs.taxes_paid || 0) > 0
-    || state.lastSimPayload?.tax_regime === "italy_administered";
+    || state.lastSimPayload?.tax_country === "IT";
   $("cost-assumptions").classList.toggle("hidden", !hasCosts);
   if (hasCosts) renderMetricGrid("cost-metric-grid", COST_METRIC_FIELDS, { summary: costs, currency: data.currency });
   $("stale-results").classList.add("hidden");
@@ -1995,11 +2004,15 @@ function renderResults(data) {
     `Terminal skew: ${fmt(data.summary.terminal_skewness, 2)} | ` +
     `Excess kurtosis: ${fmt(data.summary.terminal_kurtosis, 2)}`;
 
-  lineChart($("chart-wealth"), data.wealth.periods, [
+  const wealthSeries = [
     { name: "P05", color: "#f97316", values: data.wealth.p05 },
-    { name: "Median", color: "#3b82f6", values: data.wealth.median },
+    { name: data.taxes?.enabled ? "After-tax median" : "Median", color: "#3b82f6", values: data.wealth.median },
     { name: "P95", color: "#10b981", values: data.wealth.p95 },
-  ]);
+  ];
+  if (data.taxes?.enabled && data.gross_wealth?.median) {
+    wealthSeries.push({ name: "Before-tax median", color: "#94a3b8", values: data.gross_wealth.median, dash: "6 4" });
+  }
+  lineChart($("chart-wealth"), data.wealth.periods, wealthSeries);
   histChart($("chart-terminal"), data.terminal);
   histChart($("chart-drawdowns"), data.drawdowns, 45, "Maximum drawdown", "#f97316");
   timelineChart($("chart-timeline"), [
@@ -2285,7 +2298,7 @@ const CONTROL_IDS = [
   "initial-value", "target-wealth",
   "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate",
   "financing-inflation-sensitivity", "maintenance-margin",
-  "tax-regime", "asset-tax-categories", "italy-wealth-tax",
+  "tax-country", "tax-regime", "asset-tax-categories", "italy-wealth-tax",
   "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
   "regime-temperature", "regime-smoothing-window", "regime-hysteresis",
   "regime-confirmation-periods", "duration-prior-strength", "mean-prior-strength",
@@ -2294,7 +2307,7 @@ const CONTROL_IDS = [
 ];
 
 function saveControls() {
-  const data = { schemaVersion: 6 };
+  const data = { schemaVersion: 7 };
   CONTROL_IDS.forEach((id) => {
     const el = $(id);
     if (el) data[id] = el.value;
@@ -2354,6 +2367,11 @@ function restoreControls() {
       }
       if (Number(data.schemaVersion || 0) < 6 && String(data.workers) === "1") {
         data.workers = "";
+      }
+      if (Number(data.schemaVersion || 0) < 7) {
+        const legacyTaxRegime = String(data["tax-regime"] || "none");
+        data["tax-country"] = legacyTaxRegime === "italy_administered" ? "IT" : "none";
+        data["tax-regime"] = "italy_administered";
       }
       applyControlSnapshot(data);
     }
