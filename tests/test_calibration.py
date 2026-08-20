@@ -138,3 +138,25 @@ def test_probabilistic_calibration_uses_explicit_duration_hsmm():
     assert np.isfinite(model.metadata["hsmm_log_likelihood"])
     probabilities = model.metadata["historical_regime_probabilities"].dropna()
     assert np.allclose(probabilities.sum(axis=1), 1.0)
+
+
+def test_joint_macro_uses_stabilized_bvar_and_structural_asset_profiles():
+    returns, macro = _sample_data()
+    macro = macro.copy()
+    macro["interest_rate"] = np.linspace(1.0, 5.0, len(macro))
+    model = calibrate_quadrant_model(
+        returns.rename(columns={"Stocks": "SPY", "Bonds": "IEF"}),
+        macro,
+        joint_macro=True,
+        structural_returns=True,
+        macro_model="bvar_ensemble",
+    )
+
+    dynamics = model.metadata["macro_dynamics"]
+    assert dynamics["macro_model"] == "bvar_ensemble"
+    assert dynamics["structural_returns"] is True
+    assert np.asarray(dynamics["var_coefficient_std"]).shape == (3, 3)
+    assert dynamics["asset_profiles"]["SPY"]["asset_class"] == "equity"
+    assert dynamics["asset_profiles"]["IEF"]["asset_class"] == "government_bond"
+    rate_index = dynamics["columns"].index("interest_rate")
+    assert dynamics["return_beta_priors"][rate_index][1] < 0

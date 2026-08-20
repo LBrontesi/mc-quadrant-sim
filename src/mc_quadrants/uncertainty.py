@@ -59,6 +59,11 @@ def bootstrap_quadrant_models(
     duration_prior_strength: float = 8.0,
     mean_prior_strength: float = 24.0,
     joint_macro: bool = False,
+    structural_returns: bool = False,
+    asset_classes: Mapping[str, str] | None = None,
+    asset_durations: Mapping[str, float] | None = None,
+    asset_income_yields: Mapping[str, float] | None = None,
+    macro_model: str = "bvar_ensemble",
 ) -> list[ScenarioModel]:
     """Recalibrate complete parametric models on paired stationary bootstraps.
 
@@ -128,6 +133,11 @@ def bootstrap_quadrant_models(
             duration_prior_strength=duration_prior_strength,
             mean_prior_strength=mean_prior_strength,
             joint_macro=joint_macro,
+            structural_returns=structural_returns,
+            asset_classes=asset_classes,
+            asset_durations=asset_durations,
+            asset_income_yields=asset_income_yields,
+            macro_model=macro_model,
         )
         model.metadata["bootstrap_draw"] = draw
         model.metadata["source_macro_lag_periods"] = int(macro_lag_periods)

@@ -247,13 +247,17 @@ def smooth_macro_for_regimes(
     smoothing_window = int(smoothing_window)
     if smoothing_window < 1:
         raise ValueError("smoothing_window must be at least 1.")
-    smoothed = macro.copy()
     columns = [growth_col, inflation_col]
-    numeric = smoothed.loc[:, columns].apply(pd.to_numeric, errors="coerce")
-    smoothed.loc[:, columns] = numeric.rolling(
+    numeric = macro.loc[:, columns].apply(pd.to_numeric, errors="coerce").astype(float)
+    smoothed_values = numeric.rolling(
         smoothing_window,
         min_periods=1,
     ).mean()
+    smoothed = macro.copy()
+    # Whole-column assignment lets integer CSV inputs promote to float. Pandas
+    # 3 rejects fractional rolling means when .loc preserves the integer dtype.
+    for column in columns:
+        smoothed[column] = smoothed_values[column]
     smoothed.attrs.update(macro.attrs)
     return smoothed
 

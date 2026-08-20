@@ -1,15 +1,38 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from mc_quadrants.decumulation import (
+    DecumulationPlan,
+    SpendingController,
+    funded_amount,
+    inflation_index,
+    normalize_decumulation,
+)
+
 from mc_quadrants.matrix import nearest_psd
-from mc_quadrants.native import simulate_parametric_native
+from mc_quadrants.native import (
+    simulate_parametric_italian_portfolios_native,
+    simulate_parametric_native,
+)
 from mc_quadrants.tax_policy import TaxSimulationContext, resolve_tax_selection
-from mc_quadrants.taxes import ITALY_DEFAULT_WEALTH_TAX_RATE
+from mc_quadrants.taxes import (
+    CONTRIBUTION_ALLOCATION_MODES,
+    ITALY_DEFAULT_WEALTH_TAX_RATE,
+    contribution_allocations,
+)
 from mc_quadrants.types import ScenarioModel, SimulationResult
+
+DEFAULT_LIQUIDITY_COST_MULTIPLIERS = {
+    "high_growth_low_inflation": 0.75,
+    "high_growth_high_inflation": 1.25,
+    "low_growth_high_inflation": 2.00,
+    "low_growth_low_inflation": 1.50,
+}
 
 
 def stationary_distribution(transition_matrix: pd.DataFrame) -> pd.Series:
@@ -127,6 +150,27 @@ def _batched_cholesky(values: np.ndarray, epsilon: float = 1e-10) -> np.ndarray:
             matrices[:, column + 1 :, column] - cross
         ) / factors[:, column, column, None]
     return factors
+
+
+def _transaction_cost_rate_paths(
+    result: SimulationResult,
+    transaction_cost_bps: float,
+    multipliers: Mapping[str, float] | None,
+) -> np.ndarray | None:
+    if not multipliers:
+        return None
+    normalized = {str(state): float(value) for state, value in multipliers.items()}
+    if any(not np.isfinite(value) or value < 0 for value in normalized.values()):
+        raise ValueError("State transaction-cost multipliers must be finite and non-negative.")
+    state_values = np.array([normalized.get(state, 1.0) for state in result.states], dtype=float)
+    if result.regimes.dtype.kind in "iu":
+        multiplier_paths = state_values[np.asarray(result.regimes, dtype=int)]
+    else:
+        multiplier_paths = np.ones(result.regimes.shape, dtype=float)
+        regimes = np.asarray(result.regimes, dtype=object)
+        for state, value in normalized.items():
+            multiplier_paths[regimes == state] = value
+    return multiplier_paths * (float(transaction_cost_bps) / 10_000.0)
 
 
 def simulate_regime_paths(
@@ -257,6 +301,7 @@ def simulate_joint_regime_macro_paths(
     duration_model: str = "markov",
     min_regime_duration: int = 5,
     macro_transition_weight: float = 0.35,
+    macro_parameter_uncertainty: bool = True,
     return_codes: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Simulate mutually consistent macro paths and time-varying regimes."""
@@ -291,6 +336,20 @@ def simulate_joint_regime_macro_paths(
         current = np.full(paths, states.index(start_state), dtype=int)
 
     coefficient = np.asarray(dynamics["var_coefficient"], dtype=float)
+    coefficient_paths: np.ndarray | None = None
+    coefficient_std = dynamics.get("var_coefficient_std")
+    if macro_parameter_uncertainty and coefficient_std is not None:
+        posterior_scale = np.asarray(coefficient_std, dtype=float)
+        if posterior_scale.shape == coefficient.shape and np.isfinite(posterior_scale).all():
+            coefficient_paths = coefficient[None, :, :] + np.clip(
+                rng.standard_normal((paths, *coefficient.shape)), -2.5, 2.5
+            ) * posterior_scale[None, :, :] * 0.35
+            # A cheap sufficient stability guard for large path sets. The
+            # infinity norm bounds the spectral radius without per-path eigensolves.
+            row_norm = np.max(np.sum(np.abs(coefficient_paths), axis=2), axis=1)
+            unstable = row_norm > 0.995
+            if unstable.any():
+                coefficient_paths[unstable] *= (0.995 / row_norm[unstable])[:, None, None]
     centers = {
         state: np.asarray(dynamics["state_centers"][state], dtype=float) for state in states
     }
@@ -347,7 +406,15 @@ def simulate_joint_regime_macro_paths(
                 size=int(mask.sum()),
             )
             center = centers[state]
-            next_macro[mask] = center + (current_macro[mask] - center) @ coefficient + shocks
+            centered_macro = current_macro[mask] - center
+            if coefficient_paths is None:
+                next_macro[mask] = center + centered_macro @ coefficient + shocks
+            else:
+                next_macro[mask] = center + np.einsum(
+                    "ni,nij->nj",
+                    centered_macro,
+                    coefficient_paths[mask],
+                ) + shocks
             macro_shocks[period, mask] = shocks
         if rate_index is not None and rate_bounds is not None:
             next_macro[:, rate_index] = np.clip(
@@ -410,11 +477,14 @@ def simulate_returns(
     garch_beta: float = 0.85,
     joint_macro: bool = False,
     macro_transition_weight: float = 0.35,
+    macro_parameter_uncertainty: bool = True,
     dynamic_correlation: bool = False,
     dcc_alpha: float = 0.04,
     dcc_beta: float = 0.94,
     dcc_asymmetry: float = 0.01,
     return_regime_codes: bool = False,
+    native_threads: int = 1,
+    native_portfolio_config: Mapping[str, object] | None = None,
 ) -> SimulationResult:
     """Simulate regime-dependent multivariate asset returns.
 
@@ -476,6 +546,7 @@ def simulate_returns(
             duration_model=duration_model,
             min_regime_duration=min_regime_duration,
             macro_transition_weight=macro_transition_weight,
+            macro_parameter_uncertainty=macro_parameter_uncertainty,
             return_codes=True,
         )
     else:
@@ -492,10 +563,6 @@ def simulate_returns(
         )
     rng = _rng(None if random_seed is None else random_seed + 1)
     assets = model.assets
-    returns = np.empty((periods, paths, len(assets)), dtype=float)
-    bootstrap_starts = np.full((len(model.states), paths), -1, dtype=int)
-    bootstrap_offsets = np.full((len(model.states), paths), block_size, dtype=int)
-    previous_state_indices = np.full(paths, -1, dtype=int)
 
     macro_dynamics = model.metadata.get("macro_dynamics") if joint_macro else None
     macro_betas = (
@@ -547,6 +614,80 @@ def simulate_returns(
             if random_seed is None
             else int(random_seed) + 1
         )
+        if native_portfolio_config is not None:
+            native_kwargs = dict(native_portfolio_config["native_kwargs"])
+            transaction_multipliers = native_portfolio_config.get(
+                "state_transaction_cost_multipliers"
+            )
+            if transaction_multipliers:
+                normalized_multipliers = {
+                    str(state): float(value)
+                    for state, value in dict(transaction_multipliers).items()
+                }
+                state_cost_values = np.array(
+                    [normalized_multipliers.get(state, 1.0) for state in model.states],
+                    dtype=float,
+                )
+                native_kwargs["transaction_cost_rate_paths"] = (
+                    state_cost_values[np.asarray(regime_paths, dtype=int)]
+                    * float(native_kwargs["transaction_cost_bps"])
+                    / 10_000.0
+                )
+            expense_ratios = np.asarray(
+                native_portfolio_config["expense_ratios"], dtype=float
+            )
+            monthly_fee_log = np.log1p(-expense_ratios) / 12.0
+            fused_portfolio = simulate_parametric_italian_portfolios_native(
+                regime_codes=regime_paths,
+                means=state_means,
+                covariance_cholesky=state_covariance_cholesky,
+                correlation_cholesky=state_correlation_cholesky,
+                base_correlations=state_correlations,
+                volatilities=state_volatilities,
+                random_seed=native_seed,
+                distribution=distribution,
+                degrees_of_freedom=degrees_of_freedom,
+                garch=garch,
+                garch_alpha=garch_alpha,
+                garch_beta=garch_beta,
+                dynamic_correlation=dynamic_correlation,
+                dcc_alpha=dcc_alpha,
+                dcc_beta=dcc_beta,
+                dcc_asymmetry=dcc_asymmetry,
+                monthly_fee_log=monthly_fee_log,
+                return_kind=str(native_portfolio_config["return_kind"]),
+                macro_shocks=macro_shocks,
+                macro_betas=macro_betas,
+                workers=native_threads,
+                **native_kwargs,
+            )
+            if fused_portfolio is not None:
+                fused_portfolio["frame_metadata"] = dict(
+                    native_portfolio_config["frame_metadata"]
+                )
+                return SimulationResult(
+                    returns=np.empty((periods, 0, len(assets)), dtype=float),
+                    regimes=(
+                        regime_paths
+                        if return_regime_codes
+                        else _decode_regime_codes(regime_paths, model.states)
+                    ),
+                    assets=assets,
+                    states=model.states.copy(),
+                    frequency=model.frequency,
+                    distribution=distribution,
+                    degrees_of_freedom=(
+                        float(degrees_of_freedom) if distribution == "student_t" else None
+                    ),
+                    transition_concentration=transition_concentration,
+                    macro_paths=macro_paths,
+                    macro_columns=(
+                        list(macro_dynamics["columns"])
+                        if isinstance(macro_dynamics, Mapping)
+                        else []
+                    ),
+                    native_portfolio=fused_portfolio,
+                )
         native_returns = simulate_parametric_native(
             regime_codes=regime_paths,
             means=state_means,
@@ -566,6 +707,7 @@ def simulate_returns(
             dcc_asymmetry=dcc_asymmetry,
             macro_shocks=macro_shocks,
             macro_betas=macro_betas,
+            workers=native_threads,
         )
         if native_returns is not None:
             return SimulationResult(
@@ -590,6 +732,11 @@ def simulate_returns(
                     else []
                 ),
             )
+
+    returns = np.empty((periods, paths, len(assets)), dtype=float)
+    bootstrap_starts = np.full((len(model.states), paths), -1, dtype=int)
+    bootstrap_offsets = np.full((len(model.states), paths), block_size, dtype=int)
+    previous_state_indices = np.full(paths, -1, dtype=int)
 
     historical_by_state: list[np.ndarray] | None = None
     if distribution in {"bootstrap", "block_bootstrap"}:
@@ -772,6 +919,11 @@ def _simulate_leveraged_portfolio_paths(
     maintenance_margin: float,
     contribution: float,
     withdrawal: float,
+    withdrawal_start_period: int,
+    decumulation: DecumulationPlan | None = None,
+    withdrawal_inflation_paths: np.ndarray | None = None,
+    annual_inflation: float = 0.0,
+    safe_withdrawal_rate: float = 0.0,
     regimes: np.ndarray | None = None,
     state_financing_rates: Mapping[str, float] | None = None,
     financing_rate_paths: np.ndarray | None = None,
@@ -790,6 +942,29 @@ def _simulate_leveraged_portfolio_paths(
     ).copy()
     debt = np.full(paths, initial_value * (leverage_multiple - 1.0), dtype=float)
     wealth = np.empty((periods, paths), dtype=float)
+    plan = normalize_decumulation(
+        decumulation,
+        periods=periods,
+        legacy_withdrawal=withdrawal,
+        legacy_start_period=withdrawal_start_period,
+        annual_inflation_fallback=annual_inflation,
+    )
+    cpi = inflation_index(
+        periods,
+        paths,
+        annual_inflation=plan.annual_inflation_fallback,
+        inflation_paths=withdrawal_inflation_paths,
+    )
+    spending = SpendingController(
+        plan,
+        paths=paths,
+        initial_value=initial_value,
+        cpi=cpi,
+        safe_rate=safe_withdrawal_rate,
+    )
+    requested_spending = np.zeros((periods, paths), dtype=float)
+    funded_spending = np.zeros((periods, paths), dtype=float)
+    guardrail_events = np.zeros((periods, paths), dtype=np.int8)
     margin_calls = np.zeros(paths, dtype=bool)
     cost_rate = float(transaction_cost_bps) / 10_000.0
 
@@ -823,9 +998,13 @@ def _simulate_leveraged_portfolio_paths(
 
         asset_value = holdings.sum(axis=1)
         equity = asset_value - debt
-        if withdrawal:
+        requested, policy_events = spending.request(period + 1, np.maximum(equity, 0.0))
+        requested_spending[period] = requested
+        guardrail_events[period] = policy_events
+        if np.any(requested > 0):
             available = np.maximum(equity, 0.0)
-            funded = np.minimum(withdrawal, available)
+            funded = funded_amount(requested, available)
+            funded_spending[period] = funded
             fraction = np.divide(
                 funded,
                 asset_value,
@@ -833,7 +1012,7 @@ def _simulate_leveraged_portfolio_paths(
                 where=asset_value > 0,
             )
             holdings -= holdings * fraction[:, None]
-            exhausted = withdrawal > equity
+            exhausted = requested > equity
             if exhausted.any():
                 holdings[exhausted] = 0.0
                 debt[exhausted] = 0.0
@@ -880,6 +1059,11 @@ def _simulate_leveraged_portfolio_paths(
             "effective_financing_rate": effective_financing_rate,
             "tax_country": "none",
             "tax_regime": "none",
+            "decumulation": plan.to_dict(),
+            "withdrawal_requested": requested_spending,
+            "withdrawal_funded": funded_spending,
+            "guardrail_events": guardrail_events,
+            "withdrawal_cpi": cpi,
         }
     )
     return frame
@@ -892,6 +1076,7 @@ def simulate_portfolio_paths(
     return_kind: str = "log",
     rebalance_frequency: int | None = None,
     transaction_cost_bps: float = 0.0,
+    state_transaction_cost_multipliers: Mapping[str, float] | None = None,
     asset_expense_ratios: Mapping[str, float] | None = None,
     leverage_multiple: float = 1.0,
     financing_rate: float = 0.0,
@@ -901,12 +1086,23 @@ def simulate_portfolio_paths(
     financing_inflation_paths: np.ndarray | None = None,
     maintenance_margin: float = 0.0,
     contribution: float = 0.0,
+    contribution_allocation: str = "target",
     withdrawal: float = 0.0,
+    withdrawal_start_period: int = 1,
+    decumulation: Mapping[str, Any] | DecumulationPlan | None = None,
+    withdrawal_inflation_paths: np.ndarray | None = None,
+    annual_inflation: float = 0.0,
+    safe_withdrawal_rate: float = 0.0,
     tax_regime: str = "none",
     asset_tax_categories: Mapping[str, str] | None = None,
+    asset_tax_metadata: Mapping[str, Mapping[str, object]] | None = None,
     italy_annual_wealth_tax: float = ITALY_DEFAULT_WEALTH_TAX_RATE,
+    italy_wealth_tax_mode: str = "auto",
     tax_terminal_liquidation: bool = True,
+    tax_start_date: str | None = None,
+    tax_wrapper_benchmark: bool = False,
     tax_country: str | None = None,
+    native_threads: int = 1,
 ) -> pd.DataFrame:
     """Convert simulated asset returns into portfolio wealth paths.
 
@@ -919,8 +1115,9 @@ def simulate_portfolio_paths(
     currency as ``initial_value``. A contribution is invested at the target
     allocation at the start of every period (dollar-cost averaging); a
     withdrawal is funded by selling a pro-rata slice of current holdings at
-    the end of every period. Wealth is floored at zero, so a path cannot be
-    driven negative by withdrawals.
+    the end of every period from ``withdrawal_start_period`` onward. Period 1
+    means immediately. Wealth is floored at zero, so a path cannot be driven
+    negative by withdrawals.
     """
 
     if not np.isfinite(initial_value) or initial_value <= 0:
@@ -931,8 +1128,39 @@ def simulate_portfolio_paths(
         raise ValueError("Simulated returns must contain only finite values.")
     if not np.isfinite(contribution) or contribution < 0:
         raise ValueError("contribution must be a finite, non-negative number.")
+    contribution_allocation = str(contribution_allocation).strip().lower()
+    if contribution_allocation not in CONTRIBUTION_ALLOCATION_MODES:
+        allowed = ", ".join(sorted(CONTRIBUTION_ALLOCATION_MODES))
+        raise ValueError(f"contribution_allocation must be one of: {allowed}.")
     if not np.isfinite(withdrawal) or withdrawal < 0:
         raise ValueError("withdrawal must be a finite, non-negative number.")
+    periods = int(result.returns.shape[0])
+    try:
+        withdrawal_start_value = float(withdrawal_start_period)
+        withdrawal_start_period = int(withdrawal_start_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("withdrawal_start_period must be an integer.") from exc
+    if not np.isfinite(withdrawal_start_value) or not np.isclose(
+        withdrawal_start_value, withdrawal_start_period
+    ):
+        raise ValueError("withdrawal_start_period must be an integer.")
+    if not 1 <= withdrawal_start_period <= periods:
+        raise ValueError(
+            "withdrawal_start_period must be between 1 and the simulation periods."
+        )
+    decumulation_plan = normalize_decumulation(
+        decumulation,
+        periods=periods,
+        legacy_withdrawal=withdrawal,
+        legacy_start_period=withdrawal_start_period,
+        annual_inflation_fallback=annual_inflation,
+    )
+    cpi = inflation_index(
+        periods,
+        int(result.returns.shape[1]),
+        annual_inflation=decumulation_plan.annual_inflation_fallback,
+        inflation_paths=withdrawal_inflation_paths,
+    )
     if not np.isfinite(leverage_multiple) or leverage_multiple < 1:
         raise ValueError("leverage_multiple must be at least 1.0.")
     if not np.isfinite(financing_rate) or financing_rate < 0:
@@ -945,6 +1173,8 @@ def simulate_portfolio_paths(
         raise ValueError("maintenance_margin only applies when leverage_multiple is greater than 1.")
     if leverage_multiple > 1.0 and maintenance_margin >= 1.0 / leverage_multiple:
         raise ValueError("maintenance_margin must be below the initial equity margin for the selected leverage.")
+    if state_transaction_cost_multipliers and leverage_multiple > 1.0:
+        raise ValueError("State-dependent transaction costs are not available with leveraged accounting.")
     tax_selection = resolve_tax_selection(tax_country, tax_regime)
 
     provided_weights = pd.Series(weights, dtype=float)
@@ -966,6 +1196,10 @@ def simulate_portfolio_paths(
         rebalance_frequency = int(rebalance_frequency)
         if rebalance_frequency < 0:
             raise ValueError("rebalance_frequency must be non-negative or None.")
+    if contribution_allocation == "underweight_first" and rebalance_frequency is None:
+        raise ValueError("Underweight-first contributions require holdings-based accounting.")
+    if contribution_allocation == "underweight_first" and not np.isclose(leverage_multiple, 1.0):
+        raise ValueError("Underweight-first contributions are not available with leveraged accounting.")
     if not np.isfinite(transaction_cost_bps) or transaction_cost_bps < 0:
         raise ValueError("transaction_cost_bps must be a non-negative number.")
     if rebalance_frequency in {None, 0} and not np.isclose(transaction_cost_bps, 0.0):
@@ -1004,18 +1238,49 @@ def simulate_portfolio_paths(
                 raise ValueError("Simple returns must be greater than -100% for positive wealth.")
             growth = 1.0 + portfolio_returns
             wealth = initial_value * np.cumprod(1.0 + portfolio_returns, axis=0)
-        if contribution or withdrawal:
+        if contribution or decumulation_plan.active:
             periods, paths = result.returns.shape[:2]
             value = np.full(paths, initial_value, dtype=float)
             wealth = np.empty((periods, paths), dtype=float)
+            spending = SpendingController(
+                decumulation_plan,
+                paths=paths,
+                initial_value=initial_value,
+                cpi=cpi,
+                safe_rate=safe_withdrawal_rate,
+            )
+            requested_spending = np.zeros((periods, paths), dtype=float)
+            funded_spending = np.zeros((periods, paths), dtype=float)
+            guardrail_events = np.zeros((periods, paths), dtype=np.int8)
             for period in range(periods):
-                value = np.maximum((value + contribution) * growth[period] - withdrawal, 0.0)
+                value = (value + contribution) * growth[period]
+                requested, policy_events = spending.request(period + 1, value)
+                funded = funded_amount(requested, value)
+                value = np.maximum(value - funded, 0.0)
+                requested_spending[period] = requested
+                funded_spending[period] = funded
+                guardrail_events[period] = policy_events
                 wealth[period] = value
+        else:
+            paths = result.returns.shape[1]
+            requested_spending = np.zeros((periods, paths), dtype=float)
+            funded_spending = np.zeros((periods, paths), dtype=float)
+            guardrail_events = np.zeros((periods, paths), dtype=np.int8)
         if not np.isfinite(wealth).all():
             raise ValueError("Portfolio wealth contains non-finite values.")
         frame = pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(result.returns.shape[1])])
         frame.attrs.update(
-            {"margin_calls": 0, "tax_country": "none", "tax_regime": "none"}
+            {
+                "margin_calls": 0,
+                "tax_country": "none",
+                "tax_regime": "none",
+                "withdrawal_start_period": withdrawal_start_period,
+                "decumulation": decumulation_plan.to_dict(),
+                "withdrawal_requested": requested_spending,
+                "withdrawal_funded": funded_spending,
+                "guardrail_events": guardrail_events,
+                "withdrawal_cpi": cpi,
+            }
         )
         return frame
 
@@ -1029,6 +1294,11 @@ def simulate_portfolio_paths(
         raise ValueError("Asset growth contains non-finite values.")
 
     periods, paths, assets = result.returns.shape
+    transaction_cost_rate_paths = _transaction_cost_rate_paths(
+        result,
+        transaction_cost_bps,
+        state_transaction_cost_multipliers,
+    )
     if tax_selection.policy is not None:
         context = TaxSimulationContext(
             asset_growth=asset_growth,
@@ -1037,11 +1307,23 @@ def simulate_portfolio_paths(
             initial_value=initial_value,
             rebalance_frequency=int(rebalance_frequency),
             transaction_cost_bps=transaction_cost_bps,
+            transaction_cost_rate_paths=transaction_cost_rate_paths,
             contribution=contribution,
+            contribution_allocation=contribution_allocation,
             withdrawal=withdrawal,
+            withdrawal_start_period=withdrawal_start_period,
+            decumulation=decumulation_plan,
+            withdrawal_inflation_paths=withdrawal_inflation_paths,
+            annual_inflation=annual_inflation,
+            safe_withdrawal_rate=safe_withdrawal_rate,
             asset_categories=asset_tax_categories,
+            asset_metadata=asset_tax_metadata,
             annual_wealth_tax=italy_annual_wealth_tax,
+            wealth_tax_mode=italy_wealth_tax_mode,
             terminal_liquidation=tax_terminal_liquidation,
+            start_date=tax_start_date,
+            wrapper_benchmark=tax_wrapper_benchmark,
+            native_threads=max(1, int(native_threads)),
         )
         frame = tax_selection.policy.simulate(context)
         frame.attrs.update(
@@ -1091,6 +1373,11 @@ def simulate_portfolio_paths(
             maintenance_margin,
             contribution,
             withdrawal,
+            withdrawal_start_period,
+            decumulation=decumulation_plan,
+            withdrawal_inflation_paths=withdrawal_inflation_paths,
+            annual_inflation=annual_inflation,
+            safe_withdrawal_rate=safe_withdrawal_rate,
             regimes=(
                 _decode_regime_codes(result.regimes, result.states)
                 if state_financing_rates and result.regimes.dtype.kind in "iu"
@@ -1105,20 +1392,48 @@ def simulate_portfolio_paths(
     ).copy()
     wealth = np.empty((periods, paths), dtype=float)
     cost_rate = float(transaction_cost_bps) / 10_000.0
+    transaction_cost_total = np.zeros(paths, dtype=float)
+    spending = SpendingController(
+        decumulation_plan,
+        paths=paths,
+        initial_value=initial_value,
+        cpi=cpi,
+        safe_rate=safe_withdrawal_rate,
+    )
+    requested_spending = np.zeros((periods, paths), dtype=float)
+    funded_spending = np.zeros((periods, paths), dtype=float)
+    guardrail_events = np.zeros((periods, paths), dtype=np.int8)
 
     for period in range(periods):
         if contribution:
-            holdings += contribution * target_weights
+            holdings += contribution_allocations(
+                holdings,
+                target_weights,
+                contribution,
+                contribution_allocation,
+            )
         holdings *= asset_growth[period]
-        if withdrawal:
-            fraction = withdrawal / np.maximum(holdings.sum(axis=1), 1e-300)
+        values = holdings.sum(axis=1)
+        requested, policy_events = spending.request(period + 1, values)
+        funded = funded_amount(requested, values)
+        requested_spending[period] = requested
+        funded_spending[period] = funded
+        guardrail_events[period] = policy_events
+        if np.any(funded > 0):
+            fraction = funded / np.maximum(values, 1e-300)
             holdings -= holdings * fraction[:, None]
             holdings = np.maximum(holdings, 0.0)
         value_before_rebalance = holdings.sum(axis=1)
         if rebalance_frequency > 0 and (period + 1) % rebalance_frequency == 0:
             target_holdings = value_before_rebalance[:, None] * target_weights
             turnover = np.abs(target_holdings - holdings).sum(axis=1)
-            costs = turnover * cost_rate
+            active_cost_rate = (
+                transaction_cost_rate_paths[period]
+                if transaction_cost_rate_paths is not None
+                else cost_rate
+            )
+            costs = turnover * active_cost_rate
+            transaction_cost_total += costs
             value_after_costs = value_before_rebalance - costs
             holdings = value_after_costs[:, None] * target_weights
             wealth[period] = value_after_costs
@@ -1129,7 +1444,19 @@ def simulate_portfolio_paths(
         raise ValueError("Portfolio wealth contains non-finite values.")
     frame = pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(result.returns.shape[1])])
     frame.attrs.update(
-        {"margin_calls": 0, "tax_country": "none", "tax_regime": "none"}
+        {
+            "margin_calls": 0,
+            "tax_country": "none",
+            "tax_regime": "none",
+            "transaction_cost_total": float(transaction_cost_total.sum()),
+            "state_dependent_transaction_costs": bool(state_transaction_cost_multipliers),
+            "withdrawal_start_period": withdrawal_start_period,
+            "decumulation": decumulation_plan.to_dict(),
+            "withdrawal_requested": requested_spending,
+            "withdrawal_funded": funded_spending,
+            "guardrail_events": guardrail_events,
+            "withdrawal_cpi": cpi,
+        }
     )
     return frame
 
@@ -1195,6 +1522,8 @@ def summarize_wealth_risk(
     annual_inflation: float = 0.0,
     contribution: float = 0.0,
     withdrawal: float = 0.0,
+    withdrawal_start_period: int = 1,
+    withdrawal_paths: np.ndarray | None = None,
     inflation_paths: np.ndarray | None = None,
     risk_free_paths: np.ndarray | None = None,
 ) -> pd.Series:
@@ -1229,6 +1558,19 @@ def summarize_wealth_risk(
         raise ValueError("wealth must contain only finite values.")
 
     periods, paths = wealth_values.shape
+    try:
+        withdrawal_start_value = float(withdrawal_start_period)
+        withdrawal_start_period = int(withdrawal_start_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("withdrawal_start_period must be an integer.") from exc
+    if not np.isfinite(withdrawal_start_value) or not np.isclose(
+        withdrawal_start_value, withdrawal_start_period
+    ):
+        raise ValueError("withdrawal_start_period must be an integer.")
+    if not 1 <= withdrawal_start_period <= periods:
+        raise ValueError(
+            "withdrawal_start_period must be between 1 and the available periods."
+        )
     if inflation_paths is None:
         period = np.arange(1, periods + 1, dtype=float)
         deflator = ((1.0 + annual_inflation) ** (-period / periods_per_year))[:, None]
@@ -1281,7 +1623,18 @@ def summarize_wealth_risk(
     contribution_deflator = np.vstack([np.ones((1, deflator.shape[1])), deflator[:-1]])
     withdrawal_deflator = deflator
     real_contributions = contribution * contribution_deflator
-    real_withdrawals = withdrawal * withdrawal_deflator
+    if withdrawal_paths is None:
+        withdrawal_schedule = (
+            np.arange(1, periods + 1, dtype=int) >= withdrawal_start_period
+        ).astype(float)[:, None]
+        nominal_withdrawals = withdrawal * withdrawal_schedule
+    else:
+        nominal_withdrawals = np.asarray(withdrawal_paths, dtype=float)
+        if nominal_withdrawals.shape != (periods, paths):
+            raise ValueError("withdrawal_paths must have shape (periods, paths).")
+        if not np.isfinite(nominal_withdrawals).all() or (nominal_withdrawals < 0).any():
+            raise ValueError("withdrawal_paths must be finite and non-negative.")
+    real_withdrawals = nominal_withdrawals * withdrawal_deflator
 
     # Compute per-path drawdown and downside metrics in blocks so the full
     # (periods x paths) matrix never needs to be copied multiple times.
@@ -1390,17 +1743,35 @@ def summarize_wealth_risk(
         "terminal_kurtosis": float(kurtosis) if np.isfinite(kurtosis) else 0.0,
     }
 
-    if contribution or withdrawal:
-        period_count = periods
+    has_withdrawals = bool(withdrawal or np.any(nominal_withdrawals > 0))
+    if contribution or has_withdrawals:
+        contribution_periods = periods
+        if withdrawal_paths is not None:
+            active_withdrawal_months = np.any(nominal_withdrawals > 0, axis=1)
+            withdrawal_periods = int(active_withdrawal_months.sum())
+            effective_withdrawal_start = (
+                int(np.argmax(active_withdrawal_months)) + 1
+                if np.any(active_withdrawal_months)
+                else withdrawal_start_period
+            )
+        else:
+            withdrawal_periods = periods - withdrawal_start_period + 1
+            effective_withdrawal_start = withdrawal_start_period
         summary.update(
             {
                 "cash_flow_adjusted_annualized_return": annualized_return,
                 "cash_flow_adjusted_volatility": annualized_volatility,
                 "cash_flow_adjusted_sharpe_ratio": sharpe_ratio,
-                "total_contributed": float(contribution * period_count),
-                "total_withdrawn": float(withdrawal * period_count),
-                "net_external_cash_flow": float((contribution - withdrawal) * period_count),
+                "total_contributed": float(contribution * contribution_periods),
+                "total_withdrawn": float(np.mean(real_withdrawals.sum(axis=0))),
+                "net_external_cash_flow": float(
+                    contribution * contribution_periods
+                    - np.mean(real_withdrawals.sum(axis=0))
+                ),
             }
         )
+        if has_withdrawals:
+            summary["withdrawal_start_period"] = effective_withdrawal_start
+            summary["withdrawal_periods"] = withdrawal_periods
 
     return pd.Series(summary)

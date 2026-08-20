@@ -151,6 +151,34 @@ def test_rebalancing_transaction_costs_reduce_wealth():
     assert with_costs.iloc[-1, 0] < without_costs.iloc[-1, 0]
 
 
+def test_state_dependent_liquidity_costs_increase_stress_rebalancing_drag():
+    result = SimulationResult(
+        returns=np.array([[[0.20, 0.00]], [[0.00, 0.20]]]),
+        regimes=np.array([[0], [1]], dtype=np.int8),
+        assets=["Stocks", "Bonds"],
+        states=["calm", "stress"],
+        frequency="M",
+    )
+    constant = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        return_kind="simple",
+        rebalance_frequency=1,
+        transaction_cost_bps=100,
+    )
+    stressed = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        return_kind="simple",
+        rebalance_frequency=1,
+        transaction_cost_bps=100,
+        state_transaction_cost_multipliers={"calm": 1.0, "stress": 3.0},
+    )
+
+    assert stressed.iloc[-1, 0] < constant.iloc[-1, 0]
+    assert stressed.attrs["state_dependent_transaction_costs"] is True
+
+
 def test_buy_and_hold_tracks_drifting_asset_holdings():
     result = SimulationResult(
         returns=np.array(
@@ -225,6 +253,7 @@ def test_italian_tax_loss_ledger_offsets_standard_but_not_fund_income():
         rebalance_frequency=0,
         withdrawal=10.0,
         tax_regime="italy_administered",
+        asset_tax_categories={"Asset": "standard"},
         italy_annual_wealth_tax=0.0,
     )
     fund = simulate_portfolio_paths(
@@ -269,6 +298,159 @@ def test_italian_wealth_tax_is_monthly_and_terminal_liquidation_is_optional():
     assert wealth.iloc[-1, 0] == pytest.approx(expected)
     assert wealth.attrs["wealth_tax_total"] == pytest.approx(100.0 - expected)
     assert wealth.attrs["terminal_liquidation_tax_total"] == pytest.approx(0.0)
+
+
+def test_italian_tax_defaults_unclassified_assets_to_funds():
+    result = SimulationResult(
+        returns=np.array([[[0.10]]]),
+        regimes=np.empty((1, 1), dtype=object),
+        assets=["ETF"],
+        states=[],
+        frequency="M",
+    )
+
+    wealth = simulate_portfolio_paths(
+        result,
+        {"ETF": 1.0},
+        return_kind="simple",
+        rebalance_frequency=0,
+        tax_country="IT",
+        italy_annual_wealth_tax=0.0,
+    )
+
+    assert wealth.attrs["asset_tax_categories"] == {"ETF": "fund"}
+
+
+def test_government_fraction_interpolates_italian_liquidation_tax():
+    result = SimulationResult(
+        returns=np.array([[[0.10]]]),
+        regimes=np.empty((1, 1), dtype=object),
+        assets=["ETF"],
+        states=[],
+        frequency="M",
+    )
+
+    taxes = []
+    for fraction in (0.0, 0.5, 1.0):
+        wealth = simulate_portfolio_paths(
+            result,
+            {"ETF": 1.0},
+            return_kind="simple",
+            rebalance_frequency=0,
+            tax_country="IT",
+            asset_tax_categories={"ETF": "standard"},
+            asset_tax_metadata={
+                "ETF": {"category": "fund", "government_bond_fraction": fraction}
+            },
+            italy_annual_wealth_tax=0.0,
+        )
+        taxes.append(wealth.attrs["terminal_liquidation_tax_total"])
+
+    assert taxes == pytest.approx([2.60, 1.925, 1.25])
+
+
+def test_underweight_first_contributions_avoid_an_unnecessary_taxable_sale():
+    result = SimulationResult(
+        returns=np.array([[[1.0, 0.0]], [[0.0, 0.0]]]),
+        regimes=np.empty((2, 1), dtype=object),
+        assets=["Stocks", "Bonds"],
+        states=[],
+        frequency="M",
+    )
+    common = {
+        "return_kind": "simple",
+        "rebalance_frequency": 2,
+        "contribution": 100.0,
+        "tax_country": "IT",
+        "asset_tax_categories": {"Stocks": "fund", "Bonds": "fund"},
+        "italy_annual_wealth_tax": 0.0,
+        "tax_terminal_liquidation": False,
+    }
+
+    target = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        contribution_allocation="target",
+        **common,
+    )
+    efficient = simulate_portfolio_paths(
+        result,
+        {"Stocks": 0.5, "Bonds": 0.5},
+        contribution_allocation="underweight_first",
+        **common,
+    )
+
+    assert target.attrs["capital_gains_tax_total"] > 0
+    assert efficient.attrs["capital_gains_tax_total"] == pytest.approx(0.0)
+    assert efficient.iloc[-1, 0] > target.iloc[-1, 0]
+
+
+def test_wrapper_benchmark_matches_no_trade_diy_and_benefits_from_tax_deferral():
+    no_trade = SimulationResult(
+        returns=np.array([[[0.10]], [[0.10]]]),
+        regimes=np.empty((2, 1), dtype=object),
+        assets=["ETF"],
+        states=[],
+        frequency="M",
+    )
+    equal = simulate_portfolio_paths(
+        no_trade,
+        {"ETF": 1.0},
+        return_kind="simple",
+        rebalance_frequency=0,
+        tax_country="IT",
+        italy_annual_wealth_tax=0.0,
+        tax_wrapper_benchmark=True,
+    )
+    assert equal.attrs["wrapper_terminal_values"] == pytest.approx(equal.iloc[-1].to_numpy())
+
+    rebalanced = SimulationResult(
+        returns=np.array(
+            [
+                [[0.50, 0.0]],
+                [[0.0, 0.50]],
+                [[0.50, 0.0]],
+                [[0.0, 0.50]],
+            ]
+        ),
+        regimes=np.empty((4, 1), dtype=object),
+        assets=["A", "B"],
+        states=[],
+        frequency="M",
+    )
+    deferred = simulate_portfolio_paths(
+        rebalanced,
+        {"A": 0.5, "B": 0.5},
+        return_kind="simple",
+        rebalance_frequency=1,
+        tax_country="IT",
+        italy_annual_wealth_tax=0.0,
+        tax_wrapper_benchmark=True,
+    )
+    assert deferred.attrs["tax_wrapper_benchmark_available"] is True
+    assert deferred.attrs["wrapper_terminal_values"][0] > deferred.iloc[-1, 0]
+
+
+def test_wrapper_benchmark_reports_managed_regime_as_unavailable():
+    result = SimulationResult(
+        returns=np.array([[[0.10]]]),
+        regimes=np.empty((1, 1), dtype=object),
+        assets=["ETF"],
+        states=[],
+        frequency="M",
+    )
+    wealth = simulate_portfolio_paths(
+        result,
+        {"ETF": 1.0},
+        return_kind="simple",
+        rebalance_frequency=0,
+        tax_country="IT",
+        tax_regime="italy_managed",
+        italy_annual_wealth_tax=0.0,
+        tax_wrapper_benchmark=True,
+    )
+    assert wealth.attrs["tax_wrapper_benchmark_available"] is False
+    assert wealth.attrs["tax_wrapper_unavailable_reason"] == "managed_regime"
 
 
 def test_italian_tax_rejects_legacy_accounting_and_leverage():
@@ -344,6 +526,43 @@ def test_withdrawals_reduce_wealth_and_floor_at_zero():
     assert (exhausted.to_numpy() >= 0).all()
 
 
+@pytest.mark.parametrize("rebalance_frequency", [None, 0, 1])
+def test_withdrawals_can_start_later(rebalance_frequency):
+    result = SimulationResult(
+        returns=np.zeros((4, 1, 1)),
+        regimes=np.empty((4, 1), dtype=object),
+        assets=["Stocks"],
+        states=[],
+        frequency="M",
+    )
+
+    wealth = simulate_portfolio_paths(
+        result,
+        {"Stocks": 1.0},
+        rebalance_frequency=rebalance_frequency,
+        withdrawal=10.0,
+        withdrawal_start_period=3,
+    )
+
+    assert wealth.iloc[:, 0].tolist() == pytest.approx([100.0, 100.0, 90.0, 80.0])
+
+
+def test_delayed_withdrawal_metrics_use_only_active_months():
+    wealth = pd.DataFrame({"path_0": [100.0, 80.0]})
+
+    summary = summarize_wealth_risk(
+        wealth,
+        periods_per_year=12,
+        withdrawal=20.0,
+        withdrawal_start_period=2,
+    )
+
+    assert summary["cash_flow_adjusted_annualized_return"] == pytest.approx(0.0)
+    assert summary["total_withdrawn"] == pytest.approx(20.0)
+    assert summary["withdrawal_start_period"] == 2
+    assert summary["withdrawal_periods"] == 1
+
+
 def test_cash_flows_work_in_rebalancing_mode():
     result = _two_period_result()
     with_flows = simulate_portfolio_paths(
@@ -371,6 +590,13 @@ def test_cash_flows_validate_inputs():
         simulate_portfolio_paths(result, {"Stocks": 1.0}, contribution=-1.0)
     with pytest.raises(ValueError, match="withdrawal"):
         simulate_portfolio_paths(result, {"Stocks": 1.0}, withdrawal=-1.0)
+    with pytest.raises(ValueError, match="withdrawal_start_period"):
+        simulate_portfolio_paths(
+            result,
+            {"Stocks": 1.0},
+            withdrawal=1.0,
+            withdrawal_start_period=3,
+        )
 
 
 def test_cash_flow_adjusted_metrics_ignore_regular_contributions():

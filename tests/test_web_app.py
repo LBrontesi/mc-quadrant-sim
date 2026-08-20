@@ -91,6 +91,17 @@ def test_web_ui_exposes_shared_methodology_controls():
         "rebalance-sensitivity-btn",
         "save-scenario-btn",
         "share-scenario-btn",
+        "decumulation-enabled",
+        "decumulation-mode",
+        "decumulation-policy",
+        "decumulation-phase-list",
+        "decumulation-event-list",
+        "safe-rate-btn",
+        "tab-retirement",
+        "chart-safe-rate",
+        "chart-retirement-survival",
+        "chart-retirement-spending",
+        "retirement-tax-table",
     ):
         assert f'id="{control}"' in html
     assert "setupExperience" in javascript
@@ -108,7 +119,14 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert "onPortfolioCompare" in javascript
     assert "onRebalancingSensitivity" in javascript
     assert "captureScenarioSnapshot" in javascript
+    assert 'postJSON("/api/safe-rate"' in javascript
+    assert "renderDecumulationEditor" in javascript
+    assert "renderRetirement" in javascript
+    assert "schemaVersion: 14" in javascript
     assert 'id="paths" value="100000"' in html
+    assert 'id="paths" value="100000" min="1000" max="500000"' in html
+    assert 'paths > 500000' in javascript
+    assert 'Paths must be between 1 and 500,000.' in javascript
     assert 'id="periods" value="120"' in html
     assert '<option value="buy_hold">Buy and hold (drifting weights)</option>' in html
     assert 'id="tax-country"' in html

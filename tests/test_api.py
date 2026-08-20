@@ -169,9 +169,87 @@ def test_scenario_kwargs_include_long_term_fields():
 
 
 def test_scenario_kwargs_include_periodic_cash_flows():
-    kwargs = api.scenario_kwargs({"weights": {"SPY": 100}, "contribution": 25.0, "withdrawal": 10.0})
+    kwargs = api.scenario_kwargs(
+        {
+            "weights": {"SPY": 100},
+            "periods": 36,
+            "contribution": 25.0,
+            "withdrawal": 10.0,
+            "withdrawal_start_period": 10,
+        }
+    )
     assert kwargs["contribution"] == pytest.approx(25.0)
     assert kwargs["withdrawal"] == pytest.approx(10.0)
+    assert kwargs["withdrawal_start_period"] == 10
+
+
+def test_scenario_kwargs_rejects_withdrawal_start_outside_horizon():
+    with pytest.raises(ValueError, match="withdrawal_start_period"):
+        api.scenario_kwargs(
+            {
+                "weights": {"SPY": 100},
+                "periods": 12,
+                "withdrawal_start_period": 13,
+            }
+        )
+
+
+def test_scenario_kwargs_normalizes_advanced_decumulation():
+    kwargs = api.scenario_kwargs(
+        _csv_payload(
+            periods=24,
+            decumulation={
+                "enabled": True,
+                "mode": "manual",
+                "policy": "guyton_klinger",
+                "phases": [
+                    {
+                        "start_month": 2,
+                        "end_month": 12,
+                        "frequency": "quarterly",
+                        "annual_real_amount": 1200,
+                    }
+                ],
+                "one_time_expenses": [{"month": 6, "real_amount": 500}],
+            },
+        )
+    )
+    assert kwargs["decumulation"]["policy"]["type"] == "guyton_klinger"
+    assert kwargs["decumulation"]["phases"][0]["frequency"] == "quarterly"
+
+
+def test_safe_rate_solver_compares_policies_on_the_same_paths():
+    payload = _csv_payload(
+        paths=40,
+        periods=12,
+        decumulation={
+            "enabled": True,
+            "mode": "safe_rate",
+            "policy": "guyton_klinger",
+            "phases": [
+                {
+                    "start_month": 1,
+                    "end_month": 12,
+                    "frequency": "monthly",
+                    "spending_multiplier": 1.0,
+                }
+            ],
+            "safe_rate": {
+                "objective": "survival",
+                "target_probability": 0.90,
+            },
+        },
+    )
+    response = api.build_safe_rate_response(payload)
+    policies = response["retirement"]["safe_rate"]["policies"]
+    assert response["same_market_paths"] is True
+    assert set(policies) == {"fixed", "guyton_klinger"}
+    assert policies["fixed"]["curve"]
+    assert len(policies["guyton_klinger"]["wilson_95"]) == 2
+    assert {row["policy"] for row in response["retirement"]["paired_comparison"]} == {
+        "fixed",
+        "guyton_klinger",
+    }
 
 
 def test_scenario_kwargs_include_methodology_options():
@@ -412,13 +490,19 @@ def test_simulate_response_reports_model_kind_and_validation():
 
 
 def test_simulate_reports_cash_flow_summary():
-    payload = _csv_payload(contribution=20.0, withdrawal=5.0)
+    payload = _csv_payload(
+        contribution=20.0,
+        withdrawal=5.0,
+        withdrawal_start_period=5,
+    )
     response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["summary"]["periodic_contribution"] == pytest.approx(20.0)
-    assert response["summary"]["total_withdrawn"] == pytest.approx(5.0 * 12)
+    assert response["summary"]["total_withdrawn"] == pytest.approx(5.0 * 8)
     assert "cash_flow_adjusted_annualized_return" in response["summary"]
     assert response["summary"]["periodic_withdrawal"] == pytest.approx(5.0)
+    assert response["summary"]["withdrawal_start_period"] == 5
+    assert response["summary"]["withdrawal_periods"] == 8
     assert response["summary"]["total_contributed"] == pytest.approx(20.0 * 12)
 
 
@@ -455,15 +539,18 @@ def test_simulate_reports_italian_tax_assumptions():
         {
             "code": "IT",
             "label": "Italy",
-            "regimes": [
-                {"value": "italy_administered", "label": "Simplified administered regime"}
-            ],
+                "regimes": [
+                    {"value": "italy_administered", "label": "Simplified administered regime"},
+                    {"value": "italy_declarative", "label": "Declarative regime"},
+                    {"value": "italy_managed", "label": "Managed regime"},
+                ],
         }
     ]
     assert response["taxes"]["standard_rate"] == pytest.approx(0.26)
     assert response["taxes"]["government_bond_rate"] == pytest.approx(0.125)
     assert response["taxes"]["annual_wealth_tax_rate"] == pytest.approx(0.002)
     assert response["taxes"]["loss_carry_years"] == 4
+    assert response["taxes"]["rule_snapshot"] == "IT-2026"
     assert response["costs"]["taxes_paid"] > 0
     assert response["costs"]["wealth_tax"] > 0
     assert response["costs"]["realized_gains"] >= 0
@@ -472,8 +559,14 @@ def test_simulate_reports_italian_tax_assumptions():
         "after_tax_terminal_wealth_median"
     ]
     assert response["taxes"]["impact"]["terminal_drag_median"] > 0
+    assert response["taxes"]["by_year"]
+    assert sum(
+        values.get("stamp_duty", 0.0)
+        for values in response["taxes"]["by_year"].values()
+    ) == pytest.approx(response["costs"]["stamp_duty"])
     assert response["gross_wealth"]["median"] != response["wealth"]["median"]
-    assert any("simplified administered-regime" in warning for warning in response["warnings"])
+    assert any("planning approximation" in warning for warning in response["warnings"])
+    assert any("IT-2026" in warning for warning in response["warnings"])
 
 
 def test_simulate_reports_inflation_linked_financing():
@@ -554,11 +647,14 @@ def test_execution_plan_scales_with_scenario_dimensions():
             "weights": {ticker: 1 for ticker in ASSET_TICKERS},
             "selected_tickers": ASSET_TICKERS,
             "periods": 360,
-            "paths": 120000,
+            "paths": 500000,
             "workers": 4,
         }
     )
-    assert kwargs["paths"] == 120000
+    assert kwargs["paths"] == 500000
+
+    with pytest.raises(ValueError, match="500,000"):
+        api.scenario_kwargs({"weights": {"SPY": 100}, "paths": 500001})
 
 
 def test_execution_plan_selects_workers_automatically(monkeypatch):

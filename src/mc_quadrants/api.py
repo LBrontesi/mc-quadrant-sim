@@ -11,6 +11,7 @@ import io
 import os
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date
 from typing import Any
 
@@ -22,10 +23,22 @@ from mc_quadrants.data import (
     load_market_data,
     prices_to_returns,
 )
+from mc_quadrants.decumulation import (
+    GuardrailSettings,
+    inflation_index as withdrawal_inflation_index,
+    normalize_decumulation,
+    success_mask,
+    wilson_interval,
+)
 from mc_quadrants.pipeline import compare_distributions, run_scenario
 from mc_quadrants.regimes import REGIME_ORDER
+from mc_quadrants.simulation import simulate_portfolio_paths
 from mc_quadrants.tax_policy import available_tax_countries, resolve_tax_selection
-from mc_quadrants.taxes import ITALY_TAX_CATEGORIES
+from mc_quadrants.taxes import (
+    CONTRIBUTION_ALLOCATION_MODES,
+    ITALY_TAX_CATEGORIES,
+    normalize_italy_tax_metadata,
+)
 
 REGIME_NAMES = {
     "high_growth_low_inflation": "High growth / low inflation",
@@ -49,6 +62,9 @@ _PERCENT_METRICS = {
     "maintenance_margin",
     "annual_wealth_tax_rate",
     "terminal_tax_drag_percent",
+    "wrapper_advantage_percent",
+    "tax_drag_cagr",
+    "effective_tax_rate",
     "probability_of_loss",
     "goal_success_probability",
     "risk_of_ruin",
@@ -84,9 +100,19 @@ _CURRENCY_METRICS = {
     "realized_gains",
     "realized_losses",
     "loss_carryforward",
+    "investment_income_tax",
+    "foreign_withholding_tax",
+    "financial_transaction_tax",
+    "stamp_duty",
+    "ivafe",
+    "expired_losses",
     "gross_terminal_wealth_median",
     "after_tax_terminal_wealth_median",
     "terminal_tax_drag_median",
+    "wrapper_terminal_p05",
+    "wrapper_terminal_median",
+    "wrapper_terminal_p95",
+    "wrapper_advantage_median",
 }
 
 
@@ -130,9 +156,9 @@ DEFAULT_CORRELATIONS = {
     "low_growth_low_inflation": -0.40,
 }
 
-# Portfolio presets inspired by PortfolioCharts, mapped onto the available
-# ticker universe. Approximations are noted per preset (for example, IEF
-# stands in for long-term treasuries and SHY for short-term/cash holdings).
+# Standard portfolio presets mapped onto the available ticker universe.
+# Approximations are noted per preset (for example, IEF stands in for
+# long-term treasuries and SHY for short-term/cash holdings).
 PORTFOLIO_PRESETS: dict[str, dict[str, float]] = {
     "Classic 60/40": {"SPY": 60.0, "IEF": 40.0},
     "Three-Fund": {"SPY": 60.0, "EFA": 30.0, "IEF": 10.0},
@@ -157,7 +183,7 @@ REBALANCE_KEYS = {
     "annual": 12,
 }
 MAX_PERIODS = 360
-MAX_PATHS = 120_000
+MAX_PATHS = 500_000
 MAX_WORKERS = 16
 MAX_REPORTING_PATHS = 5_000
 DEFAULT_EXPORT_PATHS = 1_000
@@ -217,6 +243,24 @@ def parse_expense_ratios(raw: str | Mapping[str, Any] | None) -> dict[str, float
             raise ValueError(f"Expense ratio for {normalized_asset} must be between 0 and 100 percent.")
         ratios[normalized_asset] = percentage / 100.0
     return ratios
+
+
+def parse_numeric_map(
+    raw: str | Mapping[str, Any] | None,
+    kind: str,
+    *,
+    scale: float = 1.0,
+) -> dict[str, float]:
+    if not raw:
+        return {}
+    items = raw.items() if isinstance(raw, Mapping) else parse_pair_map(str(raw), kind).items()
+    parsed: dict[str, float] = {}
+    for asset, raw_value in items:
+        value = float(raw_value) * scale
+        if not np.isfinite(value):
+            raise ValueError(f"{kind} for {asset} must be finite.")
+        parsed[str(asset).strip().upper()] = value
+    return parsed
 
 
 def _currency_for_asset(asset: str, asset_currencies: Mapping[str, str]) -> str:
@@ -682,9 +726,40 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"Unknown Italian tax category '{unknown_tax_categories[0]}'. Expected one of: {allowed}."
         )
+    raw_tax_metadata = payload.get("asset_tax_metadata") or {}
+    if not isinstance(raw_tax_metadata, Mapping):
+        raise ValueError("asset_tax_metadata must be an object keyed by asset symbol.")
+    tax_metadata = {
+        str(asset).strip().upper(): dict(values)
+        for asset, values in raw_tax_metadata.items()
+        if isinstance(values, Mapping)
+    }
+    if len(tax_metadata) != len(raw_tax_metadata):
+        raise ValueError("Every asset_tax_metadata value must be an object.")
+    if tax_country == "IT":
+        tax_metadata = normalize_italy_tax_metadata(
+            list(weights),
+            tax_categories,
+            tax_metadata,
+        )
+        tax_categories = {
+            asset: str(values["category"])
+            for asset, values in tax_metadata.items()
+        }
     italy_wealth_tax = float(payload.get("italy_wealth_tax", 0.20)) / 100.0
     if not np.isfinite(italy_wealth_tax) or not 0 <= italy_wealth_tax < 1:
         raise ValueError("italy_wealth_tax must be between 0 and 100 percent.")
+    italy_wealth_tax_mode = str(payload.get("italy_wealth_tax_mode", "auto")).strip().lower()
+    if italy_wealth_tax_mode not in {"auto", "stamp_duty", "ivafe", "both", "none"}:
+        raise ValueError("italy_wealth_tax_mode must be auto, stamp_duty, ivafe, both, or none.")
+    contribution_allocation = str(payload.get("contribution_allocation", "target")).strip().lower()
+    if contribution_allocation not in CONTRIBUTION_ALLOCATION_MODES:
+        allowed = ", ".join(sorted(CONTRIBUTION_ALLOCATION_MODES))
+        raise ValueError(f"contribution_allocation must be one of: {allowed}.")
+    if contribution_allocation == "underweight_first" and rebalance_label == "legacy":
+        raise ValueError("Underweight-first contributions require holdings-based accounting.")
+    if contribution_allocation == "underweight_first" and not np.isclose(leverage_multiple, 1.0):
+        raise ValueError("Underweight-first contributions are not available with leverage.")
     if tax_selection.policy is not None:
         tax_selection.policy.validate(
             rebalance_frequency=REBALANCE_KEYS[rebalance_label],
@@ -724,6 +799,27 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     if parameter_block_size < 1:
         raise ValueError("parameter_block_size must be positive.")
     joint_macro = bool(payload.get("joint_macro", False))
+    macro_parameter_uncertainty = bool(payload.get("macro_parameter_uncertainty", True))
+    macro_model = str(payload.get("macro_model", "bvar_ensemble")).strip().lower()
+    if macro_model not in {"ridge_var", "bvar", "bvar_ensemble"}:
+        raise ValueError("macro_model must be ridge_var, bvar, or bvar_ensemble.")
+    structural_returns = bool(payload.get("structural_returns", False))
+    raw_asset_classes = payload.get("asset_classes", "")
+    parsed_asset_classes = (
+        {str(asset).strip().upper(): str(value).strip().upper() for asset, value in raw_asset_classes.items()}
+        if isinstance(raw_asset_classes, Mapping)
+        else parse_pair_map(raw_asset_classes, "asset class")
+    )
+    asset_classes = {asset: value.lower() for asset, value in parsed_asset_classes.items()}
+    asset_durations = parse_numeric_map(payload.get("asset_durations"), "duration")
+    asset_income_yields = parse_numeric_map(
+        payload.get("asset_income_yields"), "income yield", scale=0.01
+    )
+    state_dependent_liquidity = bool(payload.get("state_dependent_liquidity", False))
+    raw_liquidity = payload.get("state_transaction_cost_multipliers") or {}
+    if not isinstance(raw_liquidity, Mapping):
+        raise ValueError("state_transaction_cost_multipliers must be an object.")
+    liquidity_multipliers = {str(state): float(value) for state, value in raw_liquidity.items()}
     macro_transition_weight = float(payload.get("macro_transition_weight", 0.35))
     if not 0 <= macro_transition_weight <= 1:
         raise ValueError("macro_transition_weight must be between 0 and 1.")
@@ -739,11 +835,38 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
     if distribution in {"bootstrap", "block_bootstrap"} and (joint_macro or dynamic_correlation):
         raise ValueError("Joint macro paths and dynamic correlation require a parametric return distribution.")
+    periods = int(payload.get("periods", 120))
+    withdrawal_start_raw = payload.get("withdrawal_start_period", 1)
+    try:
+        withdrawal_start_value = float(withdrawal_start_raw)
+        withdrawal_start_period = int(withdrawal_start_value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("withdrawal_start_period must be an integer.") from exc
+    if not np.isfinite(withdrawal_start_value) or not np.isclose(
+        withdrawal_start_value, withdrawal_start_period
+    ):
+        raise ValueError("withdrawal_start_period must be an integer.")
+    if not 1 <= withdrawal_start_period <= periods:
+        raise ValueError(
+            "withdrawal_start_period must be between 1 and the simulation periods."
+        )
+    raw_decumulation = payload.get("decumulation")
+    decumulation = (
+        normalize_decumulation(
+            raw_decumulation,
+            periods=periods,
+            legacy_withdrawal=float(payload.get("withdrawal", 0.0)),
+            legacy_start_period=withdrawal_start_period,
+            annual_inflation_fallback=float(payload.get("annual_inflation", 0.0)) / 100.0,
+        ).to_dict()
+        if raw_decumulation is not None
+        else None
+    )
     return {
         "growth_threshold": _threshold_value(payload.get("growth_threshold", "median")),
         "inflation_threshold": _threshold_value(payload.get("inflation_threshold", "median")),
         "rate_col": str(payload.get("rate_col", "interest_rate")).strip() or None,
-        "periods": int(payload.get("periods", 120)),
+        "periods": periods,
         "paths": int(payload.get("paths", 3000)),
         "random_seed": int(payload.get("seed", 7)),
         "start_state": start_state,
@@ -755,18 +878,27 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "transition_uncertainty": float(payload.get("transition_uncertainty", 0.0)),
         "rebalance_frequency": REBALANCE_KEYS[rebalance_label],
         "transaction_cost_bps": cost_bps,
+        "state_dependent_liquidity": state_dependent_liquidity,
+        "state_transaction_cost_multipliers": liquidity_multipliers,
         "asset_expense_ratios": expense_ratios,
         "tax_country": tax_country,
         "tax_regime": tax_regime,
         "asset_tax_categories": tax_categories,
+        "asset_tax_metadata": tax_metadata,
         "italy_annual_wealth_tax": italy_wealth_tax,
+        "italy_wealth_tax_mode": italy_wealth_tax_mode,
         "tax_terminal_liquidation": bool(payload.get("tax_terminal_liquidation", True)),
+        "tax_start_date": str(payload.get("tax_start_date", "")).strip() or None,
+        "tax_wrapper_benchmark": bool(payload.get("tax_wrapper_benchmark", False)),
         "leverage_multiple": leverage_multiple,
         "financing_rate": financing_rate,
         "financing_inflation_sensitivity": financing_inflation_sensitivity,
         "maintenance_margin": maintenance_margin,
         "contribution": float(payload.get("contribution", 0.0)),
+        "contribution_allocation": contribution_allocation,
         "withdrawal": float(payload.get("withdrawal", 0.0)),
+        "withdrawal_start_period": withdrawal_start_period,
+        "decumulation": decumulation,
         "initial_value": float(payload.get("initial_value", 100.0)),
         "base_currency": base_currency,
         "risk_free_rate": float(payload.get("risk_free_rate", 0.0)) / 100.0,
@@ -791,6 +923,12 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "parameter_block_size": parameter_block_size,
         "joint_macro": joint_macro,
         "macro_transition_weight": macro_transition_weight,
+        "macro_parameter_uncertainty": macro_parameter_uncertainty,
+        "macro_model": macro_model,
+        "structural_returns": structural_returns,
+        "asset_classes": asset_classes,
+        "asset_durations": asset_durations,
+        "asset_income_yields": asset_income_yields,
         "dynamic_correlation": dynamic_correlation,
         "dcc_alpha": dcc_alpha,
         "dcc_beta": dcc_beta,
@@ -850,13 +988,34 @@ def _median_period_returns(wealth: pd.DataFrame, payload: Mapping[str, Any]) -> 
     annual_inflation = float(payload.get("annual_inflation", 0.0)) / 100.0
     contribution = float(payload.get("contribution", 0.0))
     withdrawal = float(payload.get("withdrawal", 0.0))
+    withdrawal_start_period = int(payload.get("withdrawal_start_period", 1))
+    funded_paths = wealth.attrs.get("withdrawal_funded")
+    withdrawal_cpi = wealth.attrs.get("withdrawal_cpi")
+    if funded_paths is not None:
+        funded_paths = np.asarray(funded_paths, dtype=float)
+        if funded_paths.shape != values.shape:
+            funded_paths = None
+    if withdrawal_cpi is not None:
+        withdrawal_cpi = np.asarray(withdrawal_cpi, dtype=float)
+        if withdrawal_cpi.shape != values.shape:
+            withdrawal_cpi = None
     medians: list[float] = []
     for period in range(len(values)):
         previous = float(payload.get("initial_value", 100.0)) if period == 0 else values[period - 1]
         previous_deflator = (1.0 + annual_inflation) ** (-period / 12.0)
         current_deflator = (1.0 + annual_inflation) ** (-(period + 1) / 12.0)
         denominator = previous * previous_deflator + contribution * previous_deflator
-        numerator = values[period] * current_deflator + withdrawal * current_deflator
+        active_withdrawal = (
+            funded_paths[period] / np.maximum(withdrawal_cpi[period], 1e-300)
+            if funded_paths is not None and withdrawal_cpi is not None
+            else funded_paths[period]
+            if funded_paths is not None
+            else withdrawal if period + 1 >= withdrawal_start_period else 0.0
+        )
+        numerator = (
+            values[period] * current_deflator
+            + active_withdrawal * current_deflator
+        )
         with np.errstate(divide="ignore", invalid="ignore"):
             returns = numerator / denominator - 1.0
         returns = np.asarray(returns, dtype=float)
@@ -1145,13 +1304,31 @@ def _path_analytics(
     periods, paths = values.shape
     contribution = float(payload.get("contribution", 0.0))
     withdrawal = float(payload.get("withdrawal", 0.0))
+    withdrawal_start_period = int(payload.get("withdrawal_start_period", 1))
     risk_free_rate = float(payload.get("risk_free_rate", 0.0)) / 100.0
     target_wealth = float(payload.get("target_wealth", initial_value * 2.0))
     if not np.isfinite(target_wealth) or target_wealth <= 0:
         raise ValueError("target_wealth must be positive and finite.")
     previous = np.vstack([np.full(paths, initial_value), values[:-1]])
     denominator = previous + contribution
-    numerator = values + withdrawal
+    funded_paths = wealth.attrs.get("withdrawal_funded")
+    withdrawal_cpi = wealth.attrs.get("withdrawal_cpi")
+    if funded_paths is not None:
+        funded_values = np.asarray(funded_paths, dtype=float)
+        if funded_values.shape != values.shape:
+            funded_values = None
+    else:
+        funded_values = None
+    if funded_values is not None and withdrawal_cpi is not None:
+        cpi_values = np.asarray(withdrawal_cpi, dtype=float)
+        if cpi_values.shape == values.shape:
+            funded_values = funded_values / np.maximum(cpi_values, 1e-300)
+    if funded_values is None:
+        withdrawal_schedule = (
+            np.arange(1, periods + 1, dtype=int) >= withdrawal_start_period
+        ).astype(float)
+        funded_values = withdrawal * withdrawal_schedule[:, None]
+    numerator = values + funded_values
     with np.errstate(divide="ignore", invalid="ignore"):
         period_returns = numerator / denominator - 1.0
     period_returns[(denominator <= 0) | (numerator < 0)] = np.nan
@@ -1220,12 +1397,16 @@ def _path_analytics(
         **rolling_metrics,
     }
 
-    invested = initial_value + (contribution - withdrawal) * np.arange(1, periods + 1)
+    invested = (
+        initial_value
+        + contribution * np.arange(1, periods + 1, dtype=float)[:, None]
+        - np.cumsum(funded_values, axis=0)
+    )
     success = {
         "periods": list(range(1, periods + 1)),
         "survival": np.mean(values > 0.0, axis=1).tolist(),
         "preservation": np.mean(values >= initial_value, axis=1).tolist(),
-        "profit": np.mean(values >= np.maximum(invested, 0.0)[:, None], axis=1).tolist(),
+        "profit": np.mean(values >= np.maximum(invested, 0.0), axis=1).tolist(),
         "target": np.mean(values >= target_wealth, axis=1).tolist(),
     }
 
@@ -1451,6 +1632,168 @@ def _macro_path_response(result: Any) -> dict[str, Any] | None:
     return response
 
 
+def _retirement_response(
+    wealth: pd.DataFrame,
+    payload: Mapping[str, Any],
+    *,
+    tax_by_year: Mapping[str, Mapping[str, float]] | None = None,
+) -> dict[str, Any]:
+    """Build spending, exhaustion, guardrail, and paired-policy reporting."""
+
+    periods, paths = wealth.shape
+    plan = wealth.attrs.get("decumulation")
+    if not isinstance(plan, Mapping):
+        plan = normalize_decumulation(
+            payload.get("decumulation"),
+            periods=periods,
+            legacy_withdrawal=float(payload.get("withdrawal", 0.0)),
+            legacy_start_period=int(payload.get("withdrawal_start_period", 1)),
+            annual_inflation_fallback=float(payload.get("annual_inflation", 0.0)) / 100.0,
+        ).to_dict()
+    requested = np.asarray(
+        wealth.attrs.get("withdrawal_requested", np.zeros((periods, paths))),
+        dtype=float,
+    )
+    funded = np.asarray(
+        wealth.attrs.get("withdrawal_funded", np.zeros((periods, paths))),
+        dtype=float,
+    )
+    events = np.asarray(
+        wealth.attrs.get("guardrail_events", np.zeros((periods, paths))),
+        dtype=np.int8,
+    )
+    cpi = np.asarray(
+        wealth.attrs.get("withdrawal_cpi", np.ones((periods, paths))),
+        dtype=float,
+    )
+    if requested.shape != (periods, paths):
+        requested = np.zeros((periods, paths), dtype=float)
+    if funded.shape != (periods, paths):
+        funded = np.zeros((periods, paths), dtype=float)
+    if events.shape != (periods, paths):
+        events = np.zeros((periods, paths), dtype=np.int8)
+    if cpi.shape != (periods, paths):
+        cpi = np.ones((periods, paths), dtype=float)
+    requested_real = requested / np.maximum(cpi, 1e-300)
+    funded_real = funded / np.maximum(cpi, 1e-300)
+    fully_funded_by_month = np.cumprod(funded + 1e-8 >= requested, axis=0).astype(bool)
+    survival_curve = fully_funded_by_month.mean(axis=1)
+    requested_total = requested_real.sum(axis=0)
+    funded_total = funded_real.sum(axis=0)
+    funded_ratio = np.divide(
+        funded_total,
+        requested_total,
+        out=np.ones(paths, dtype=float),
+        where=requested_total > 1e-12,
+    )
+    funded_fan = np.quantile(funded_real, [0.05, 0.50, 0.95], axis=1)
+    cumulative_funded = np.cumsum(funded_real, axis=0)
+    cumulative_fan = np.quantile(cumulative_funded, [0.05, 0.50, 0.95], axis=1)
+    values = wealth.to_numpy(dtype=float)
+    underfunded = funded + 1e-8 < requested
+    first_shortfall = np.where(
+        underfunded.any(axis=0),
+        np.argmax(underfunded, axis=0) + 1,
+        0,
+    )
+    cut_counts = (events < 0).sum(axis=0)
+    increase_counts = (events > 0).sum(axis=0)
+
+    def policy_summary(
+        policy: str,
+        policy_wealth: np.ndarray,
+        policy_requested: np.ndarray,
+        policy_funded: np.ndarray,
+        policy_events: np.ndarray,
+    ) -> dict[str, Any]:
+        policy_cpi = cpi
+        real_requested = policy_requested / np.maximum(policy_cpi, 1e-300)
+        real_funded = policy_funded / np.maximum(policy_cpi, 1e-300)
+        totals = real_requested.sum(axis=0)
+        ratios = np.divide(
+            real_funded.sum(axis=0),
+            totals,
+            out=np.ones(paths, dtype=float),
+            where=totals > 1e-12,
+        )
+        success = np.all(policy_funded + 1e-8 >= policy_requested, axis=0)
+        terminal = policy_wealth[-1]
+        return {
+            "policy": policy,
+            "success_probability": float(success.mean()),
+            "funded_spending_ratio": float(np.mean(ratios)),
+            "median_real_spending": float(np.median(real_funded.sum(axis=0))),
+            "terminal_p05": float(np.quantile(terminal, 0.05)),
+            "terminal_median": float(np.quantile(terminal, 0.50)),
+            "terminal_p95": float(np.quantile(terminal, 0.95)),
+            "probability_of_cut": float(np.mean(np.any(policy_events < 0, axis=0))),
+            "probability_of_increase": float(np.mean(np.any(policy_events > 0, axis=0))),
+        }
+
+    policy_values = plan.get("policy", {})
+    current_policy = (
+        str(policy_values.get("type", "fixed"))
+        if isinstance(policy_values, Mapping)
+        else str(policy_values)
+    )
+    comparison = [policy_summary(current_policy, values, requested, funded, events)]
+    paired_policy = wealth.attrs.get("paired_policy")
+    paired_wealth = wealth.attrs.get("paired_wealth")
+    if paired_policy and paired_wealth is not None:
+        comparison.append(
+            policy_summary(
+                str(paired_policy),
+                np.asarray(paired_wealth, dtype=float),
+                np.asarray(wealth.attrs.get("paired_withdrawal_requested"), dtype=float),
+                np.asarray(wealth.attrs.get("paired_withdrawal_funded"), dtype=float),
+                np.asarray(wealth.attrs.get("paired_guardrail_events"), dtype=np.int8),
+            )
+        )
+    comparison.sort(key=lambda item: item["policy"])
+
+    return {
+        "enabled": bool(plan.get("enabled", False)),
+        "mode": str(plan.get("mode", "manual")),
+        "config": dict(plan),
+        "periods": list(range(1, periods + 1)),
+        "survival_probability": survival_curve.tolist(),
+        "funded_spending": {
+            "p05": funded_fan[0].tolist(),
+            "median": funded_fan[1].tolist(),
+            "p95": funded_fan[2].tolist(),
+        },
+        "cumulative_real_spending": {
+            "p05": cumulative_fan[0].tolist(),
+            "median": cumulative_fan[1].tolist(),
+            "p95": cumulative_fan[2].tolist(),
+        },
+        "metrics": {
+            "success_probability": float(survival_curve[-1]),
+            "funded_spending_ratio": float(np.mean(funded_ratio)),
+            "median_cumulative_real_spending": float(np.median(funded_total)),
+            "probability_of_exhaustion": float(np.mean(underfunded.any(axis=0))),
+            "median_first_shortfall_month": (
+                float(np.median(first_shortfall[first_shortfall > 0]))
+                if np.any(first_shortfall > 0)
+                else None
+            ),
+            "probability_of_cut": float(np.mean(cut_counts > 0)),
+            "probability_of_increase": float(np.mean(increase_counts > 0)),
+            "mean_cuts": float(np.mean(cut_counts)),
+            "mean_increases": float(np.mean(increase_counts)),
+            "terminal_p05": float(np.quantile(values[-1], 0.05)),
+            "terminal_median": float(np.quantile(values[-1], 0.50)),
+            "terminal_p95": float(np.quantile(values[-1], 0.95)),
+        },
+        "paired_comparison": comparison,
+        "tax_by_year": {
+            str(year): {str(name): float(value) for name, value in metrics.items()}
+            for year, metrics in (tax_by_year or {}).items()
+        },
+        "safe_rate": None,
+    }
+
+
 def _simulation_start_date(macro: pd.DataFrame) -> str | None:
     if macro is None or macro.empty:
         return None
@@ -1515,6 +1858,8 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     observations = {
         _state_label(state): int(moments.observations) for state, moments in model.moments.items()
     }
+
+
     diagnostics = scenario.diagnostics.regime_summary.copy()
     simulated_diagnostics = _simulated_regime_summary(result)
     diagnostics = diagnostics.merge(simulated_diagnostics, on="regime", how="left")
@@ -1523,12 +1868,19 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     summary_values = {str(key): _json_value(value) for key, value in summary.items()}
     contribution = float(payload.get("contribution", 0.0))
     withdrawal = float(payload.get("withdrawal", 0.0))
+    withdrawal_start_period = int(payload.get("withdrawal_start_period", 1))
     if contribution or withdrawal:
+        withdrawal_periods = len(wealth) - withdrawal_start_period + 1
         summary_values["periodic_contribution"] = contribution
         summary_values["periodic_withdrawal"] = withdrawal
         summary_values["total_contributed"] = contribution * len(wealth)
-        summary_values["total_withdrawn"] = withdrawal * len(wealth)
-        summary_values["net_external_cash_flow"] = (contribution - withdrawal) * len(wealth)
+        summary_values["total_withdrawn"] = withdrawal * withdrawal_periods
+        summary_values["net_external_cash_flow"] = (
+            contribution * len(wealth) - withdrawal * withdrawal_periods
+        )
+        if withdrawal:
+            summary_values["withdrawal_start_period"] = withdrawal_start_period
+            summary_values["withdrawal_periods"] = withdrawal_periods
 
     costs = {
         "weighted_expense_ratio": summary_values.get("weighted_expense_ratio", 0.0),
@@ -1545,6 +1897,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "realized_gains": summary_values.get("realized_gains", 0.0),
         "realized_losses": summary_values.get("realized_losses", 0.0),
         "loss_carryforward": summary_values.get("loss_carryforward", 0.0),
+        "investment_income_tax": summary_values.get("investment_income_tax", 0.0),
+        "foreign_withholding_tax": summary_values.get("foreign_withholding_tax", 0.0),
+        "financial_transaction_tax": summary_values.get("financial_transaction_tax", 0.0),
+        "stamp_duty": summary_values.get("stamp_duty", 0.0),
+        "ivafe": summary_values.get("ivafe", 0.0),
+        "expired_losses": summary_values.get("expired_losses", 0.0),
         "annual_wealth_tax_rate": summary_values.get("annual_wealth_tax_rate", 0.0),
         "gross_terminal_wealth_median": summary_values.get(
             "gross_terminal_wealth_median", 0.0
@@ -1556,6 +1914,14 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "terminal_tax_drag_percent": summary_values.get(
             "terminal_tax_drag_percent", 0.0
         ),
+        "tax_drag_cagr": summary_values.get("tax_drag_cagr", 0.0),
+        "effective_tax_rate": summary_values.get("effective_tax_rate", 0.0),
+        "wrapper_terminal_p05": summary_values.get("wrapper_terminal_p05", 0.0),
+        "wrapper_terminal_median": summary_values.get("wrapper_terminal_median", 0.0),
+        "wrapper_terminal_p95": summary_values.get("wrapper_terminal_p95", 0.0),
+        "wrapper_advantage_median": summary_values.get("wrapper_advantage_median", 0.0),
+        "wrapper_advantage_percent": summary_values.get("wrapper_advantage_percent", 0.0),
+        "wrapper_annual_drag_bps": summary_values.get("wrapper_annual_drag_bps", 0.0),
     }
     path_analytics = _path_analytics(
         wealth,
@@ -1578,9 +1944,21 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     tax_selection = resolve_tax_selection(tax_country, tax_regime)
     if tax_selection.enabled:
         warnings.append(
-            "Italian taxes use a simplified administered-regime approximation; verify fund classification, "
-            "government-bond components, and personal circumstances with a qualified tax adviser."
+            "Italian taxes are a planning approximation; verify instrument metadata, withholding, tax regime, "
+            "and personal circumstances with a qualified tax adviser."
         )
+        warnings.append(
+            "Italian tax rules use the versioned IT-2026 planning snapshot; future simulation years "
+            "assume those rules remain unchanged."
+        )
+    path_count = max(int(result.regimes.shape[1]), 1)
+    tax_by_year = {
+        str(year): {
+            str(metric): float(value) / path_count
+            for metric, value in values.items()
+        }
+        for year, values in model.metadata.get("tax_by_year", {}).items()
+    }
 
     return {
         "ok": True,
@@ -1611,7 +1989,11 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "enabled": tax_selection.enabled,
             "available_countries": available_tax_countries(),
             "asset_categories": model.metadata.get("asset_tax_categories", {}),
+            "asset_metadata": model.metadata.get("asset_tax_metadata", {}),
             "annual_wealth_tax_rate": summary_values.get("annual_wealth_tax_rate", 0.0),
+            "wealth_tax_mode": model.metadata.get("italy_wealth_tax_mode", "auto"),
+            "tax_start_date": model.metadata.get("tax_start_date"),
+            "by_year": tax_by_year,
             "terminal_liquidation": bool(model.metadata.get("tax_terminal_liquidation", False)),
             "impact": {
                 "gross_terminal_median": summary_values.get(
@@ -1626,8 +2008,26 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
                 "terminal_drag_percent": summary_values.get(
                     "terminal_tax_drag_percent", 0.0
                 ),
+                "tax_drag_cagr": summary_values.get("tax_drag_cagr", 0.0),
+                "effective_tax_rate": summary_values.get("effective_tax_rate", 0.0),
+            },
+            "wrapper": {
+                "requested": bool(wealth.attrs.get("tax_wrapper_benchmark_requested", False)),
+                "available": bool(wealth.attrs.get("tax_wrapper_benchmark_available", False)),
+                "unavailable_reason": wealth.attrs.get("tax_wrapper_unavailable_reason"),
+                "terminal_p05": summary_values.get("wrapper_terminal_p05", 0.0),
+                "terminal_median": summary_values.get("wrapper_terminal_median", 0.0),
+                "terminal_p95": summary_values.get("wrapper_terminal_p95", 0.0),
+                "advantage_median": summary_values.get("wrapper_advantage_median", 0.0),
+                "advantage_percent": summary_values.get("wrapper_advantage_percent", 0.0),
+                "annual_drag_bps": summary_values.get("wrapper_annual_drag_bps", 0.0),
             },
         },
+        "retirement": _retirement_response(
+            wealth,
+            payload,
+            tax_by_year=tax_by_year if tax_selection.enabled else None,
+        ),
         "wealth": {
             "periods": list(range(1, len(wealth) + 1)),
             "p05": percentiles[0.05].tolist(),
@@ -1675,6 +2075,8 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         },
         "validation": _validation_response(scenario.walk_forward),
         "parameter_uncertainty": _parameter_uncertainty_response(scenario.parameter_uncertainty),
+        "uncertainty_decomposition": model.metadata.get("uncertainty_decomposition", {}),
+        "asset_profiles": model.metadata.get("asset_profiles", {}),
         "regime_probabilities": [
             {
                 "state": state,
@@ -1707,6 +2109,13 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "mean_prior_strength": float(model.metadata.get("mean_prior_strength", 0.0)),
             "parameter_draws": int(payload.get("parameter_draws", 0)),
             "joint_macro": bool(payload.get("joint_macro", False)),
+            "macro_model": model.metadata.get("macro_model", "ridge_var"),
+            "macro_instability_score": float(
+                model.metadata.get("macro_dynamics", {}).get("macro_instability_score", 0.0)
+            ),
+            "macro_parameter_uncertainty": bool(payload.get("macro_parameter_uncertainty", True)),
+            "structural_returns": bool(model.metadata.get("structural_returns", False)),
+            "state_dependent_liquidity": bool(model.metadata.get("state_dependent_liquidity", False)),
             "dynamic_correlation": bool(payload.get("dynamic_correlation", False)),
             "inflation_model": model.metadata.get("inflation_model", "deterministic"),
             "rate_model": model.metadata.get("rate_model", "deterministic"),
@@ -1726,6 +2135,230 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             f"Simulation complete: {len(wealth)} periods x {wealth.shape[1]} paths. "
             f"Distribution: {scenario.result.distribution}."
         ),
+    }
+
+
+def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Solve fixed and guardrail safe rates on one shared set of market paths."""
+
+    requested_paths = int(payload.get("paths", 3000))
+    periods = int(payload.get("periods", 120))
+    plan = normalize_decumulation(
+        payload.get("decumulation"),
+        periods=periods,
+        legacy_withdrawal=float(payload.get("withdrawal", 0.0)),
+        legacy_start_period=int(payload.get("withdrawal_start_period", 1)),
+        annual_inflation_fallback=float(payload.get("annual_inflation", 0.0)) / 100.0,
+    )
+    if not plan.enabled or not plan.phases:
+        raise ValueError("Safe-rate analysis requires decumulation with at least one recurring phase.")
+    if plan.mode != "safe_rate":
+        raise ValueError("Set decumulation.mode to safe_rate before calculating a safe rate.")
+
+    # Force one in-memory result so every rate and policy sees the exact same
+    # returns, regimes, macro paths, and parameter draw assignments.
+    solver_payload = dict(payload)
+    solver_payload["chunk_size"] = requested_paths
+    solver_payload["workers"] = 1
+    solver_payload["walk_forward"] = False
+    scenario, selected_tickers, _ = run_scenario_payload(solver_payload)
+    result = scenario.result
+    if result.returns.shape[:2] != (periods, requested_paths):
+        raise RuntimeError("Safe-rate solver requires retained market paths.")
+    kwargs = scenario_kwargs(solver_payload)
+    model = scenario.model
+
+    def macro_rate(column: str | None, percent_key: str) -> np.ndarray | None:
+        if result.macro_paths is None or not column or column not in result.macro_columns:
+            return None
+        values = result.macro_paths[:, :, result.macro_columns.index(column)].astype(float)
+        dynamics = model.metadata.get("macro_dynamics", {})
+        if bool(dynamics.get(percent_key, model.metadata.get(percent_key, False))):
+            values /= 100.0
+        return values
+
+    inflation_column = model.metadata.get("inflation_col")
+    inflation_paths = macro_rate(inflation_column, "inflation_is_percent")
+    if inflation_paths is not None:
+        inflation_paths = np.clip(inflation_paths, -0.10, 0.50)
+    cpi = withdrawal_inflation_index(
+        periods,
+        requested_paths,
+        annual_inflation=plan.annual_inflation_fallback,
+        inflation_paths=inflation_paths,
+    )
+    rate_paths = macro_rate(model.metadata.get("rate_col"), "rate_is_percent")
+    tax_selection = resolve_tax_selection(kwargs["tax_country"], kwargs["tax_regime"])
+    portfolio_kwargs = {
+        "weights": kwargs["weights"],
+        "initial_value": kwargs["initial_value"],
+        "return_kind": "log",
+        "rebalance_frequency": kwargs["rebalance_frequency"],
+        "transaction_cost_bps": kwargs["transaction_cost_bps"],
+        "state_transaction_cost_multipliers": kwargs["state_transaction_cost_multipliers"],
+        "asset_expense_ratios": kwargs["asset_expense_ratios"],
+        "leverage_multiple": kwargs["leverage_multiple"],
+        "financing_rate": kwargs["financing_rate"],
+        "financing_inflation_sensitivity": kwargs["financing_inflation_sensitivity"],
+        "state_inflation": model.metadata.get("state_inflation"),
+        "financing_rate_paths": rate_paths,
+        "financing_inflation_paths": inflation_paths,
+        "maintenance_margin": kwargs["maintenance_margin"],
+        "contribution": kwargs["contribution"],
+        "contribution_allocation": kwargs["contribution_allocation"],
+        "withdrawal": 0.0,
+        "withdrawal_start_period": 1,
+        "withdrawal_inflation_paths": inflation_paths,
+        "annual_inflation": kwargs["annual_inflation"],
+        "tax_country": tax_selection.country,
+        "tax_regime": tax_selection.regime,
+        "asset_tax_categories": kwargs["asset_tax_categories"],
+        "asset_tax_metadata": kwargs["asset_tax_metadata"],
+        "italy_annual_wealth_tax": kwargs["italy_annual_wealth_tax"],
+        "italy_wealth_tax_mode": kwargs["italy_wealth_tax_mode"],
+        "tax_terminal_liquidation": kwargs["tax_terminal_liquidation"],
+        "tax_start_date": kwargs["tax_start_date"],
+        "tax_wrapper_benchmark": False,
+        "native_threads": max(1, int(kwargs["workers"])),
+    }
+
+    policy_results: dict[str, dict[str, Any]] = {}
+    recommended_frames: dict[str, pd.DataFrame] = {}
+    warnings: list[str] = []
+    max_step = int(round(plan.safe_rate.maximum_rate / plan.safe_rate.precision))
+
+    for policy in ("fixed", "guyton_klinger"):
+        policy_plan = replace(
+            plan,
+            guardrails=replace(plan.guardrails, policy=policy),
+        )
+        evaluated: dict[int, dict[str, Any]] = {}
+
+        def evaluate(step: int, *, keep_frame: bool = False) -> dict[str, Any]:
+            step = max(0, min(max_step, int(step)))
+            if step in evaluated and (not keep_frame or step in recommended_frames):
+                return evaluated[step]
+            rate = step * plan.safe_rate.precision
+            frame = simulate_portfolio_paths(
+                result,
+                **portfolio_kwargs,
+                decumulation=policy_plan,
+                safe_withdrawal_rate=rate,
+            )
+            mask = success_mask(
+                frame.to_numpy(dtype=float),
+                np.asarray(frame.attrs["withdrawal_requested"], dtype=float),
+                np.asarray(frame.attrs["withdrawal_funded"], dtype=float),
+                objective=plan.safe_rate.objective,
+                initial_value=kwargs["initial_value"],
+                minimum_bequest=plan.safe_rate.minimum_bequest,
+                terminal_cpi=cpi[-1],
+            )
+            successes = int(mask.sum())
+            lower, upper = wilson_interval(successes, requested_paths)
+            row = {
+                "rate": rate,
+                "probability": successes / requested_paths,
+                "wilson_low": lower,
+                "wilson_high": upper,
+                "successes": successes,
+            }
+            evaluated[step] = row
+            if keep_frame:
+                recommended_frames[policy] = frame
+            return row
+
+        low = 0
+        high = max_step
+        low_result = evaluate(low)
+        high_result = evaluate(high)
+        capped = high_result["probability"] >= plan.safe_rate.target_probability
+        baseline_failure = low_result["probability"] < plan.safe_rate.target_probability
+        if capped:
+            recommended_step = high
+            warnings.append(
+                f"{policy}: the 25% search ceiling still satisfies the target; the safe rate is at least 25%."
+            )
+        elif baseline_failure:
+            recommended_step = 0
+            warnings.append(
+                f"{policy}: one-time expenses or the terminal objective miss the target even at a 0% recurring rate."
+            )
+        else:
+            while high - low > 1:
+                middle = (low + high) // 2
+                result_at_middle = evaluate(middle)
+                if result_at_middle["probability"] >= plan.safe_rate.target_probability:
+                    low = middle
+                else:
+                    high = middle
+            recommended_step = low
+        recommended = evaluate(recommended_step, keep_frame=True)
+        policy_results[policy] = {
+            "recommended_rate": recommended["rate"],
+            "display_rate": (
+                f"≥{plan.safe_rate.maximum_rate:.0%}" if capped else f"{recommended['rate']:.2%}"
+            ),
+            "at_search_ceiling": capped,
+            "baseline_below_target": baseline_failure,
+            "probability": recommended["probability"],
+            "wilson_95": [recommended["wilson_low"], recommended["wilson_high"]],
+            "curve": [evaluated[key] for key in sorted(evaluated)],
+        }
+
+    selected_policy = plan.policy
+    selected_frame = recommended_frames[selected_policy]
+    reporting_frame = pd.DataFrame(
+        selected_frame.to_numpy(dtype=float) / np.maximum(cpi, 1e-300),
+        columns=selected_frame.columns,
+    )
+    reporting_frame.attrs.update(selected_frame.attrs)
+    alternate_policy = "guyton_klinger" if selected_policy == "fixed" else "fixed"
+    alternate_frame = recommended_frames[alternate_policy]
+    reporting_frame.attrs.update(
+        {
+            "paired_policy": alternate_policy,
+            "paired_wealth": alternate_frame.to_numpy(dtype=float)
+            / np.maximum(cpi, 1e-300),
+            "paired_withdrawal_requested": np.asarray(
+                alternate_frame.attrs["withdrawal_requested"], dtype=float
+            ),
+            "paired_withdrawal_funded": np.asarray(
+                alternate_frame.attrs["withdrawal_funded"], dtype=float
+            ),
+            "paired_guardrail_events": np.asarray(
+                alternate_frame.attrs["guardrail_events"], dtype=np.int8
+            ),
+        }
+    )
+    average_tax_by_year = {
+        str(year): {
+            str(name): float(value) / requested_paths for name, value in metrics.items()
+        }
+        for year, metrics in selected_frame.attrs.get("tax_by_year", {}).items()
+    }
+    retirement = _retirement_response(
+        reporting_frame,
+        solver_payload,
+        tax_by_year=average_tax_by_year,
+    )
+    retirement["safe_rate"] = {
+        "selected_policy": selected_policy,
+        "objective": plan.safe_rate.objective,
+        "target_probability": plan.safe_rate.target_probability,
+        "minimum_bequest": plan.safe_rate.minimum_bequest,
+        "precision": plan.safe_rate.precision,
+        "policies": policy_results,
+    }
+    return {
+        "ok": True,
+        "retirement": retirement,
+        "warnings": warnings,
+        "paths": requested_paths,
+        "periods": periods,
+        "selected_tickers": selected_tickers,
+        "same_market_paths": True,
+        "message": "Safe-rate analysis complete on paired fixed and guardrail policies.",
     }
 
 

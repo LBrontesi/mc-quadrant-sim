@@ -6,7 +6,7 @@ RUN apt-get update \
 
 WORKDIR /build
 COPY src/mc_quadrants/native_simulation.cpp ./native_simulation.cpp
-RUN g++ -O3 -std=c++17 -fPIC -shared native_simulation.cpp -o _native_sim.so
+RUN g++ -O3 -std=c++17 -pthread -fPIC -shared native_simulation.cpp -o _native_sim.so
 
 FROM python:3.12-slim
 

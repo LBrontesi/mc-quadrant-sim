@@ -32,12 +32,45 @@ def main() -> None:
             page.on("console", lambda message: browser_errors.append(message.text) if message.type == "error" else None)
             page.goto(f"{base_url}/?skipAutoLoad=1", wait_until="networkidle")
             page.locator("#connection.badge-ok").wait_for()
+            # Legacy local settings are migrated into a recurring real-spending phase.
+            page.evaluate(
+                """localStorage.setItem('mcq-controls', JSON.stringify({
+                    schemaVersion: 13,
+                    withdrawal: '5',
+                    'withdrawal-start-period': '10',
+                    periods: '12',
+                    paths: '1000',
+                    decumulationEnabled: true
+                }))"""
+            )
+            page.reload(wait_until="networkidle")
+            page.locator("#connection.badge-ok").wait_for()
             page.locator("#custom-data-toggle > summary").click()
             page.locator("#csv-prices").set_input_files(str(prices_path))
             page.locator("#csv-macro").set_input_files(str(macro_path))
             page.locator("#simulation-settings > summary").click()
-            page.locator("#paths").fill("1000")
-            page.locator("#periods").fill("12")
+            decumulation = page.locator("#decumulation-enabled")
+            phase = page.locator(".phase-row").first
+            assert decumulation.is_checked()
+            assert phase.locator('[data-field="start_month"]').input_value() == "10"
+            assert phase.locator('[data-field="end_month"]').input_value() == "12"
+            assert phase.locator('[data-field="annual_real_amount"]').input_value() == "60"
+            assert phase.locator('[data-field="annual_real_amount"]').is_enabled()
+            page.locator("#decumulation-mode").select_option("safe_rate")
+            assert page.locator("#safe-rate-btn").is_visible()
+            assert phase.locator('[data-field="spending_multiplier"]').is_visible()
+            page.locator("#decumulation-mode").select_option("manual")
+            phase = page.locator(".phase-row").first
+            assert phase.locator('[data-field="annual_real_amount"]').input_value() == "60"
+            page.locator("#add-decumulation-event").click()
+            assert page.locator(".event-row").count() == 1
+            page.locator(".event-row .planner-remove").click()
+            assert page.locator(".event-row").count() == 0
+            page.locator("label.decumulation-toggle").click()
+            assert not decumulation.is_checked()
+            assert phase.locator('[data-field="annual_real_amount"]').is_disabled()
+            page.locator("label.decumulation-toggle").click()
+            assert decumulation.is_checked()
             page.locator("#target-wealth").fill("150")
             page.locator("#run-btn").click()
             page.locator("#growth-content").wait_for(state="visible", timeout=120_000)
@@ -50,6 +83,11 @@ def main() -> None:
             assert page.locator("#chart-drawdown-fan svg").is_visible()
             assert page.locator("#chart-drawdown-episodes svg").is_visible()
             assert page.locator("#chart-recovery-required svg").is_visible()
+            page.locator('[data-tab="tab-retirement"]').click()
+            assert page.locator("#retirement-content").is_visible()
+            assert page.locator("#retirement-metrics").get_by_text("Funded-spending ratio", exact=True).is_visible()
+            assert page.locator("#chart-retirement-survival svg").is_visible()
+            assert page.locator("#retirement-comparison table").is_visible()
             assert not browser_errors, f"Browser console errors: {browser_errors}"
 
             page.set_viewport_size({"width": 390, "height": 844})

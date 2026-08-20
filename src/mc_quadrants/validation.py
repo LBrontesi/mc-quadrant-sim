@@ -342,6 +342,49 @@ def walk_forward_validation(
         predicted_var = float(np.quantile(portfolio_draws, 0.05))
         predicted_es = float(portfolio_draws[portfolio_draws <= predicted_var].mean())
         actual_portfolio_return = float(next_observation @ portfolio_weights)
+        state_portfolio_means = np.array(
+            [float(model.moments[state].mean.to_numpy(dtype=float) @ portfolio_weights) for state in model.states]
+        )
+        state_portfolio_variances = np.array(
+            [
+                float(
+                    portfolio_weights
+                    @ model.moments[state].covariance.to_numpy(dtype=float)
+                    @ portfolio_weights
+                )
+                for state in model.states
+            ]
+        )
+        predicted_portfolio_mean = float(state_probabilities @ state_portfolio_means)
+        predicted_portfolio_variance = float(
+            state_probabilities
+            @ (state_portfolio_variances + np.square(state_portfolio_means - predicted_portfolio_mean))
+        )
+        benchmark_portfolio_mean = float(unconditional_mean @ portfolio_weights)
+        benchmark_portfolio_variance = float(
+            portfolio_weights @ unconditional_covariance @ portfolio_weights
+        )
+        risk_aversion = 3.0
+        certainty_equivalent_advantage = (
+            predicted_portfolio_mean - 0.5 * risk_aversion * predicted_portfolio_variance
+            - benchmark_portfolio_mean
+            + 0.5 * risk_aversion * benchmark_portfolio_variance
+        )
+        horizon_scores: dict[str, float] = {}
+        transition_values = model.transition_matrix.loc[model.states, model.states].to_numpy(dtype=float)
+        for horizon in (3, 12, 60):
+            if split + horizon > n:
+                horizon_scores[f"forecast_error_{horizon}m"] = np.nan
+                horizon_scores[f"benchmark_error_{horizon}m"] = np.nan
+                continue
+            probability = state_probabilities.copy()
+            forecast = 0.0
+            for _ in range(horizon):
+                forecast += float(probability @ state_portfolio_means)
+                probability = probability @ transition_values
+            actual = float((observations[split:split + horizon] @ portfolio_weights).sum())
+            horizon_scores[f"forecast_error_{horizon}m"] = forecast - actual
+            horizon_scores[f"benchmark_error_{horizon}m"] = horizon * benchmark_portfolio_mean - actual
         expected_duration_map = model.metadata.get("expected_duration_months", {})
         expected_duration = float(expected_duration_map.get(current_state, np.nan))
         vintage_expected_duration = float(
@@ -394,6 +437,8 @@ def walk_forward_validation(
                 "predicted_es_95": predicted_es,
                 "portfolio_return": actual_portfolio_return,
                 "var_breach": int(actual_portfolio_return < predicted_var),
+                "certainty_equivalent_advantage": certainty_equivalent_advantage,
+                **horizon_scores,
                 "predicted_state": predicted_state,
                 "actual_state": actual_state,
             }
@@ -452,6 +497,19 @@ def walk_forward_validation(
             ),
         }
     )
+    summary["certainty_equivalent_advantage_annualized"] = float(
+        splits["certainty_equivalent_advantage"].mean() * 12.0
+    )
+    for horizon in (3, 12, 60):
+        model_error = splits[f"forecast_error_{horizon}m"].dropna()
+        benchmark_error = splits[f"benchmark_error_{horizon}m"].dropna()
+        summary[f"forecast_mae_{horizon}m"] = float(model_error.abs().mean())
+        summary[f"benchmark_mae_{horizon}m"] = float(benchmark_error.abs().mean())
+        summary[f"forecast_mae_improvement_{horizon}m"] = (
+            float(benchmark_error.abs().mean() - model_error.abs().mean())
+            if len(model_error) and len(benchmark_error)
+            else float("nan")
+        )
     warnings: list[str] = []
     if summary["advantage_mean"] <= 0:
         warnings.append(

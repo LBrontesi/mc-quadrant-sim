@@ -258,13 +258,17 @@ controls persistence, and `dcc_asymmetry` increases the response to joint
 negative shocks. ADCC works with Normal or Student-t returns and re-anchors to
 the relevant regime correlation after a state change.
 
-**Joint macro-financial paths** fit a regularized VAR(1) to growth, inflation,
-and the effective federal funds rate when it is available, together with
-regime-conditioned innovation covariances and a ridge return-factor link.
+**Joint macro-financial paths** default to a shrinkage Bayesian VAR(1) ensemble
+that blends full-history and rolling-window coefficients for growth, inflation,
+and the effective federal funds rate when available. Stability constraints,
+posterior coefficient draws, an instability score, and regime-conditioned
+innovation covariances propagate macro-parameter uncertainty into scenarios.
 Simulated macro values influence time-varying transition probabilities, while
 the same macro innovations—including short-rate changes—affect asset returns.
 Only growth and inflation define quadrant membership; the rate is an additional
-state variable. Inflation creates a different purchasing-power deflator for
+state variable. Optional structural asset profiles place weak economically
+signed priors on return links: bond duration anchors rate sensitivity, while
+growth and inflation exposures depend on the asset class. Inflation creates a different purchasing-power deflator for
 every path, and the simulated short rate supplies the path-specific risk-free
 benchmark and leveraged financing base. This compact model improves internal
 consistency but is not a structural macroeconomic forecast, a Taylor-rule
@@ -279,7 +283,9 @@ versus predicted switches per decade, completed-duration log scores and errors,
 stability of expected durations across rolling calibration vintages,
 actual-state probabilities, portfolio probability-integral-transform
 diagnostics, 95% VaR breach frequency and clustering, and a Newey-West/HAC
-log-score comparison. The UI shows expected months in every state and expected
+log-score comparison. Multi-horizon 3/12/60-month errors and a mean-variance
+certainty-equivalent advantage test whether complexity adds decision value.
+The UI shows expected months in every state and expected
 switches per decade, and warns when the implied persistence is unusually low.
 Weak or miscalibrated results are surfaced as warnings rather than hidden.
 
@@ -296,19 +302,70 @@ cost = transaction_cost_bps / 10,000 * sum(abs(target_holdings - current_holding
 
 The dashboard defaults to monthly rebalancing with a 10 basis-point cost; the
 core API retains the legacy mode unless a rebalancing frequency is supplied.
+An optional liquidity stress model multiplies the base cost by the simulated
+regime (0.75x Goldilocks, 1.25x overheating, 2.0x stagflation, and 1.5x
+recession by default), so adverse-state rebalancing is more expensive.
 
 Periodic cash flows are supported in both accounting modes. A **contribution**
-is invested at the target allocation at the start of every period, which is
-dollar-cost averaging: new money buys the same diversified weights regardless
-of recent performance. A **withdrawal** is funded at the end of every period by
-selling a pro-rata slice of current holdings, so funding never concentrates in
-one asset class between rebalances. In legacy mode the same schedule is applied
-to the blended portfolio return. Wealth paths are floored at zero, so a
-withdrawal larger than the remaining balance simply exhausts the portfolio.
-Cash-flow scenarios suit retirement-style analysis: accumulation phases use a
-positive contribution, drawdown phases a positive withdrawal, and the
-difference between terminal wealth and total contributed shows how much of the
-outcome came from returns rather than savings.
+is invested at the target allocation at the start of every period. Retirement
+spending is requested at the end of the month and may contain non-overlapping
+recurring phases plus one-time expenses. Each amount is real purchasing power
+net of tax: the simulated inflation path converts it to nominal cash and the
+Italian ledger sells enough holdings to fund both the requested net spending
+and disposal tax. If the portfolio is exhausted, the funded amount records only
+the cash that actually reaches the investor after immediate tax.
+
+The `decumulation` API object supports `manual` and `safe_rate` modes, monthly,
+quarterly, or annual phase frequency, and `fixed` or `guyton_klinger` policy.
+Guyton–Klinger reviews each phase annually, cuts spending by 10% above the 120%
+withdrawal-rate guardrail, raises it by 10% below 80%, and defaults to real
+70%/130% floor and ceiling. Inflation indexing is skipped after a negative real
+return year, and each new phase resets the reference rate and bounds. One-time
+expenses do not affect guardrails.
+
+```json
+{
+  "decumulation": {
+    "enabled": true,
+    "mode": "manual",
+    "phases": [
+      {"start_month": 37, "end_month": 180, "frequency": "monthly", "annual_real_amount": 24000},
+      {"start_month": 181, "end_month": 360, "frequency": "monthly", "annual_real_amount": 18000}
+    ],
+    "one_time_expenses": [{"month": 60, "real_amount": 15000}],
+    "policy": {
+      "type": "guyton_klinger",
+      "upper_guardrail": 1.20,
+      "lower_guardrail": 0.80,
+      "adjustment": 0.10,
+      "floor": 0.70,
+      "ceiling": 1.30,
+      "skip_inflation_after_negative_real_return": true
+    },
+    "safe_rate": {
+      "objective": "survival",
+      "target_probability": 0.90,
+      "minimum_bequest": 0
+    },
+    "annual_inflation_fallback": 0.02
+  }
+}
+```
+
+Legacy `withdrawal` and `withdrawal_start_period` remain supported and are
+normalized to one monthly nominal phase, preserving prior results. Existing
+browser settings, saved scenarios, and share links are migrated automatically
+to the real-spending phase format. Wealth is floored at zero; contributions and
+decumulation may coexist.
+
+`POST /api/safe-rate` calibrates and simulates the market paths once, then
+replays both fixed and guardrail policies on those identical paths. It searches
+0–25% at 0.05 percentage-point precision for survival, preservation of initial
+real capital, or a minimum real bequest. The response includes point success,
+a Wilson 95% Monte Carlo interval, the evaluated safe-rate curve, and an
+explicit `≥25%` warning if the upper bound still meets the target. A path counts
+as successful only when every expense is fully funded. Normal `POST
+/api/simulate` does not run this solver.
 
 ETF expense ratios are supplied per asset as annual percentage points, for
 example `SPY:0.03, IEF:0.15`. They are applied as a forward monthly fee drag
@@ -348,24 +405,39 @@ calibration. The request contract uses `tax_country` and `tax_regime`; legacy
 requests that send only `tax_regime=italy_administered` remain compatible.
 Italy is the only registered country for now.
 
-Selecting **Italy — simplified administered regime** applies an after-tax
-planning approximation. Market returns and regime calibration are unchanged.
-The account tracks average cost
+Selecting Italy enables **administered**, **declarative**, or **managed** tax
+timing. Market returns and regime calibration are unchanged. The administered
+account settles tax on disposals, the declarative account accrues disposal tax
+to the tax-year boundary, and the managed account taxes the annual portfolio
+result. The account tracks average cost
 per asset, realizes gains and losses on withdrawals and rebalancing sales,
 funds the requested withdrawal plus its disposal tax, and can tax all remaining
 unrealized gains through a final liquidation. Unused eligible losses are kept
-for the current tax year and the next four tax years, oldest first. Because a
-scenario has no calendar start date, each consecutive 12-month block is treated
-as a tax year. Modeled purchase and sale transaction costs adjust tax basis and
-disposal proceeds.
+for the current tax year and the next four tax years, oldest first. A simulation
+start date controls real calendar boundaries and produces taxes-by-year output.
+Modeled purchase and sale costs and optional Italian financial-transaction tax
+adjust tax basis and disposal proceeds.
 
-The default `STANDARD` category applies 26%. `GOVERNMENT_BOND` applies the
-12.5%-equivalent taxable fraction. `FUND` models positive proceeds as
+The default `FUND` category applies 26%. `GOVERNMENT_BOND` applies the
+12.5%-equivalent taxable fraction. Funds can specify the actual eligible
+government-security share instead of an all-or-nothing category. `FUND` models positive proceeds as
 non-offsettable fund income while negative results enter the eligible loss
 ledger. `GOVERNMENT_BOND_FUND` applies both approximations. Categories are
 entered as `ASSET:CATEGORY`, for example
-`SPY:FUND, BTP:GOVERNMENT_BOND`; unspecified assets default to `STANDARD`.
-The annual stamp-duty/IVAFE proxy defaults to 0.20% and is applied monthly.
+`SPY:FUND, BTP:GOVERNMENT_BOND`; unspecified assets default to `FUND`.
+The current UI assumes accumulating ETFs / total-return series and therefore
+does not expose dividend or coupon fields. The backward-compatible API can
+still accept income and withholding metadata. Per-asset UI metadata covers
+category, eligible government-security share, account location, and an
+advanced financial-transaction-tax rate. The 0.20% levy applies as stamp duty to domestic accounts or
+IVAFE to foreign accounts in automatic mode, avoiding double taxation.
+Financial-transaction tax is deliberately instrument-specific rather than a
+portfolio default: from 1 January 2026 the statutory share-transfer rate is
+0.40%, normally reduced by half on regulated markets, while exemptions and the
+separate derivatives schedule prevent a safe ticker-only inference. The UI
+therefore asks for the applicable rate and otherwise assumes zero. The 2026
+change is set by
+[Law 199/2025, Article 1(29-31)](https://www.normattiva.it/atto/caricaDettaglioAtto?atto.codiceRedazionale=25G00212&atto.dataPubblicazioneGazzetta=2025-12-30&tipoDettaglio=originario).
 
 These defaults follow the current statutory 26% rate in
 [Decree-Law 66/2014, Article 3](https://www.normattiva.it/uri-res/N2Ls?urn%3Anir%3Astato%3Adecreto.legge%3A2014-04-24%3B66~art3=),
@@ -378,16 +450,14 @@ and the two-per-thousand financial-product levy in
 The acquisition-cost basis is consistent with the current
 [Agenzia delle Entrate capital-gains instructions](https://infoprecompilata.agenziaentrate.gov.it/portale/semplificata-mod-plusvalenze-natura-finanziaria).
 
-This is intentionally not a tax-return engine. It does not distinguish every
-ETF domicile, UCITS status, government-bond percentage, intermediary regime,
-dividend/coupon component, account-level exemption, or individual taxpayer
-circumstance. Historical adjusted returns combine price and distributions, so
-the simulator does not separately tax dividends or coupons. The 0.20% input is
-one configurable account-level proxy—not a claim that stamp duty and IVAFE are
-both due. Leverage is disabled with Italian tax accounting, and the legacy
-weighted-return mode is unavailable because neither exposes asset-level
-disposals or cost basis. Verify classifications and current rules with a
-qualified Italian tax adviser.
+This is intentionally not a tax-return engine. Declarative lot identification remains an average-cost
+planning proxy; treaty eligibility, foreign-tax-credit limits, exemptions,
+cash-account rules, and taxpayer-specific facts require professional review.
+Leverage is disabled with Italian tax accounting, and the legacy weighted-return
+mode is unavailable because neither exposes asset-level disposals or cost basis.
+Rules are versioned as the `IT-2026` planning snapshot; simulated future years
+hold that snapshot constant and the API displays an explicit warning.
+Verify metadata and current rules with a qualified Italian tax adviser.
 
 ### 7. Reported Risk Metrics
 
@@ -437,7 +507,7 @@ average or percentile.
 ### 8. Important Assumptions
 
 - Latest-revised FRED mode still contains revision look-ahead; select ALFRED initial releases for point-in-time analysis.
-- The joint macro VAR is statistical rather than structural and does not model the complete yield curve or monetary-policy reaction function.
+- The Bayesian macro ensemble and structural priors remain statistical and do not model the complete yield curve or monetary-policy reaction function.
 - Parameter bootstrap quantifies historical estimation instability, not every possible future structural break.
 - Parametric tail and ADCC specifications remain model assumptions; empirical bootstrap remains a useful benchmark.
 - Transaction costs are charged only at modeled rebalancing events.
@@ -472,15 +542,16 @@ in practice:
 
 **Long-term analysis features**
 
-- Set **Contribution / period** to model dollar-cost averaging into the
-  portfolio, and **Withdrawal / period** to model retirement-style drawdowns.
-  Cash flows are invested at (or funded pro-rata from) the target allocation
-  every period and cannot drive wealth below zero.
+- Set **Contribution / period** to model dollar-cost averaging, then enable
+  **Decumulation** to schedule retirement phases and one-time expenses. Cash
+  flows are invested at (or funded pro-rata from) the target allocation and
+  cannot drive wealth below zero. Use **Calculate safe rate** only when the
+  solver is needed; ordinary manual analysis remains a single simulation.
 - Set **Inflation assumption** above zero to report inflation-adjusted
   (purchasing power) wealth, VaR, drawdowns, and annualized metrics.
 - Set **Fallback risk-free rate** for scenarios without joint stochastic rate
   paths. Joint macro scenarios use their simulated short rate automatically.
-- The **Portfolio preset** picker applies PortfolioCharts-style allocations
+- The **Portfolio preset** picker applies established model allocations
   (60/40, Three-Fund, Permanent Portfolio, Golden Butterfly, All Seasons,
   Core Four, Risk Parity) mapped onto the loaded tickers. Approximations are
   labeled; for example IEF stands in for long-term treasuries and SHY for
@@ -510,6 +581,21 @@ With `uv`, the checked-in lockfile provides a reproducible environment:
 ```bash
 uv sync --extra dev --extra data
 ```
+
+Build the optional C++17 backend on macOS (including Apple Silicon) or Linux:
+
+```bash
+./scripts/build_native.sh
+```
+
+The native backend uses `std::thread`; the scenario `workers` setting controls
+that thread pool. For Normal and Student-t scenarios a fused kernel generates
+one path at a time and immediately updates gross, DIY, and optional wrapper
+ledgers, so no full asset-return cube is retained. Bootstrap returns continue
+to use the Python generator and are then passed to the same C++ ledger. If the shared
+library is missing or its ABI version does not match, execution automatically
+falls back to the Python reference implementation. Set
+`MC_DISABLE_NATIVE_SIM=1` to force that reference path for verification.
 
 Then you can adapt:
 
@@ -601,14 +687,21 @@ and optionally map assets with values such as `EFA:EUR`; Yahoo FX pairs are
 loaded automatically. The correlation overrides section blends per-regime
 targets for the first two selected tickers. Portfolio presets (60/40,
 Three-Fund, Permanent, Golden Butterfly, All Seasons, Core Four, Risk Parity)
-apply PortfolioCharts-style allocations to the loaded tickers, and the
+apply established model allocations to the loaded tickers, and the
 inflation/risk-free inputs report real terms and a proper Sharpe ratio.
-Periodic contributions and withdrawals model dollar-cost averaging and
-retirement drawdowns. The web UI uses an editorial research-studio layout:
+Periodic contributions and advanced decumulation model accumulation and
+retirement in one horizon. The decumulation switch opens a phase/event editor,
+safe-rate criterion, target probability, and guardrail controls; all dates are
+bounded by the active simulation horizon.
+The web UI uses an editorial research-studio layout:
 an interactive four-regime hero, warm light and charcoal dark themes, scroll
 progress, section reveals, responsive motion, and a compact allocation editor.
 Tabbed result views cover Growth, Returns, Drawdowns, Correlations, Monthly
-returns, paired research, and distribution comparison. Results include metric cards,
+returns, Retirement, paired research, and distribution comparison. The
+Retirement tab reports the safe-rate curve, spending-survival curve, funded and
+cumulative real-spending fans, cuts/increases, exhaustion, terminal capital,
+paired fixed-versus-guardrail outcomes, and—when Italy is selected—annual tax,
+gross-sale, and net-spending totals. Results also include metric cards,
 wealth percentile curves, terminal wealth histograms, regime mix, transition
 and correlation heatmaps, a monthly-return calendar, macro scatter,
 calibration diagnostics, scenario comparison, and bounded CSV path samples.
@@ -711,7 +804,17 @@ wealth = simulate_portfolio_paths(
     rebalance_frequency=1,
     transaction_cost_bps=10,
     contribution=100.0,
-    withdrawal=0.0,
+    decumulation={
+        "enabled": True,
+        "mode": "manual",
+        "phases": [{
+            "start_month": 37,
+            "end_month": 120,
+            "frequency": "monthly",
+            "annual_real_amount": 480.0,
+        }],
+        "policy": "guyton_klinger",
+    },
     initial_value=100.0,
 )
 print(summarize_terminal_wealth(wealth))

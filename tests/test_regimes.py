@@ -12,6 +12,7 @@ from mc_quadrants.regimes import (
     estimate_transition_matrix,
     expected_duration_from_hazards,
     quadrant_probabilities,
+    smooth_macro_for_regimes,
     sojourn_durations,
 )
 
@@ -36,6 +37,15 @@ def test_persistent_classifier_smooths_one_month_macro_noise():
 
     assert regimes.nunique() == 1
     assert regimes.iloc[-1] == Regime.HIGH_GROWTH_LOW_INFLATION.value
+
+
+def test_macro_smoothing_promotes_integer_csv_columns_to_float():
+    macro = pd.DataFrame({"growth": [2, 1, -1], "inflation": [1, 4, 4]})
+
+    smoothed = smooth_macro_for_regimes(macro, smoothing_window=2)
+
+    assert smoothed["growth"].dtype.kind == "f"
+    assert smoothed["growth"].tolist() == pytest.approx([2.0, 1.5, 0.0])
 
 
 def test_persistent_classifier_confirms_a_transition_before_switching():

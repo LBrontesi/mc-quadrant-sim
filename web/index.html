@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Four-Quadrant Monte Carlo Simulator</title>
-  <link rel="stylesheet" href="style.css?v=20260818">
+  <link rel="stylesheet" href="style.css?v=20260820">
 </head>
 <body class="light">
   <div class="scroll-progress" aria-hidden="true"><span id="scroll-progress-bar"></span></div>
@@ -360,6 +360,33 @@
               </label>
             </div>
             <label class="check-inline"><input type="checkbox" id="joint-macro" checked> Joint growth, inflation, short-rate, regime and return paths</label>
+            <div class="two-col">
+              <label>Macro dynamics
+                <select id="macro-model">
+                  <option value="bvar_ensemble" selected>Bayesian VAR + rolling ensemble</option>
+                  <option value="bvar">Bayesian VAR</option>
+                  <option value="ridge_var">Legacy ridge VAR</option>
+                </select>
+                <span class="hint">Shrinkage and a rolling-window blend reduce sensitivity to structural breaks.</span>
+              </label>
+              <label class="check-inline"><input type="checkbox" id="macro-parameter-uncertainty" checked> Draw uncertain macro coefficients</label>
+            </div>
+            <label class="check-inline"><input type="checkbox" id="structural-returns" checked> Structural asset-return links</label>
+            <details class="nested-settings">
+              <summary>Asset structure overrides</summary>
+              <label>Classes (ASSET:CLASS)
+                <input type="text" id="asset-classes" placeholder="SPY:EQUITY, IEF:GOVERNMENT_BOND, GLD:GOLD">
+              </label>
+              <div class="two-col">
+                <label>Durations in years
+                  <input type="text" id="asset-durations" placeholder="IEF:7.3, TLT:16">
+                </label>
+                <label>Annual cash yields (%)
+                  <input type="text" id="asset-income-yields" placeholder="SPY:1.3, IEF:3.8">
+                </label>
+              </div>
+              <span class="hint">Unspecified assets are classified conservatively. Bond duration anchors the response to rate changes; cash yield separates taxable distributions from price return.</span>
+            </details>
             <label>Macro influence on transitions
               <input type="range" id="macro-transition-weight" min="0" max="1" step="0.05" value="0.35">
               <output id="macro-transition-weight-output">0.35</output>
@@ -386,8 +413,8 @@
             <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12">
               <span class="hint">The default models a ten-year investment horizon.</span>
             </label>
-            <label>Paths <input type="number" id="paths" value="100000" min="1000" max="120000" step="1000">
-              <span class="hint">Adaptive chunking scales with the horizon and selected assets.</span>
+            <label>Paths <input type="number" id="paths" value="100000" min="1000" max="500000" step="1000">
+              <span class="hint">Up to 500,000 paths; adaptive chunking scales with the horizon and selected assets.</span>
             </label>
             <label>Parallel workers <input type="number" id="workers" value="" placeholder="Auto" min="1" max="16" step="1">
               <span class="hint">Auto uses up to four available cores for large chunked simulations.</span>
@@ -425,6 +452,7 @@
             </label>
             <label id="cost-bps-group">Cost (bps) <input type="number" id="cost-bps" value="10" min="0" max="100" step="1"></label>
           </div>
+          <label class="check-inline"><input type="checkbox" id="state-dependent-liquidity" checked> Increase trading costs in stressed regimes</label>
           <div class="two-col">
             <label>Leverage multiple
               <input type="number" id="leverage-multiple" value="1" min="1" max="5" step="0.1">
@@ -468,12 +496,92 @@
           <div class="two-col">
             <label>Contribution / period
               <input type="number" id="contribution" value="0" min="0" step="10">
-              <span class="hint">Currency units invested at the target allocation each period (DCA).</span>
+              <span class="hint">Currency units invested at the start of each period.</span>
             </label>
-            <label>Withdrawal / period
-              <input type="number" id="withdrawal" value="0" min="0" step="10">
-              <span class="hint">Currency units funded pro-rata from holdings each period.</span>
+            <label>Contribution allocation
+              <select id="contribution-allocation">
+                <option value="target" selected>Target weights (current behavior)</option>
+                <option value="underweight_first">Underweight assets first (tax-efficient)</option>
+              </select>
+              <span class="hint">Underweight-first uses fresh cash to reduce drift before any taxable sale.</span>
             </label>
+          </div>
+          <label class="feature-toggle decumulation-toggle">
+            <span class="feature-toggle-copy">
+              <strong>Enable decumulation</strong>
+              <small>Schedule periodic withdrawals without changing the accumulation settings.</small>
+            </span>
+            <span class="switch-control">
+              <input type="checkbox" id="decumulation-enabled">
+              <span aria-hidden="true"></span>
+            </span>
+          </label>
+          <input type="hidden" id="withdrawal" value="0">
+          <input type="hidden" id="withdrawal-start-period" value="1">
+          <div id="decumulation-fields" class="decumulation-planner" aria-disabled="true">
+            <div class="three-col">
+              <label>Planning mode
+                <select id="decumulation-mode">
+                  <option value="manual" selected>Manual real spending</option>
+                  <option value="safe_rate">Calculate safe rate</option>
+                </select>
+                <span class="hint">Manual runs immediately. Safe rate runs only when requested.</span>
+              </label>
+              <label>Spending policy
+                <select id="decumulation-policy">
+                  <option value="fixed" selected>Fixed real spending</option>
+                  <option value="guyton_klinger">Guyton–Klinger guardrails</option>
+                </select>
+              </label>
+              <label>Success criterion
+                <select id="decumulation-objective">
+                  <option value="survival" selected>Fund all spending</option>
+                  <option value="preserve_initial">Preserve initial real capital</option>
+                  <option value="minimum_bequest">Minimum real bequest</option>
+                </select>
+              </label>
+            </div>
+            <div class="three-col">
+              <label>Target probability (%)
+                <input type="number" id="decumulation-target" value="90" min="1" max="99.9" step="0.5">
+              </label>
+              <label id="bequest-field" class="hidden">Minimum real bequest
+                <input type="number" id="decumulation-bequest" value="0" min="0" step="1000">
+              </label>
+              <label>Fallback inflation (%)
+                <input type="number" id="decumulation-inflation" value="2" min="-10" max="30" step="0.1">
+                <span class="hint">Used only when no simulated inflation path is available.</span>
+              </label>
+            </div>
+            <details class="planner-editor" open>
+              <summary><span>Recurring spending phases</span><small>Real, after-tax purchasing power</small></summary>
+              <div id="decumulation-phase-list" class="planner-list"></div>
+              <button id="add-decumulation-phase" class="btn btn-ghost btn-sm" type="button">+ Add phase</button>
+            </details>
+            <details class="planner-editor">
+              <summary><span>One-time expenses</span><small>Optional, summed when dates coincide</small></summary>
+              <div id="decumulation-event-list" class="planner-list"></div>
+              <button id="add-decumulation-event" class="btn btn-ghost btn-sm" type="button">+ Add expense</button>
+            </details>
+            <details id="guardrail-settings" class="planner-editor hidden">
+              <summary><span>Guardrail settings</span><small>Annual review from each phase start</small></summary>
+              <div class="three-col">
+                <label>Upper / lower trigger (%)
+                  <span class="inline-inputs"><input type="number" id="guardrail-upper" value="120" min="100" max="300" step="1"><input type="number" id="guardrail-lower" value="80" min="1" max="100" step="1"></span>
+                </label>
+                <label>Cut / raise size (%)
+                  <input type="number" id="guardrail-adjustment" value="10" min="0.1" max="50" step="0.5">
+                </label>
+                <label>Real floor / ceiling (%)
+                  <span class="inline-inputs"><input type="number" id="guardrail-floor" value="70" min="0" max="100" step="1"><input type="number" id="guardrail-ceiling" value="130" min="100" max="300" step="1"></span>
+                </label>
+              </div>
+              <label class="check-inline"><input type="checkbox" id="guardrail-skip-inflation" checked> Skip inflation increase after a negative real-return year</label>
+            </details>
+            <div class="planner-actions">
+              <span class="hint" id="withdrawal-start-hint">Turn on decumulation to configure spending.</span>
+              <button id="safe-rate-btn" class="btn btn-secondary hidden" type="button">Calculate safe rate</button>
+            </div>
           </div>
           <div class="two-col">
             <label>Tax country
@@ -486,8 +594,10 @@
             <label class="tax-settings hidden">Tax regime
               <select id="tax-regime">
                 <option value="italy_administered" selected>Simplified administered regime</option>
+                <option value="italy_declarative">Declarative regime</option>
+                <option value="italy_managed">Managed regime</option>
               </select>
-              <span class="hint">Additional country regimes can be registered without changing the neutral simulation engine.</span>
+              <span class="hint">Changes tax timing and how portfolio gains and losses are aggregated.</span>
             </label>
           </div>
           <div class="two-col tax-settings hidden">
@@ -495,14 +605,30 @@
               <input type="number" id="italy-wealth-tax" value="0.20" min="0" max="10" step="0.01">
               <span class="hint">Defaults to 0.20% and is charged monthly on modeled holdings.</span>
             </label>
-            <label>Asset tax categories (optional)
-              <input type="text" id="asset-tax-categories" placeholder="SPY:FUND, BTP:GOVERNMENT_BOND">
-              <span class="hint">STANDARD is the default. Also accepts FUND, GOVERNMENT_BOND, and GOVERNMENT_BOND_FUND.</span>
+            <label>Wealth-tax location
+              <select id="italy-wealth-tax-mode">
+                <option value="auto" selected>Auto: bollo domestic / IVAFE foreign</option>
+                <option value="stamp_duty">Bollo only</option>
+                <option value="ivafe">IVAFE only</option>
+                <option value="both">Both by account location</option>
+                <option value="none">Disabled</option>
+              </select>
             </label>
           </div>
           <div class="tax-settings hidden">
+            <label>Simulation tax start date
+              <input type="date" id="tax-start-date">
+              <span class="hint">Calendar year boundaries control settlement and loss expiry.</span>
+            </label>
+          </div>
+          <div class="tax-settings hidden">
+            <div class="market-field-heading"><div><strong>Instrument tax details</strong><span>Optional per-asset facts; percentages use human-readable values. Italian FTT is not inferred: from 2026 the share-transfer rate is 0.40%, reduced to 0.20% on regulated markets when the instrument is in scope.</span></div></div>
+            <div id="tax-instrument-editor" class="tax-instrument-grid"></div>
+          </div>
+          <div class="tax-settings hidden">
             <label class="check-inline"><input type="checkbox" id="tax-terminal-liquidation" checked> Tax unrealized gains through a final liquidation</label>
-            <span class="hint">Uses average cost and a four-year loss carryforward. Fund income treatment and government-bond shares are approximations, not tax advice.</span>
+            <label class="check-inline"><input type="checkbox" id="tax-wrapper-benchmark"> Compare with a single accumulating allocation ETF</label>
+            <span class="hint">Assumes accumulating ETFs / total-return series. Uses average cost and a four-year loss carryforward; government-bond shares are approximations, not tax advice.</span>
           </div>
         </details>
       </div>
@@ -535,6 +661,7 @@
         <button class="tab-btn" data-tab="tab-drawdowns">Drawdowns</button>
         <button class="tab-btn" data-tab="tab-correlations">Correlations</button>
         <button class="tab-btn" data-tab="tab-monthly">Monthly</button>
+        <button class="tab-btn" data-tab="tab-retirement">Retirement</button>
         <button class="tab-btn" data-tab="tab-lab">Research Lab</button>
         <button class="tab-btn" data-tab="tab-compare">Compare</button>
         <button class="tab-btn" data-tab="tab-diagnostics">Diagnostics</button>
@@ -579,6 +706,11 @@
             <h3>Costs, leverage and taxes</h3>
             <p class="caption">Values are average amounts per simulated path. Italian taxes are a simplified planning approximation; ETF price histories may already include historical fees.</p>
             <div class="metric-grid" id="cost-metric-grid"></div>
+            <div id="tax-year-report" class="tax-year-report hidden">
+              <div class="card-heading-row"><h4>Tax report by calendar year</h4><span class="research-label">Average per path</span></div>
+              <p class="caption">Liabilities and cash payments are shown separately in the declarative regime; final liquidation appears in the last simulated tax year.</p>
+              <div id="tax-year-table" class="table-wrap"></div>
+            </div>
           </section>
           <div class="chart-grid">
             <div class="card card-wide"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
@@ -693,6 +825,33 @@
             <p class="caption">Cross-sectional median time-weighted return in each simulated month; this is not a single stitched path.</p>
             <div class="chart" id="chart-monthly"></div>
           </div>
+        </div>
+      </div>
+
+      <div id="tab-retirement" class="tab-panel">
+        <div id="retirement-empty" class="results-empty empty-state">Enable decumulation and run an analysis to see retirement outcomes.</div>
+        <div id="retirement-content" class="hidden">
+          <div class="card-heading-row retirement-heading">
+            <div><h2>Retirement spending</h2><p class="caption">Real spending is net of modeled taxes. Fixed and guardrail policies share identical market paths.</p></div>
+            <span id="retirement-policy-badge" class="research-label"></span>
+          </div>
+          <div id="retirement-metrics" class="metric-grid"></div>
+          <section id="safe-rate-report" class="card hidden">
+            <div class="card-heading-row"><h3>Safe withdrawal rate</h3><span id="safe-rate-value" class="integrity-score">—</span></div>
+            <p id="safe-rate-caption" class="caption"></p>
+            <div class="chart" id="chart-safe-rate"></div>
+          </section>
+          <div class="chart-grid">
+            <section class="card"><h3>Spending success through time</h3><div class="chart" id="chart-retirement-survival"></div></section>
+            <section class="card"><h3>Funded real spending fan</h3><div class="chart" id="chart-retirement-spending"></div></section>
+            <section class="card"><h3>Cumulative real spending</h3><div class="chart" id="chart-retirement-cumulative"></div></section>
+            <section class="card"><h3>Fixed vs guardrail</h3><div id="retirement-comparison" class="table-wrap"></div></section>
+          </div>
+          <section id="retirement-tax-card" class="card hidden">
+            <h3>Italian spending ledger by year</h3>
+            <p class="caption">Average taxes, gross sales needed to fund them, and net spending received per path.</p>
+            <div id="retirement-tax-table" class="table-wrap"></div>
+          </section>
         </div>
       </div>
 
@@ -839,6 +998,6 @@
   </div>
   <div id="toast-container"></div>
 
-  <script type="module" src="app.js?v=20260818"></script>
+  <script type="module" src="app.js?v=20260821"></script>
 </body>
 </html>

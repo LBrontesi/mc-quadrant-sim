@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from multiprocessing import get_context
 from typing import Any
 
@@ -11,20 +11,28 @@ import pandas as pd
 
 from mc_quadrants.calibration import CorrelationOverrides, calibrate_quadrant_model
 from mc_quadrants.data import convert_returns_to_base_currency
+from mc_quadrants.decumulation import DecumulationPlan, normalize_decumulation
 from mc_quadrants.diagnostics import (
     CalibrationDiagnostics,
     build_calibration_diagnostics,
     build_hmm_diagnostics,
 )
 from mc_quadrants.hmm import fit_hmm_model
+from mc_quadrants.native import native_available
 from mc_quadrants.regimes import classify_persistent_quadrants
 from mc_quadrants.simulation import (
+    DEFAULT_LIQUIDITY_COST_MULTIPLIERS,
     inflation_adjust_wealth,
     simulate_portfolio_paths,
     simulate_returns,
     summarize_wealth_risk,
 )
 from mc_quadrants.tax_policy import resolve_tax_selection
+from mc_quadrants.taxes import (
+    italian_native_result_frame,
+    normalize_italy_tax_metadata,
+    prepare_italian_native_configuration,
+)
 from mc_quadrants.types import ScenarioModel, SimulationResult
 from mc_quadrants.uncertainty import bootstrap_quadrant_models, summarize_parameter_models
 from mc_quadrants.validation import WalkForwardResult, walk_forward_validation
@@ -57,7 +65,31 @@ _ADDITIVE_WEALTH_ATTRS = (
     "realized_gains_total",
     "realized_losses_total",
     "loss_carryforward_total",
+    "investment_income_tax_total",
+    "foreign_withholding_tax_total",
+    "financial_transaction_tax_total",
+    "stamp_duty_total",
+    "ivafe_total",
+    "expired_losses_total",
+    "transaction_cost_total",
 )
+_PATH_WEALTH_ATTRS = (
+    "withdrawal_requested",
+    "withdrawal_funded",
+    "guardrail_events",
+    "withdrawal_cpi",
+    "paired_wealth",
+    "paired_withdrawal_requested",
+    "paired_withdrawal_funded",
+    "paired_guardrail_events",
+)
+
+
+def _alternative_decumulation(plan: DecumulationPlan) -> DecumulationPlan | None:
+    if not plan.active or plan.legacy_nominal:
+        return None
+    alternative = "fixed" if plan.policy == "guyton_klinger" else "guyton_klinger"
+    return replace(plan, guardrails=replace(plan.guardrails, policy=alternative))
 
 
 def _annual_macro_paths(
@@ -83,6 +115,79 @@ def _init_chunk_worker(state: dict[str, Any]) -> None:
     _CHUNK_WORKER_STATE.update(state)
 
 
+def _merge_tax_by_year(
+    target: dict[str, dict[str, float]],
+    source: Mapping[str, Mapping[str, Any]] | None,
+) -> None:
+    for year, metrics in (source or {}).items():
+        bucket = target.setdefault(str(year), {})
+        for name, value in metrics.items():
+            bucket[str(name)] = bucket.get(str(name), 0.0) + float(value)
+
+
+def _cash_flow_adjusted_geometric_returns(
+    wealth: pd.DataFrame,
+    *,
+    initial_value: float,
+    contribution: float,
+    withdrawal: float,
+    withdrawal_start_period: int,
+    annual_inflation: float,
+    inflation_paths: np.ndarray | None,
+    withdrawal_paths: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return one annualized, cash-flow-adjusted geometric return per path."""
+
+    values = wealth.to_numpy(dtype=float)
+    periods, paths = values.shape
+    if inflation_paths is None:
+        steps = np.arange(1, periods + 1, dtype=float)
+        deflator = ((1.0 + annual_inflation) ** (-steps / 12.0))[:, None]
+    else:
+        annual = np.asarray(inflation_paths, dtype=float)
+        periodic = np.power(1.0 + annual, 1.0 / 12.0)
+        deflator = 1.0 / np.cumprod(periodic, axis=0)
+    real_values = values * deflator
+    previous = np.vstack([np.full(paths, initial_value), real_values[:-1]])
+    contribution_deflator = np.vstack([np.ones((1, deflator.shape[1])), deflator[:-1]])
+    denominator = previous + contribution * contribution_deflator
+    if withdrawal_paths is None:
+        withdrawal_schedule = (
+            np.arange(1, periods + 1, dtype=int) >= withdrawal_start_period
+        ).astype(float)[:, None]
+        nominal_withdrawals = withdrawal * withdrawal_schedule
+    else:
+        nominal_withdrawals = np.asarray(withdrawal_paths, dtype=float)
+        if nominal_withdrawals.shape != (periods, paths):
+            raise ValueError("withdrawal_paths must match the wealth path matrix.")
+    numerator = real_values + nominal_withdrawals * deflator
+    with np.errstate(divide="ignore", invalid="ignore"):
+        returns = numerator / denominator - 1.0
+    valid = np.isfinite(returns) & (returns > -1.0)
+    log_values = np.where(valid, np.log1p(np.where(valid, returns, 0.0)), 0.0)
+    counts = valid.sum(axis=0)
+    annualized = np.zeros(paths, dtype=float)
+    nonzero = counts > 0
+    annualized[nonzero] = np.exp(log_values[:, nonzero].sum(axis=0) / counts[nonzero] * 12.0) - 1.0
+    return annualized
+
+
+def _native_tax_compatible(
+    enabled: bool,
+    metadata: Mapping[str, Mapping[str, object]] | None,
+) -> bool:
+    """Return whether the accumulating/total-return native ledger can be used."""
+
+    return bool(
+        enabled
+        and native_available()
+        and all(
+            np.isclose(float(values.get("annual_income_yield", 0.0)), 0.0)
+            for values in (metadata or {}).values()
+        )
+    )
+
+
 def _run_chunk(
     args: tuple[int, int, int],
 ) -> tuple[
@@ -93,6 +198,10 @@ def _run_chunk(
     np.ndarray | None,
     dict[str, float],
     dict[str, float],
+    dict[str, dict[str, float]],
+    np.ndarray | None,
+    np.ndarray | None,
+    dict[str, np.ndarray],
 ]:
     """Simulate one path chunk in a worker process.
 
@@ -120,11 +229,13 @@ def _run_chunk(
         garch_beta=state["garch_beta"],
         joint_macro=state["joint_macro"],
         macro_transition_weight=state["macro_transition_weight"],
+        macro_parameter_uncertainty=state["macro_parameter_uncertainty"],
         dynamic_correlation=state["dynamic_correlation"],
         dcc_alpha=state["dcc_alpha"],
         dcc_beta=state["dcc_beta"],
         dcc_asymmetry=state["dcc_asymmetry"],
         return_regime_codes=True,
+        native_threads=state.get("native_threads", 1),
     )
     financing_rate_paths = _annual_macro_paths(
         state["model"],
@@ -144,6 +255,7 @@ def _run_chunk(
         "return_kind": state["return_kind"],
         "rebalance_frequency": state["rebalance_frequency"],
         "transaction_cost_bps": state["transaction_cost_bps"],
+        "state_transaction_cost_multipliers": state["state_transaction_cost_multipliers"],
         "asset_expense_ratios": state["expense_ratios"],
         "leverage_multiple": state["leverage_multiple"],
         "financing_rate": state["financing_rate"],
@@ -153,14 +265,15 @@ def _run_chunk(
         "financing_inflation_paths": financing_inflation_paths,
         "maintenance_margin": state["maintenance_margin"],
         "contribution": state["contribution"],
+        "contribution_allocation": state["contribution_allocation"],
         "withdrawal": state["withdrawal"],
+        "withdrawal_start_period": state["withdrawal_start_period"],
+        "decumulation": state["decumulation"],
+        "withdrawal_inflation_paths": financing_inflation_paths,
+        "annual_inflation": state["annual_inflation"],
+        "safe_withdrawal_rate": state["safe_withdrawal_rate"],
+        "native_threads": state.get("native_threads", 1),
     }
-    gross_wealth = simulate_portfolio_paths(
-        chunk_result,
-        **portfolio_kwargs,
-        tax_country="none",
-        tax_regime="none",
-    )
     if state["tax_enabled"]:
         chunk_wealth = simulate_portfolio_paths(
             chunk_result,
@@ -168,13 +281,78 @@ def _run_chunk(
             tax_country=state["tax_country"],
             tax_regime=state["tax_regime"],
             asset_tax_categories=state["asset_tax_categories"],
+            asset_tax_metadata=state["asset_tax_metadata"],
             italy_annual_wealth_tax=state["italy_annual_wealth_tax"],
+            italy_wealth_tax_mode=state["italy_wealth_tax_mode"],
             tax_terminal_liquidation=state["tax_terminal_liquidation"],
+            tax_start_date=state["tax_start_date"],
+            tax_wrapper_benchmark=state["tax_wrapper_benchmark"],
         )
+        native_gross = chunk_wealth.attrs.pop("native_gross_wealth", None)
+        if native_gross is not None:
+            gross_wealth = pd.DataFrame(native_gross, columns=chunk_wealth.columns)
+            gross_wealth.attrs.update(
+                {
+                    "margin_calls": 0,
+                    "tax_country": "none",
+                    "tax_regime": "none",
+                    "transaction_cost_total": float(
+                        chunk_wealth.attrs.pop("native_gross_transaction_cost_total", 0.0)
+                    ),
+                    "native_backend": True,
+                }
+            )
+        else:
+            gross_wealth = simulate_portfolio_paths(
+                chunk_result,
+                **portfolio_kwargs,
+                tax_country="none",
+                tax_regime="none",
+            )
         gross_values: np.ndarray | None = gross_wealth.to_numpy(dtype=float)
     else:
+        gross_wealth = simulate_portfolio_paths(
+            chunk_result,
+            **portfolio_kwargs,
+            tax_country="none",
+            tax_regime="none",
+        )
         chunk_wealth = gross_wealth
         gross_values = None
+    alternative_plan = _alternative_decumulation(state["decumulation"])
+    if alternative_plan is not None:
+        paired_kwargs = dict(portfolio_kwargs)
+        paired_kwargs["decumulation"] = alternative_plan
+        if state["tax_enabled"]:
+            paired = simulate_portfolio_paths(
+                chunk_result,
+                **paired_kwargs,
+                tax_country=state["tax_country"],
+                tax_regime=state["tax_regime"],
+                asset_tax_categories=state["asset_tax_categories"],
+                asset_tax_metadata=state["asset_tax_metadata"],
+                italy_annual_wealth_tax=state["italy_annual_wealth_tax"],
+                italy_wealth_tax_mode=state["italy_wealth_tax_mode"],
+                tax_terminal_liquidation=state["tax_terminal_liquidation"],
+                tax_start_date=state["tax_start_date"],
+                tax_wrapper_benchmark=False,
+            )
+        else:
+            paired = simulate_portfolio_paths(
+                chunk_result,
+                **paired_kwargs,
+                tax_country="none",
+                tax_regime="none",
+            )
+        chunk_wealth.attrs["paired_policy"] = alternative_plan.policy
+        chunk_wealth.attrs["paired_wealth"] = paired.to_numpy(dtype=float)
+        chunk_wealth.attrs["paired_withdrawal_requested"] = paired.attrs[
+            "withdrawal_requested"
+        ]
+        chunk_wealth.attrs["paired_withdrawal_funded"] = paired.attrs[
+            "withdrawal_funded"
+        ]
+        chunk_wealth.attrs["paired_guardrail_events"] = paired.attrs["guardrail_events"]
     wealth_values = chunk_wealth.to_numpy(dtype=float)
     return (
         start,
@@ -184,6 +362,14 @@ def _run_chunk(
         chunk_result.macro_paths,
         {key: float(chunk_wealth.attrs.get(key, 0.0)) for key in _ADDITIVE_WEALTH_ATTRS},
         {key: float(gross_wealth.attrs.get(key, 0.0)) for key in _ADDITIVE_WEALTH_ATTRS},
+        chunk_wealth.attrs.get("tax_by_year", {}),
+        chunk_wealth.attrs.get("wrapper_terminal_values"),
+        chunk_wealth.attrs.get("wrapper_annualized_returns"),
+        {
+            key: np.asarray(chunk_wealth.attrs[key])
+            for key in _PATH_WEALTH_ATTRS
+            if key in chunk_wealth.attrs
+        },
     )
 
 
@@ -211,6 +397,7 @@ def _simulate_chunked(
     garch_beta: float,
     joint_macro: bool,
     macro_transition_weight: float,
+    macro_parameter_uncertainty: bool,
     dynamic_correlation: bool,
     dcc_alpha: float,
     dcc_beta: float,
@@ -220,6 +407,7 @@ def _simulate_chunked(
     initial_value: float,
     rebalance_frequency: int | None,
     transaction_cost_bps: float,
+    state_transaction_cost_multipliers: Mapping[str, float] | None,
     expense_ratios: pd.Series,
     leverage_multiple: float,
     financing_rate: float,
@@ -227,12 +415,21 @@ def _simulate_chunked(
     state_inflation: Mapping[str, float] | None,
     maintenance_margin: float,
     contribution: float,
+    contribution_allocation: str,
     withdrawal: float,
+    withdrawal_start_period: int,
+    decumulation: DecumulationPlan,
+    annual_inflation: float,
+    safe_withdrawal_rate: float,
     tax_country: str,
     tax_regime: str,
     asset_tax_categories: Mapping[str, str] | None,
+    asset_tax_metadata: Mapping[str, Mapping[str, object]] | None,
     italy_annual_wealth_tax: float,
+    italy_wealth_tax_mode: str,
     tax_terminal_liquidation: bool,
+    tax_start_date: str | None,
+    tax_wrapper_benchmark: bool,
     return_kind: str,
     rate_col: str | None,
     inflation_col: str,
@@ -247,13 +444,51 @@ def _simulate_chunked(
     frame. The regime arrays are concatenated so the caller sees the same
     ``SimulationResult`` shape as a one-shot run.
 
-    With ``workers > 1`` the chunks run in a ``ProcessPoolExecutor``. Each chunk
-    draws its RNG from ``random_seed + chunk_index``, so results are bit-for-bit
-    identical to the sequential path while wall time drops roughly with the
-    worker count (processes, not threads, so the GIL is bypassed).
+    Native tax runs use ``workers`` as one C++ thread pool. Python fallback runs
+    use a ``ProcessPoolExecutor`` instead, avoiding nested parallelism.
     """
 
     tax_selection = resolve_tax_selection(tax_country, tax_regime)
+    native_tax_execution = _native_tax_compatible(
+        tax_selection.enabled,
+        asset_tax_metadata,
+    ) and decumulation.legacy_nominal
+    native_threads = max(1, int(workers)) if native_tax_execution else 1
+    native_portfolio_config: dict[str, object] | None = None
+    if native_tax_execution and distribution in {"normal", "student_t"}:
+        native_weights = weight_series.reindex(model.assets).fillna(0.0).to_numpy(dtype=float)
+        native_weights = native_weights / native_weights.sum()
+        native_portfolio_config = prepare_italian_native_configuration(
+            periods=periods,
+            assets=model.assets,
+            target_weights=native_weights,
+            initial_value=initial_value,
+            rebalance_frequency=int(rebalance_frequency or 0),
+            transaction_cost_bps=transaction_cost_bps,
+            contribution=contribution,
+            contribution_allocation=contribution_allocation,
+            withdrawal=withdrawal,
+            withdrawal_start_period=withdrawal_start_period,
+            asset_tax_categories=asset_tax_categories,
+            asset_tax_metadata=asset_tax_metadata,
+            annual_wealth_tax=italy_annual_wealth_tax,
+            terminal_liquidation=tax_terminal_liquidation,
+            tax_regime=tax_selection.regime,
+            wealth_tax_mode=italy_wealth_tax_mode,
+            start_date=tax_start_date,
+            wrapper_benchmark=tax_wrapper_benchmark,
+        )
+        native_portfolio_config.update(
+            {
+                "expense_ratios": expense_ratios.reindex(model.assets).fillna(0.0).to_numpy(
+                    dtype=float
+                ),
+                "return_kind": return_kind,
+                "state_transaction_cost_multipliers": dict(
+                    state_transaction_cost_multipliers or {}
+                ),
+            }
+        )
 
     def _single(
         paths_now: int,
@@ -276,12 +511,42 @@ def _simulate_chunked(
             garch_beta=garch_beta,
             joint_macro=joint_macro,
             macro_transition_weight=macro_transition_weight,
+            macro_parameter_uncertainty=macro_parameter_uncertainty,
             dynamic_correlation=dynamic_correlation,
             dcc_alpha=dcc_alpha,
             dcc_beta=dcc_beta,
             dcc_asymmetry=dcc_asymmetry,
             return_regime_codes=True,
+            native_threads=native_threads,
+            native_portfolio_config=native_portfolio_config,
         )
+        if chunk_result.native_portfolio is not None:
+            chunk_wealth = italian_native_result_frame(
+                chunk_result.native_portfolio,
+                chunk_result.native_portfolio["frame_metadata"],
+                fused=True,
+            )
+            chunk_wealth.attrs.update(
+                {
+                    "tax_country": tax_selection.country,
+                    "tax_regime": tax_selection.regime,
+                }
+            )
+            native_gross = chunk_wealth.attrs.pop("native_gross_wealth")
+            gross_wealth = pd.DataFrame(native_gross, columns=chunk_wealth.columns)
+            gross_wealth.attrs.update(
+                {
+                    "margin_calls": 0,
+                    "tax_country": "none",
+                    "tax_regime": "none",
+                    "transaction_cost_total": float(
+                        chunk_wealth.attrs.pop("native_gross_transaction_cost_total", 0.0)
+                    ),
+                    "native_backend": True,
+                    "native_fused_backend": True,
+                }
+            )
+            return chunk_result, chunk_wealth, gross_wealth
         financing_rate_paths = _annual_macro_paths(
             model,
             chunk_result,
@@ -300,6 +565,7 @@ def _simulate_chunked(
             "return_kind": return_kind,
             "rebalance_frequency": rebalance_frequency,
             "transaction_cost_bps": transaction_cost_bps,
+            "state_transaction_cost_multipliers": state_transaction_cost_multipliers,
             "asset_expense_ratios": expense_ratios.to_dict(),
             "leverage_multiple": leverage_multiple,
             "financing_rate": financing_rate,
@@ -309,14 +575,15 @@ def _simulate_chunked(
             "financing_inflation_paths": financing_inflation_paths,
             "maintenance_margin": maintenance_margin,
             "contribution": contribution,
+            "contribution_allocation": contribution_allocation,
             "withdrawal": withdrawal,
+            "withdrawal_start_period": withdrawal_start_period,
+            "decumulation": decumulation,
+            "withdrawal_inflation_paths": financing_inflation_paths,
+            "annual_inflation": annual_inflation,
+            "safe_withdrawal_rate": safe_withdrawal_rate,
+            "native_threads": native_threads,
         }
-        gross_wealth = simulate_portfolio_paths(
-            chunk_result,
-            **portfolio_kwargs,
-            tax_country="none",
-            tax_regime="none",
-        )
         if tax_selection.enabled:
             chunk_wealth = simulate_portfolio_paths(
                 chunk_result,
@@ -324,11 +591,81 @@ def _simulate_chunked(
                 tax_country=tax_selection.country,
                 tax_regime=tax_selection.regime,
                 asset_tax_categories=asset_tax_categories,
+                asset_tax_metadata=asset_tax_metadata,
                 italy_annual_wealth_tax=italy_annual_wealth_tax,
+                italy_wealth_tax_mode=italy_wealth_tax_mode,
                 tax_terminal_liquidation=tax_terminal_liquidation,
+                tax_start_date=tax_start_date,
+                tax_wrapper_benchmark=tax_wrapper_benchmark,
             )
+            native_gross = chunk_wealth.attrs.pop("native_gross_wealth", None)
+            if native_gross is not None:
+                gross_wealth = pd.DataFrame(native_gross, columns=chunk_wealth.columns)
+                gross_wealth.attrs.update(
+                    {
+                        "margin_calls": 0,
+                        "tax_country": "none",
+                        "tax_regime": "none",
+                        "transaction_cost_total": float(
+                            chunk_wealth.attrs.pop(
+                                "native_gross_transaction_cost_total",
+                                0.0,
+                            )
+                        ),
+                        "native_backend": True,
+                    }
+                )
+            else:
+                gross_wealth = simulate_portfolio_paths(
+                    chunk_result,
+                    **portfolio_kwargs,
+                    tax_country="none",
+                    tax_regime="none",
+                )
         else:
+            gross_wealth = simulate_portfolio_paths(
+                chunk_result,
+                **portfolio_kwargs,
+                tax_country="none",
+                tax_regime="none",
+            )
             chunk_wealth = gross_wealth
+        alternative_plan = _alternative_decumulation(decumulation)
+        if alternative_plan is not None:
+            paired_kwargs = dict(portfolio_kwargs)
+            paired_kwargs["decumulation"] = alternative_plan
+            if tax_selection.enabled:
+                paired = simulate_portfolio_paths(
+                    chunk_result,
+                    **paired_kwargs,
+                    tax_country=tax_selection.country,
+                    tax_regime=tax_selection.regime,
+                    asset_tax_categories=asset_tax_categories,
+                    asset_tax_metadata=asset_tax_metadata,
+                    italy_annual_wealth_tax=italy_annual_wealth_tax,
+                    italy_wealth_tax_mode=italy_wealth_tax_mode,
+                    tax_terminal_liquidation=tax_terminal_liquidation,
+                    tax_start_date=tax_start_date,
+                    tax_wrapper_benchmark=False,
+                )
+            else:
+                paired = simulate_portfolio_paths(
+                    chunk_result,
+                    **paired_kwargs,
+                    tax_country="none",
+                    tax_regime="none",
+                )
+            chunk_wealth.attrs["paired_policy"] = alternative_plan.policy
+            chunk_wealth.attrs["paired_wealth"] = paired.to_numpy(dtype=float)
+            chunk_wealth.attrs["paired_withdrawal_requested"] = paired.attrs[
+                "withdrawal_requested"
+            ]
+            chunk_wealth.attrs["paired_withdrawal_funded"] = paired.attrs[
+                "withdrawal_funded"
+            ]
+            chunk_wealth.attrs["paired_guardrail_events"] = paired.attrs[
+                "guardrail_events"
+            ]
         return chunk_result, chunk_wealth, gross_wealth
 
     if chunk_size is None or paths <= chunk_size:
@@ -356,9 +693,28 @@ def _simulate_chunked(
     )
     aggregate_attrs = {key: 0.0 for key in _ADDITIVE_WEALTH_ATTRS}
     aggregate_gross_attrs = {key: 0.0 for key in _ADDITIVE_WEALTH_ATTRS}
+    aggregate_tax_by_year: dict[str, dict[str, float]] = {}
+    wrapper_available = bool(
+        tax_wrapper_benchmark
+        and tax_selection.enabled
+        and tax_terminal_liquidation
+        and tax_selection.regime != "italy_managed"
+    )
+    wrapper_terminal_values = np.empty(total, dtype=float) if wrapper_available else None
+    wrapper_annualized_returns = np.empty(total, dtype=float) if wrapper_available else None
+    path_attrs: dict[str, np.ndarray] = {
+        "withdrawal_requested": np.zeros((periods, total), dtype=float),
+        "withdrawal_funded": np.zeros((periods, total), dtype=float),
+        "guardrail_events": np.zeros((periods, total), dtype=np.int8),
+        "withdrawal_cpi": np.ones((periods, total), dtype=float),
+        "paired_wealth": np.zeros((periods, total), dtype=float),
+        "paired_withdrawal_requested": np.zeros((periods, total), dtype=float),
+        "paired_withdrawal_funded": np.zeros((periods, total), dtype=float),
+        "paired_guardrail_events": np.zeros((periods, total), dtype=np.int8),
+    }
     specs = _chunk_specs(total, chunk_size, random_seed)
 
-    if workers is not None and workers > 1:
+    if workers is not None and workers > 1 and not native_tax_execution:
         worker_state = {
             "model": model,
             "periods": periods,
@@ -374,6 +730,7 @@ def _simulate_chunked(
             "garch_beta": float(garch_beta),
             "joint_macro": bool(joint_macro),
             "macro_transition_weight": float(macro_transition_weight),
+            "macro_parameter_uncertainty": bool(macro_parameter_uncertainty),
             "dynamic_correlation": bool(dynamic_correlation),
             "dcc_alpha": float(dcc_alpha),
             "dcc_beta": float(dcc_beta),
@@ -383,6 +740,7 @@ def _simulate_chunked(
             "return_kind": return_kind,
             "rebalance_frequency": rebalance_frequency,
             "transaction_cost_bps": float(transaction_cost_bps),
+            "state_transaction_cost_multipliers": dict(state_transaction_cost_multipliers or {}),
             "expense_ratios": expense_ratios.to_dict(),
             "leverage_multiple": float(leverage_multiple),
             "financing_rate": float(financing_rate),
@@ -392,13 +750,23 @@ def _simulate_chunked(
             "inflation_col": inflation_col,
             "maintenance_margin": float(maintenance_margin),
             "contribution": float(contribution),
+            "contribution_allocation": contribution_allocation,
             "withdrawal": float(withdrawal),
+            "withdrawal_start_period": int(withdrawal_start_period),
+            "decumulation": decumulation,
+            "annual_inflation": float(annual_inflation),
+            "safe_withdrawal_rate": float(safe_withdrawal_rate),
             "tax_enabled": tax_selection.enabled,
             "tax_country": tax_selection.country,
             "tax_regime": tax_selection.regime,
             "asset_tax_categories": dict(asset_tax_categories or {}),
+            "asset_tax_metadata": {asset: dict(values) for asset, values in (asset_tax_metadata or {}).items()},
             "italy_annual_wealth_tax": float(italy_annual_wealth_tax),
+            "italy_wealth_tax_mode": italy_wealth_tax_mode,
             "tax_terminal_liquidation": bool(tax_terminal_liquidation),
+            "tax_start_date": tax_start_date,
+            "tax_wrapper_benchmark": bool(tax_wrapper_benchmark),
+            "native_threads": 1,
         }
         try:
             with ProcessPoolExecutor(
@@ -415,6 +783,10 @@ def _simulate_chunked(
                     chunk_macro,
                     chunk_attrs,
                     chunk_gross_attrs,
+                    chunk_tax_by_year,
+                    chunk_wrapper_terminal,
+                    chunk_wrapper_annualized,
+                    chunk_path_attrs,
                 ) in executor.map(
                     _run_chunk, specs
                 ):
@@ -430,6 +802,13 @@ def _simulate_chunked(
                         )
                     if macro_paths is not None and chunk_macro is not None:
                         macro_paths[:, start:start + count, :] = chunk_macro
+                    _merge_tax_by_year(aggregate_tax_by_year, chunk_tax_by_year)
+                    if wrapper_terminal_values is not None and chunk_wrapper_terminal is not None:
+                        wrapper_terminal_values[start:start + count] = chunk_wrapper_terminal
+                    if wrapper_annualized_returns is not None and chunk_wrapper_annualized is not None:
+                        wrapper_annualized_returns[start:start + count] = chunk_wrapper_annualized
+                    for key, values in chunk_path_attrs.items():
+                        path_attrs[key][:, start:start + count] = values
         except (NotImplementedError, PermissionError):
             for start, count, seed in specs:
                 chunk_result, chunk_wealth, chunk_gross_wealth = _single(count, seed)
@@ -446,6 +825,13 @@ def _simulate_chunked(
                     )
                 if macro_paths is not None and chunk_result.macro_paths is not None:
                     macro_paths[:, start:start + count, :] = chunk_result.macro_paths
+                _merge_tax_by_year(aggregate_tax_by_year, chunk_wealth.attrs.get("tax_by_year"))
+                if wrapper_terminal_values is not None:
+                    wrapper_terminal_values[start:start + count] = chunk_wealth.attrs["wrapper_terminal_values"]
+                    wrapper_annualized_returns[start:start + count] = chunk_wealth.attrs["wrapper_annualized_returns"]
+                for key in _PATH_WEALTH_ATTRS:
+                    if key in chunk_wealth.attrs:
+                        path_attrs[key][:, start:start + count] = chunk_wealth.attrs[key]
     else:
         for start, count, seed in specs:
             chunk_result, chunk_wealth, chunk_gross_wealth = _single(count, seed)
@@ -462,6 +848,13 @@ def _simulate_chunked(
                 )
             if macro_paths is not None and chunk_result.macro_paths is not None:
                 macro_paths[:, start:start + count, :] = chunk_result.macro_paths
+            _merge_tax_by_year(aggregate_tax_by_year, chunk_wealth.attrs.get("tax_by_year"))
+            if wrapper_terminal_values is not None:
+                wrapper_terminal_values[start:start + count] = chunk_wealth.attrs["wrapper_terminal_values"]
+                wrapper_annualized_returns[start:start + count] = chunk_wealth.attrs["wrapper_annualized_returns"]
+            for key in _PATH_WEALTH_ATTRS:
+                if key in chunk_wealth.attrs:
+                    path_attrs[key][:, start:start + count] = chunk_wealth.attrs[key]
 
     wealth = pd.DataFrame(
         wealth_values,
@@ -473,8 +866,35 @@ def _simulate_chunked(
             "tax_country": tax_selection.country,
             "tax_regime": tax_selection.regime,
             "asset_tax_categories": dict(asset_tax_categories or {}),
+            "asset_tax_metadata": {asset: dict(values) for asset, values in (asset_tax_metadata or {}).items()},
             "annual_wealth_tax": float(italy_annual_wealth_tax),
+            "wealth_tax_mode": italy_wealth_tax_mode,
             "tax_terminal_liquidation": bool(tax_terminal_liquidation),
+            "tax_start_date": tax_start_date,
+            "tax_by_year": aggregate_tax_by_year,
+            "contribution_allocation": contribution_allocation,
+            "tax_wrapper_benchmark_requested": bool(tax_wrapper_benchmark),
+            "tax_wrapper_benchmark_available": wrapper_available,
+            "tax_wrapper_unavailable_reason": (
+                "managed_regime"
+                if tax_wrapper_benchmark and tax_selection.regime == "italy_managed"
+                else "terminal_liquidation_required"
+                if tax_wrapper_benchmark and not tax_terminal_liquidation
+                else None
+            ),
+            "wrapper_terminal_values": wrapper_terminal_values,
+            "wrapper_annualized_returns": wrapper_annualized_returns,
+            "native_backend": native_tax_execution,
+            "native_fused_backend": bool(
+                native_tax_execution and distribution in {"normal", "student_t"}
+            ),
+            "decumulation": decumulation.to_dict(),
+            "paired_policy": (
+                _alternative_decumulation(decumulation).policy
+                if _alternative_decumulation(decumulation) is not None
+                else None
+            ),
+            **path_attrs,
         }
     )
     if tax_selection.enabled:
@@ -483,7 +903,16 @@ def _simulate_chunked(
             columns=wealth.columns,
         )
         gross_wealth.attrs.update(aggregate_gross_attrs)
-        gross_wealth.attrs.update({"tax_country": "none", "tax_regime": "none"})
+        gross_wealth.attrs.update(
+            {
+                "tax_country": "none",
+                "tax_regime": "none",
+                "native_backend": native_tax_execution,
+                "native_fused_backend": bool(
+                    native_tax_execution and distribution in {"normal", "student_t"}
+                ),
+            }
+        )
     else:
         gross_wealth = wealth
     combined = SimulationResult(
@@ -524,18 +953,28 @@ def run_scenario(
     transition_uncertainty: float = 0.0,
     rebalance_frequency: int | None = None,
     transaction_cost_bps: float = 0.0,
+    state_dependent_liquidity: bool = False,
+    state_transaction_cost_multipliers: Mapping[str, float] | None = None,
     asset_expense_ratios: Mapping[str, float] | None = None,
     leverage_multiple: float = 1.0,
     financing_rate: float = 0.0,
     financing_inflation_sensitivity: float = 0.0,
     maintenance_margin: float = 0.0,
     contribution: float = 0.0,
+    contribution_allocation: str = "target",
     withdrawal: float = 0.0,
+    withdrawal_start_period: int = 1,
+    decumulation: Mapping[str, Any] | DecumulationPlan | None = None,
+    safe_withdrawal_rate: float = 0.0,
     tax_country: str | None = None,
     tax_regime: str = "none",
     asset_tax_categories: Mapping[str, str] | None = None,
+    asset_tax_metadata: Mapping[str, Mapping[str, object]] | None = None,
     italy_annual_wealth_tax: float = 0.002,
+    italy_wealth_tax_mode: str = "auto",
     tax_terminal_liquidation: bool = True,
+    tax_start_date: str | None = None,
+    tax_wrapper_benchmark: bool = False,
     initial_value: float = 100.0,
     base_currency: str = "USD",
     asset_currencies: Mapping[str, str] | None = None,
@@ -563,6 +1002,12 @@ def run_scenario(
     parameter_block_size: int = 12,
     joint_macro: bool = False,
     macro_transition_weight: float = 0.35,
+    macro_parameter_uncertainty: bool = True,
+    macro_model: str = "bvar_ensemble",
+    structural_returns: bool = False,
+    asset_classes: Mapping[str, str] | None = None,
+    asset_durations: Mapping[str, float] | None = None,
+    asset_income_yields: Mapping[str, float] | None = None,
     dynamic_correlation: bool = False,
     dcc_alpha: float = 0.04,
     dcc_beta: float = 0.94,
@@ -586,6 +1031,21 @@ def run_scenario(
     transition_uncertainty = float(transition_uncertainty)
     if not 0 <= transition_uncertainty <= 1:
         raise ValueError("transition_uncertainty must be between 0 and 1.")
+    withdrawal_start_period_value = float(withdrawal_start_period)
+    if not np.isfinite(withdrawal_start_period_value) or not withdrawal_start_period_value.is_integer():
+        raise ValueError("withdrawal_start_period must be an integer.")
+    withdrawal_start_period = int(withdrawal_start_period_value)
+    if not 1 <= withdrawal_start_period <= int(periods):
+        raise ValueError(
+            "withdrawal_start_period must be between 1 and the simulation periods."
+        )
+    decumulation_plan = normalize_decumulation(
+        decumulation,
+        periods=int(periods),
+        legacy_withdrawal=float(withdrawal),
+        legacy_start_period=withdrawal_start_period,
+        annual_inflation_fallback=float(annual_inflation),
+    )
     requested_macro_lag_periods = int(macro_lag_periods)
     if requested_macro_lag_periods < 0:
         raise ValueError("macro_lag_periods must be non-negative.")
@@ -619,9 +1079,42 @@ def run_scenario(
         available_columns.get(str(asset).strip().upper(), asset): str(category).strip().lower()
         for asset, category in (asset_tax_categories or {}).items()
     }
+    normalized_tax_metadata = {
+        available_columns.get(str(asset).strip().upper(), asset): dict(values)
+        for asset, values in (asset_tax_metadata or {}).items()
+    }
+    normalized_asset_classes = {
+        available_columns.get(str(asset).strip().upper(), asset): str(value).strip().lower()
+        for asset, value in (asset_classes or {}).items()
+    }
+    normalized_asset_durations = {
+        available_columns.get(str(asset).strip().upper(), asset): float(value)
+        for asset, value in (asset_durations or {}).items()
+    }
+    normalized_asset_income_yields = {
+        available_columns.get(str(asset).strip().upper(), asset): float(value)
+        for asset, value in (asset_income_yields or {}).items()
+    }
+    liquidity_multipliers = (
+        dict(state_transaction_cost_multipliers or DEFAULT_LIQUIDITY_COST_MULTIPLIERS)
+        if state_dependent_liquidity
+        else None
+    )
+    if tax_start_date is None and len(macro.index):
+        tax_start_date = str((pd.Timestamp(macro.index.max()) + pd.offsets.MonthEnd(1)).date())
     tax_selection = resolve_tax_selection(tax_country, tax_regime)
     tax_country = tax_selection.country
     tax_regime = tax_selection.regime
+    if tax_selection.enabled:
+        normalized_tax_metadata = normalize_italy_tax_metadata(
+            selected,
+            normalized_tax_categories,
+            normalized_tax_metadata,
+        )
+        normalized_tax_categories = {
+            asset: str(values["category"])
+            for asset, values in normalized_tax_metadata.items()
+        }
     scenario_returns = convert_returns_to_base_currency(
         returns.loc[:, selected],
         asset_currencies=asset_currencies,
@@ -666,6 +1159,11 @@ def run_scenario(
             duration_prior_strength=float(duration_prior_strength),
             mean_prior_strength=mean_prior_strength,
             joint_macro=joint_macro,
+            structural_returns=structural_returns,
+            asset_classes=normalized_asset_classes,
+            asset_durations=normalized_asset_durations,
+            asset_income_yields=normalized_asset_income_yields,
+            macro_model=macro_model,
         )
         model.metadata["requested_macro_lag_periods"] = requested_macro_lag_periods
         regimes = classify_persistent_quadrants(
@@ -712,6 +1210,11 @@ def run_scenario(
         if asset_currencies:
             model.metadata["asset_currencies"] = dict(asset_currencies)
 
+    if tax_selection.enabled and structural_returns:
+        for asset, profile in model.metadata.get("asset_profiles", {}).items():
+            metadata = normalized_tax_metadata.setdefault(asset, {})
+            metadata.setdefault("annual_income_yield", float(profile.get("income_yield", 0.0)))
+
     parameter_models: list[ScenarioModel] = []
     parameter_summary: pd.DataFrame | None = None
     if parameter_draws:
@@ -739,6 +1242,11 @@ def run_scenario(
             duration_prior_strength=float(duration_prior_strength),
             mean_prior_strength=float(mean_prior_strength),
             joint_macro=joint_macro,
+            structural_returns=structural_returns,
+            asset_classes=normalized_asset_classes,
+            asset_durations=normalized_asset_durations,
+            asset_income_yields=normalized_asset_income_yields,
+            macro_model=macro_model,
         )
         parameter_summary = summarize_parameter_models(parameter_models, normalized_weights)
 
@@ -767,6 +1275,7 @@ def run_scenario(
                 garch_alpha=float(garch_alpha),
                 garch_beta=float(garch_beta),
                 joint_macro=joint_macro,
+                macro_parameter_uncertainty=macro_parameter_uncertainty,
                 macro_transition_weight=float(macro_transition_weight),
                 dynamic_correlation=dynamic_correlation,
                 dcc_alpha=float(dcc_alpha),
@@ -777,6 +1286,7 @@ def run_scenario(
                 initial_value=initial_value,
                 rebalance_frequency=rebalance_frequency,
                 transaction_cost_bps=float(transaction_cost_bps),
+                state_transaction_cost_multipliers=liquidity_multipliers,
                 expense_ratios=pd.Series(normalized_expense_ratios, dtype=float),
                 leverage_multiple=float(leverage_multiple),
                 financing_rate=float(financing_rate),
@@ -784,12 +1294,21 @@ def run_scenario(
                 state_inflation=simulation_model.metadata.get("state_inflation"),
                 maintenance_margin=float(maintenance_margin),
                 contribution=float(contribution),
+                contribution_allocation=contribution_allocation,
                 withdrawal=float(withdrawal),
+                withdrawal_start_period=int(withdrawal_start_period),
+                decumulation=decumulation_plan,
+                annual_inflation=float(annual_inflation),
+                safe_withdrawal_rate=float(safe_withdrawal_rate),
                 tax_country=tax_country,
                 tax_regime=tax_regime,
                 asset_tax_categories=normalized_tax_categories,
+                asset_tax_metadata=normalized_tax_metadata,
                 italy_annual_wealth_tax=float(italy_annual_wealth_tax),
+                italy_wealth_tax_mode=italy_wealth_tax_mode,
                 tax_terminal_liquidation=bool(tax_terminal_liquidation),
+                tax_start_date=tax_start_date,
+                tax_wrapper_benchmark=bool(tax_wrapper_benchmark),
                 return_kind=return_kind,
                 rate_col=rate_col,
                 inflation_col=inflation_col,
@@ -813,10 +1332,11 @@ def run_scenario(
     if len(simulation_runs) == 1:
         result, wealth, gross_wealth = simulation_runs[0]
     else:
-        wealth = pd.concat(
-            [run_wealth for _, run_wealth, _ in simulation_runs],
-            axis=1,
-            ignore_index=True,
+        wealth = pd.DataFrame(
+            np.concatenate(
+                [run_wealth.to_numpy(dtype=float) for _, run_wealth, _ in simulation_runs],
+                axis=1,
+            )
         )
         wealth.columns = [f"path_{index}" for index in range(wealth.shape[1])]
         for key in _ADDITIVE_WEALTH_ATTRS:
@@ -826,20 +1346,70 @@ def run_scenario(
                     for _, run_wealth, _ in simulation_runs
                 )
             )
+        combined_tax_by_year: dict[str, dict[str, float]] = {}
+        for _, run_wealth, _ in simulation_runs:
+            _merge_tax_by_year(combined_tax_by_year, run_wealth.attrs.get("tax_by_year"))
         wealth.attrs.update(
             {
                 "tax_country": tax_country,
                 "tax_regime": tax_regime,
                 "asset_tax_categories": normalized_tax_categories,
+                "asset_tax_metadata": normalized_tax_metadata,
                 "annual_wealth_tax": float(italy_annual_wealth_tax),
+                "wealth_tax_mode": italy_wealth_tax_mode,
                 "tax_terminal_liquidation": bool(tax_terminal_liquidation),
+                "tax_start_date": tax_start_date,
+                "tax_by_year": combined_tax_by_year,
+                "contribution_allocation": contribution_allocation,
+                "tax_wrapper_benchmark_requested": bool(tax_wrapper_benchmark),
+                "tax_wrapper_benchmark_available": all(
+                    bool(run_wealth.attrs.get("tax_wrapper_benchmark_available", False))
+                    for _, run_wealth, _ in simulation_runs
+                ),
+                "tax_wrapper_unavailable_reason": next(
+                    (
+                        run_wealth.attrs.get("tax_wrapper_unavailable_reason")
+                        for _, run_wealth, _ in simulation_runs
+                        if run_wealth.attrs.get("tax_wrapper_unavailable_reason")
+                    ),
+                    None,
+                ),
+                "wrapper_terminal_values": (
+                    np.concatenate(
+                        [run_wealth.attrs["wrapper_terminal_values"] for _, run_wealth, _ in simulation_runs]
+                    )
+                    if all(run_wealth.attrs.get("wrapper_terminal_values") is not None for _, run_wealth, _ in simulation_runs)
+                    else None
+                ),
+                "wrapper_annualized_returns": (
+                    np.concatenate(
+                        [run_wealth.attrs["wrapper_annualized_returns"] for _, run_wealth, _ in simulation_runs]
+                    )
+                    if all(run_wealth.attrs.get("wrapper_annualized_returns") is not None for _, run_wealth, _ in simulation_runs)
+                    else None
+                ),
+                "decumulation": decumulation_plan.to_dict(),
+                "paired_policy": (
+                    _alternative_decumulation(decumulation_plan).policy
+                    if _alternative_decumulation(decumulation_plan) is not None
+                    else None
+                ),
+                **{
+                    key: np.concatenate(
+                        [np.asarray(run_wealth.attrs[key]) for _, run_wealth, _ in simulation_runs],
+                        axis=1,
+                    )
+                    for key in _PATH_WEALTH_ATTRS
+                    if all(key in run_wealth.attrs for _, run_wealth, _ in simulation_runs)
+                },
             }
         )
         if tax_selection.enabled:
-            gross_wealth = pd.concat(
-                [run_gross for _, _, run_gross in simulation_runs],
-                axis=1,
-                ignore_index=True,
+            gross_wealth = pd.DataFrame(
+                np.concatenate(
+                    [run_gross.to_numpy(dtype=float) for _, _, run_gross in simulation_runs],
+                    axis=1,
+                )
             )
             gross_wealth.columns = wealth.columns
             gross_wealth.attrs.update({"tax_country": "none", "tax_regime": "none"})
@@ -890,6 +1460,27 @@ def run_scenario(
                 [parameter_summary.reset_index(drop=True), pd.DataFrame(terminal_metrics)],
                 axis=1,
             )
+    terminal_groups = [run_wealth.iloc[-1].to_numpy(dtype=float) for _, run_wealth, _ in simulation_runs]
+    total_terminal_count = max(sum(len(values) for values in terminal_groups), 1)
+    group_weights = np.array([len(values) / total_terminal_count for values in terminal_groups], dtype=float)
+    group_means = np.array([float(np.mean(values)) for values in terminal_groups], dtype=float)
+    path_variance = float(
+        sum(weight * float(np.var(values, ddof=0)) for weight, values in zip(group_weights, terminal_groups))
+    )
+    parameter_variance = float(np.sum(group_weights * np.square(group_means - np.sum(group_weights * group_means))))
+    decomposed_variance = path_variance + parameter_variance
+    uncertainty_decomposition = {
+        "path_variance": path_variance,
+        "parameter_variance": parameter_variance,
+        "path_share": path_variance / decomposed_variance if decomposed_variance > 0 else 0.0,
+        "parameter_share": parameter_variance / decomposed_variance if decomposed_variance > 0 else 0.0,
+        "parameter_models": len(parameter_models),
+        "macro_instability_score": float(
+            model.metadata.get("macro_dynamics", {}).get("macro_instability_score", 0.0)
+        ),
+    }
+    model.metadata["uncertainty_decomposition"] = uncertainty_decomposition
+
     walk_forward_result = None
     if walk_forward and model_kind == "quadrant":
         try:
@@ -972,6 +1563,11 @@ def run_scenario(
         annual_inflation=annual_inflation,
         contribution=float(contribution),
         withdrawal=float(withdrawal),
+        withdrawal_start_period=int(withdrawal_start_period),
+        withdrawal_paths=np.asarray(
+            wealth.attrs.get("withdrawal_funded", np.zeros(wealth.shape)),
+            dtype=float,
+        ),
         inflation_paths=inflation_paths,
         risk_free_paths=risk_free_paths,
     )
@@ -1021,6 +1617,17 @@ def run_scenario(
         / max(int(paths), 1),
         "loss_carryforward": float(wealth.attrs.get("loss_carryforward_total", 0.0))
         / max(int(paths), 1),
+        "investment_income_tax": float(wealth.attrs.get("investment_income_tax_total", 0.0))
+        / max(int(paths), 1),
+        "foreign_withholding_tax": float(wealth.attrs.get("foreign_withholding_tax_total", 0.0))
+        / max(int(paths), 1),
+        "financial_transaction_tax": float(
+            wealth.attrs.get("financial_transaction_tax_total", 0.0)
+        ) / max(int(paths), 1),
+        "stamp_duty": float(wealth.attrs.get("stamp_duty_total", 0.0)) / max(int(paths), 1),
+        "ivafe": float(wealth.attrs.get("ivafe_total", 0.0)) / max(int(paths), 1),
+        "expired_losses": float(wealth.attrs.get("expired_losses_total", 0.0))
+        / max(int(paths), 1),
         "annual_wealth_tax_rate": (
             float(italy_annual_wealth_tax) if tax_selection.enabled else 0.0
         ),
@@ -1038,12 +1645,111 @@ def run_scenario(
         if not np.isclose(gross_terminal_median, 0.0)
         else 0.0
     )
+    wrapper_terminal = wealth.attrs.get("wrapper_terminal_values")
+    wrapper_annualized = wealth.attrs.get("wrapper_annualized_returns")
+    wrapper_available = bool(wealth.attrs.get("tax_wrapper_benchmark_available", False))
+    if wrapper_available and wrapper_terminal is not None and wrapper_annualized is not None:
+        wrapper_terminal = np.asarray(wrapper_terminal, dtype=float)
+        wrapper_annualized = np.asarray(wrapper_annualized, dtype=float)
+        if inflation_paths is None:
+            final_deflator = float((1.0 + annual_inflation) ** (-len(wealth) / 12.0))
+            effective_inflation = np.full(len(wrapper_terminal), float(annual_inflation))
+        else:
+            periodic_inflation = np.power(1.0 + inflation_paths, 1.0 / 12.0)
+            cumulative_inflation = np.cumprod(periodic_inflation, axis=0)[-1]
+            final_deflator = 1.0 / cumulative_inflation
+            effective_inflation = np.power(cumulative_inflation, 12.0 / len(wealth)) - 1.0
+        wrapper_reporting_terminal = wrapper_terminal * final_deflator
+        wrapper_real_annualized = (1.0 + wrapper_annualized) / (1.0 + effective_inflation) - 1.0
+        diy_annualized = _cash_flow_adjusted_geometric_returns(
+            wealth,
+            initial_value=float(initial_value),
+            contribution=float(contribution),
+            withdrawal=float(withdrawal),
+            withdrawal_start_period=int(withdrawal_start_period),
+            annual_inflation=float(annual_inflation),
+            inflation_paths=inflation_paths,
+            withdrawal_paths=np.asarray(
+                wealth.attrs.get("withdrawal_funded", np.zeros(wealth.shape)),
+                dtype=float,
+            ),
+        )
+        wrapper_advantage = wrapper_reporting_terminal - active_terminal
+        summary["wrapper_terminal_p05"] = float(np.quantile(wrapper_reporting_terminal, 0.05))
+        summary["wrapper_terminal_median"] = float(np.median(wrapper_reporting_terminal))
+        summary["wrapper_terminal_p95"] = float(np.quantile(wrapper_reporting_terminal, 0.95))
+        summary["wrapper_advantage_median"] = float(np.median(wrapper_advantage))
+        active_median = float(np.median(active_terminal))
+        summary["wrapper_advantage_percent"] = (
+            float(np.median(wrapper_advantage) / active_median)
+            if not np.isclose(active_median, 0.0)
+            else 0.0
+        )
+        summary["wrapper_annual_drag_bps"] = float(
+            np.median(wrapper_real_annualized - diy_annualized) * 10_000.0
+        )
+    else:
+        for key in (
+            "wrapper_terminal_p05",
+            "wrapper_terminal_median",
+            "wrapper_terminal_p95",
+            "wrapper_advantage_median",
+            "wrapper_advantage_percent",
+            "wrapper_annual_drag_bps",
+        ):
+            summary[key] = 0.0
+    horizon_years = max(float(periods) / 12.0, 1.0 / 12.0)
+    net_terminal_median = float(np.median(active_terminal))
+    summary["tax_drag_cagr"] = (
+        (gross_terminal_median / float(initial_value)) ** (1.0 / horizon_years)
+        - (net_terminal_median / float(initial_value)) ** (1.0 / horizon_years)
+        if gross_terminal_median > 0 and net_terminal_median > 0
+        else 0.0
+    )
+    funded_withdrawals = np.asarray(
+        wealth.attrs.get("withdrawal_funded", np.empty(0)), dtype=float
+    )
+    if funded_withdrawals.shape == wealth.shape:
+        withdrawal_totals = funded_withdrawals.sum(axis=0)
+    else:
+        withdrawal_periods = int(periods) - int(withdrawal_start_period) + 1
+        withdrawal_totals = np.full(
+            int(paths), float(withdrawal) * float(withdrawal_periods), dtype=float
+        )
+    gross_taxable_gain = np.maximum(
+        gross_terminal
+        + withdrawal_totals
+        - float(initial_value)
+        - float(contribution) * float(periods),
+        0.0,
+    )
+    average_taxes = float(wealth.attrs.get("taxes_paid_total", 0.0)) / max(int(paths), 1)
+    summary["effective_tax_rate"] = (
+        average_taxes / float(np.mean(gross_taxable_gain))
+        if float(np.mean(gross_taxable_gain)) > 1e-12
+        else 0.0
+    )
     model.metadata["tax_country"] = tax_country
     model.metadata["tax_regime"] = tax_regime
+    model.metadata["decumulation"] = decumulation_plan.to_dict()
     if tax_selection.enabled:
-        model.metadata["asset_tax_categories"] = normalized_tax_categories
+        model.metadata["asset_tax_categories"] = dict(
+            wealth.attrs.get("asset_tax_categories", normalized_tax_categories)
+        )
+        model.metadata["asset_tax_metadata"] = {
+            asset: dict(values)
+            for asset, values in wealth.attrs.get("asset_tax_metadata", normalized_tax_metadata).items()
+        }
         model.metadata["italy_annual_wealth_tax"] = float(italy_annual_wealth_tax)
+        model.metadata["italy_wealth_tax_mode"] = italy_wealth_tax_mode
         model.metadata["tax_terminal_liquidation"] = bool(tax_terminal_liquidation)
+        model.metadata["contribution_allocation"] = contribution_allocation
+        model.metadata["withdrawal_start_period"] = int(withdrawal_start_period)
+        model.metadata["tax_wrapper_benchmark"] = bool(tax_wrapper_benchmark)
+        model.metadata["tax_start_date"] = tax_start_date
+        model.metadata["tax_by_year"] = wealth.attrs.get("tax_by_year", {})
+    model.metadata["state_dependent_liquidity"] = bool(liquidity_multipliers)
+    model.metadata["state_transaction_cost_multipliers"] = liquidity_multipliers or {}
     if parameter_summary is not None:
         terminal_offset = 0
         real_terminal_metrics: list[dict[str, float]] = []

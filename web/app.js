@@ -54,6 +54,8 @@ const FLOW_METRIC_FIELDS = [
   ["total_contributed", "Total contributions"],
   ["total_withdrawn", "Total withdrawals"],
   ["net_external_cash_flow", "Net external cash flow"],
+  ["withdrawal_start_period", "First withdrawal month"],
+  ["withdrawal_periods", "Withdrawal months"],
 ];
 const GOAL_METRIC_FIELDS = [
   ["target_wealth", "Target wealth"],
@@ -74,16 +76,27 @@ const COST_METRIC_FIELDS = [
   ["terminal_tax_drag_median", "Median terminal tax drag"],
   ["terminal_tax_drag_percent", "Median terminal tax drag (%)"],
   ["capital_gains_tax", "In-horizon disposal tax"], ["wealth_tax", "Stamp duty / IVAFE"],
+  ["investment_income_tax", "Dividend / coupon tax"], ["foreign_withholding_tax", "Foreign withholding"],
+  ["financial_transaction_tax", "Italian transaction tax"], ["stamp_duty", "Stamp duty"],
+  ["ivafe", "IVAFE"], ["expired_losses", "Expired tax losses"],
   ["terminal_liquidation_tax", "Final liquidation tax"], ["taxes_paid", "Total taxes"],
   ["realized_gains", "Realized gains"], ["realized_losses", "Realized losses"],
   ["loss_carryforward", "Unused tax-loss base"], ["annual_wealth_tax_rate", "Annual wealth-tax rate"],
+  ["tax_drag_cagr", "Annualized tax drag"], ["effective_tax_rate", "Effective tax rate"],
+  ["wrapper_terminal_p05", "Allocation ETF terminal P05"],
+  ["wrapper_terminal_median", "Allocation ETF terminal median"],
+  ["wrapper_terminal_p95", "Allocation ETF terminal P95"],
+  ["wrapper_advantage_median", "Allocation ETF median advantage"],
+  ["wrapper_advantage_percent", "Allocation ETF advantage (%)"],
+  ["wrapper_annual_drag_bps", "DIY annual tax drag (bps)"],
 ];
 
 const PERCENT_METRICS = new Set([
   "annualized_return", "annualized_volatility", "cash_flow_adjusted_annualized_return",
   "cash_flow_adjusted_volatility", "geometric_annualized_return", "probability_of_loss",
   "effective_risk_free_rate", "effective_financing_rate",
-  "annual_wealth_tax_rate", "terminal_tax_drag_percent",
+  "annual_wealth_tax_rate", "terminal_tax_drag_percent", "tax_drag_cagr", "effective_tax_rate",
+  "wrapper_advantage_percent",
   "max_drawdown_mean", "max_drawdown_p95", "max_drawdown_worst", "ulcer_index_mean", "ulcer_index_p95",
   "goal_success_probability", "risk_of_ruin", "unrecovered_at_horizon", "worst_rolling_return",
   "worst_rolling_return_p05", "median_worst_rolling_return",
@@ -92,9 +105,12 @@ const CURRENCY_METRICS = new Set([
   "mean", "std", "p05", "p50", "p95", "var_95", "expected_shortfall_95", "periodic_contribution",
   "periodic_withdrawal", "total_contributed", "total_withdrawn", "net_external_cash_flow",
   "target_wealth", "expected_goal_shortfall",
-  "capital_gains_tax", "wealth_tax", "terminal_liquidation_tax", "taxes_paid",
+  "capital_gains_tax", "wealth_tax", "investment_income_tax", "foreign_withholding_tax",
+  "financial_transaction_tax", "stamp_duty", "ivafe", "expired_losses", "terminal_liquidation_tax", "taxes_paid",
+  "managed_result_tax", "deferred_tax_payment",
   "realized_gains", "realized_losses", "loss_carryforward",
   "gross_terminal_wealth_median", "after_tax_terminal_wealth_median", "terminal_tax_drag_median",
+  "wrapper_terminal_p05", "wrapper_terminal_median", "wrapper_terminal_p95", "wrapper_advantage_median",
 ]);
 
 const state = {
@@ -107,7 +123,10 @@ const state = {
   lastSimPayload: null,
   labWeights: {},
   pairedResults: null,
+  safeRateResults: null,
   pendingPortfolio: null,
+  taxMetadata: {},
+  decumulation: { phases: [], events: [], initialized: false },
 };
 
 /* ---------- Helpers ---------- */
@@ -192,7 +211,10 @@ function formatMetricValue(key, value, currency = "USD") {
   const numeric = Number(value);
   if (key === "leverage_multiple") return `${numeric.toFixed(1)}x`;
   if (key === "margin_calls") return Math.round(numeric).toLocaleString();
+  if (key === "withdrawal_start_period") return `Month ${Math.round(numeric)}`;
+  if (key === "withdrawal_periods") return `${Math.round(numeric)} mo`;
   if (key.includes("_months")) return `${numeric.toFixed(1)} mo`;
+  if (key === "wrapper_annual_drag_bps") return `${numeric.toFixed(1)} bps`;
   if (PERCENT_METRICS.has(key)) return `${(numeric * 100).toFixed(2)}%`;
   if (CURRENCY_METRICS.has(key)) return `${currency} ${numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   return numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -208,6 +230,20 @@ function compactCurrency(value, currency = "USD") {
     }).format(value);
   } catch {
     return `${currency} ${Number(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  }
+}
+
+function formatCurrency(value, currency = "USD") {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "-";
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 0,
+    }).format(numeric);
+  } catch {
+    return `${currency} ${numeric.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
   }
 }
 
@@ -1078,10 +1114,121 @@ async function fillCsvPayload(payload) {
   }
 }
 
+function defaultDecumulationPhase() {
+  const periods = Math.max(1, Math.round(Number($("periods").value) || 120));
+  const initial = Math.max(0, Number($("initial-value").value) || 100);
+  return {
+    start_month: 1,
+    end_month: periods,
+    frequency: "monthly",
+    annual_real_amount: Math.max(initial * 0.04, 1),
+    spending_multiplier: 1,
+  };
+}
+
+function syncDecumulationFromRows() {
+  if (!document.querySelector(".phase-row") && !document.querySelector(".event-row")) return;
+  state.decumulation.phases = Array.from(document.querySelectorAll(".phase-row")).map((row, index) => {
+    const prior = state.decumulation.phases[index] || {};
+    const amountInput = row.querySelector('[data-field="annual_real_amount"]');
+    const multiplierInput = row.querySelector('[data-field="spending_multiplier"]');
+    return {
+      start_month: Number(row.querySelector('[data-field="start_month"]').value),
+      end_month: Number(row.querySelector('[data-field="end_month"]').value),
+      frequency: row.querySelector('[data-field="frequency"]').value,
+      annual_real_amount: amountInput ? Number(amountInput.value) : Number(prior.annual_real_amount || 0),
+      spending_multiplier: multiplierInput ? Number(multiplierInput.value) : Number(prior.spending_multiplier || 1),
+    };
+  });
+  state.decumulation.events = Array.from(document.querySelectorAll(".event-row")).map((row) => ({
+    month: Number(row.querySelector('[data-field="month"]').value),
+    real_amount: Number(row.querySelector('[data-field="real_amount"]').value),
+  }));
+}
+
+function renderDecumulationEditor() {
+  const periods = Math.max(1, Math.round(Number($("periods").value) || 120));
+  const mode = $("decumulation-mode").value;
+  if (!state.decumulation.initialized) {
+    if (!state.decumulation.phases.length) state.decumulation.phases = [defaultDecumulationPhase()];
+    state.decumulation.initialized = true;
+  }
+  state.decumulation.phases.forEach((phase) => {
+    phase.start_month = Math.min(Math.max(1, Number(phase.start_month) || 1), periods);
+    phase.end_month = Math.min(Math.max(phase.start_month, Number(phase.end_month) || periods), periods);
+  });
+  const phaseList = $("decumulation-phase-list");
+  phaseList.innerHTML = state.decumulation.phases.length ? state.decumulation.phases.map((phase, index) => `
+    <div class="planner-row phase-row" data-index="${index}">
+      <span class="planner-row-index">${index + 1}</span>
+      <label>Start month<input data-field="start_month" type="number" min="1" max="${periods}" step="1" value="${phase.start_month}"></label>
+      <label>End month<input data-field="end_month" type="number" min="1" max="${periods}" step="1" value="${phase.end_month}"></label>
+      <label>Frequency<select data-field="frequency"><option value="monthly" ${phase.frequency === "monthly" ? "selected" : ""}>Monthly</option><option value="quarterly" ${phase.frequency === "quarterly" ? "selected" : ""}>Quarterly</option><option value="annual" ${phase.frequency === "annual" ? "selected" : ""}>Annual</option></select></label>
+      ${mode === "safe_rate"
+        ? `<label>Spending multiplier<input data-field="spending_multiplier" type="number" min="0.01" max="10" step="0.05" value="${phase.spending_multiplier ?? 1}"><span class="hint">× base safe spending</span></label>`
+        : `<label>Annual real spending<input data-field="annual_real_amount" type="number" min="0.01" step="100" value="${phase.annual_real_amount ?? 0}"><span class="hint">${fmt((phase.annual_real_amount || 0) / 12, 0)} / month equivalent</span></label>`}
+      <button type="button" class="planner-remove" data-remove-phase="${index}" aria-label="Remove phase">×</button>
+    </div>`).join("") : '<p class="planner-empty">No recurring phases. Add a phase or use one-time expenses only.</p>';
+  const eventList = $("decumulation-event-list");
+  eventList.innerHTML = state.decumulation.events.length
+    ? state.decumulation.events.map((event, index) => `
+      <div class="planner-row event-row" data-index="${index}">
+        <span class="planner-row-index">${index + 1}</span>
+        <label>Month<input data-field="month" type="number" min="1" max="${periods}" step="1" value="${event.month}"></label>
+        <label>Real amount<input data-field="real_amount" type="number" min="0.01" step="100" value="${event.real_amount}"></label>
+        <button type="button" class="planner-remove" data-remove-event="${index}" aria-label="Remove expense">×</button>
+      </div>`).join("")
+    : '<p class="planner-empty">No one-time expenses. Add only costs that are not part of recurring spending.</p>';
+  phaseList.querySelectorAll("input, select").forEach((input) => input.addEventListener("change", syncDecumulationFromRows));
+  eventList.querySelectorAll("input, select").forEach((input) => input.addEventListener("change", syncDecumulationFromRows));
+  phaseList.querySelectorAll("[data-remove-phase]").forEach((button) => button.addEventListener("click", () => {
+    syncDecumulationFromRows();
+    state.decumulation.phases.splice(Number(button.dataset.removePhase), 1);
+    renderDecumulationEditor();
+    saveControls();
+  }));
+  eventList.querySelectorAll("[data-remove-event]").forEach((button) => button.addEventListener("click", () => {
+    syncDecumulationFromRows();
+    state.decumulation.events.splice(Number(button.dataset.removeEvent), 1);
+    renderDecumulationEditor();
+    saveControls();
+  }));
+}
+
+function gatherDecumulation() {
+  syncDecumulationFromRows();
+  const enabled = $("decumulation-enabled").checked;
+  return {
+    enabled,
+    mode: $("decumulation-mode").value,
+    phases: state.decumulation.phases.map((phase) => ({ ...phase })),
+    one_time_expenses: state.decumulation.events.map((event) => ({ ...event })),
+    policy: {
+      type: $("decumulation-policy").value,
+      review_months: 12,
+      upper_guardrail: Number($("guardrail-upper").value) / 100,
+      lower_guardrail: Number($("guardrail-lower").value) / 100,
+      adjustment: Number($("guardrail-adjustment").value) / 100,
+      floor: Number($("guardrail-floor").value) / 100,
+      ceiling: Number($("guardrail-ceiling").value) / 100,
+      skip_inflation_after_negative_real_return: $("guardrail-skip-inflation").checked,
+    },
+    safe_rate: {
+      objective: $("decumulation-objective").value,
+      target_probability: Number($("decumulation-target").value) / 100,
+      minimum_bequest: Number($("decumulation-bequest").value),
+      maximum_rate: 0.25,
+      precision: 0.0005,
+    },
+    annual_inflation_fallback: Number($("decumulation-inflation").value) / 100,
+  };
+}
+
 function gatherScenario() {
   const quadrantModel = $("model-kind").value === "quadrant";
   const parametricReturns = ["normal", "student_t"].includes($("distribution").value);
   const taxCountry = $("tax-country").value;
+  const decumulationEnabled = $("decumulation-enabled").checked;
   return {
     growth_threshold: thresholdPayload("growth-threshold", "growth-fixed"),
     inflation_threshold: thresholdPayload("inflation-threshold", "inflation-fixed"),
@@ -1096,8 +1243,12 @@ function gatherScenario() {
     block_size: Number($("block-size").value),
     rebalance: $("rebalance").value,
     cost_bps: ["legacy", "buy_hold"].includes($("rebalance").value) ? 0 : Number($("cost-bps").value),
+    state_dependent_liquidity: $("state-dependent-liquidity").checked,
     contribution: Number($("contribution").value),
-    withdrawal: Number($("withdrawal").value),
+    contribution_allocation: $("contribution-allocation").value,
+    withdrawal: decumulationEnabled ? Number($("withdrawal").value) : 0,
+    withdrawal_start_period: decumulationEnabled ? Number($("withdrawal-start-period").value) : 1,
+    decumulation: gatherDecumulation(),
     initial_value: Number($("initial-value").value),
     target_wealth: Number($("target-wealth").value),
     expense_ratios: $("expense-ratios").value,
@@ -1107,9 +1258,12 @@ function gatherScenario() {
     maintenance_margin: Number($("maintenance-margin").value),
     tax_country: taxCountry,
     tax_regime: taxCountry === "IT" ? $("tax-regime").value : "none",
-    asset_tax_categories: $("asset-tax-categories").value,
+    asset_tax_metadata: taxCountry === "IT" ? gatherTaxMetadata() : {},
     italy_wealth_tax: Number($("italy-wealth-tax").value),
+    italy_wealth_tax_mode: $("italy-wealth-tax-mode").value,
     tax_terminal_liquidation: $("tax-terminal-liquidation").checked,
+    tax_wrapper_benchmark: $("tax-wrapper-benchmark").checked,
+    tax_start_date: $("tax-start-date").value,
     workers: $("workers").value === "" ? null : Number($("workers").value),
     risk_free_rate: Number($("risk-free").value),
     annual_inflation: Number($("annual-inflation").value),
@@ -1135,6 +1289,12 @@ function gatherScenario() {
     parameter_draws: quadrantModel ? Number($("parameter-draws").value) : 0,
     parameter_block_size: Number($("parameter-block-size").value),
     joint_macro: quadrantModel && parametricReturns && $("joint-macro").checked,
+    macro_model: $("macro-model").value,
+    macro_parameter_uncertainty: $("macro-parameter-uncertainty").checked,
+    structural_returns: $("structural-returns").checked,
+    asset_classes: $("asset-classes").value,
+    asset_durations: $("asset-durations").value,
+    asset_income_yields: $("asset-income-yields").value,
     macro_transition_weight: Number($("macro-transition-weight").value),
     dynamic_correlation: parametricReturns && $("dynamic-correlation").checked,
     dcc_alpha: Number($("dcc-alpha").value),
@@ -1173,12 +1333,21 @@ function validateScenario() {
   if (leverage > 1 && margin >= 1 / leverage) {
     errors.push("Maintenance margin must be below the initial equity margin for the selected leverage.");
   }
-  const italianTaxes = $("tax-country").value === "IT" && $("tax-regime").value === "italy_administered";
+  const italianTaxes = $("tax-country").value === "IT";
   if (italianTaxes && $("rebalance").value === "legacy") {
     errors.push("Italian tax accounting requires holdings-based accounting, not legacy weighted returns.");
   }
   if (italianTaxes && leverage > 1) {
     errors.push("Italian tax accounting is not available with leveraged portfolios.");
+  }
+  if ($("contribution-allocation").value === "underweight_first" && $("rebalance").value === "legacy") {
+    errors.push("Underweight-first contributions require holdings-based accounting.");
+  }
+  if ($("contribution-allocation").value === "underweight_first" && leverage > 1) {
+    errors.push("Underweight-first contributions are not available with leverage.");
+  }
+  if ($("state-dependent-liquidity").checked && leverage > 1) {
+    errors.push("State-dependent trading costs are not available with leverage.");
   }
   if (!(Number($("initial-value").value) > 0)) {
     errors.push("Initial portfolio value must be positive.");
@@ -1193,8 +1362,27 @@ function validateScenario() {
   if (!Number.isInteger(periods) || periods < 1 || periods > 360) {
     errors.push("Periods must be between 1 and 360.");
   }
-  if (!Number.isInteger(paths) || paths < 1 || paths > 120000) {
-    errors.push("Paths must be between 1 and 120,000.");
+  const decumulationEnabled = $("decumulation-enabled").checked;
+  if (decumulationEnabled) {
+    const plan = gatherDecumulation();
+    if (!plan.phases.length && !plan.one_time_expenses.length) errors.push("Add at least one spending phase or one-time expense.");
+    const sorted = [...plan.phases].sort((a, b) => a.start_month - b.start_month);
+    sorted.forEach((phase, index) => {
+      if (!Number.isInteger(phase.start_month) || !Number.isInteger(phase.end_month) || phase.start_month < 1 || phase.end_month > periods || phase.end_month < phase.start_month) {
+        errors.push(`Phase ${index + 1} must use valid inclusive months within the simulation horizon.`);
+      }
+      if (plan.mode === "manual" && !(phase.annual_real_amount > 0)) errors.push(`Phase ${index + 1} requires positive annual real spending.`);
+      if (plan.mode === "safe_rate" && !(phase.spending_multiplier > 0)) errors.push(`Phase ${index + 1} requires a positive spending multiplier.`);
+      if (index && phase.start_month <= sorted[index - 1].end_month) errors.push("Recurring spending phases cannot overlap.");
+    });
+    plan.one_time_expenses.forEach((event, index) => {
+      if (!Number.isInteger(event.month) || event.month < 1 || event.month > periods || !(event.real_amount > 0)) errors.push(`One-time expense ${index + 1} needs a valid month and positive amount.`);
+    });
+    if (!(plan.safe_rate.target_probability > 0 && plan.safe_rate.target_probability < 1)) errors.push("Target probability must be between 0% and 100%.");
+    if (plan.safe_rate.objective === "minimum_bequest" && plan.safe_rate.minimum_bequest < 0) errors.push("Minimum bequest cannot be negative.");
+  }
+  if (!Number.isInteger(paths) || paths < 1 || paths > 500000) {
+    errors.push("Paths must be between 1 and 500,000.");
   }
   if (workers !== null && (!Number.isInteger(workers) || workers < 1 || workers > 16)) {
     errors.push("Workers must be between 1 and 16.");
@@ -1206,7 +1394,7 @@ function updateMethodologyControls() {
   const isHMM = $("model-kind").value === "hmm";
   const distribution = $("distribution").value;
   const legacy = ["legacy", "buy_hold"].includes($("rebalance").value);
-  const italianTaxes = $("tax-country").value === "IT" && $("tax-regime").value === "italy_administered";
+  const italianTaxes = $("tax-country").value === "IT";
   $("quadrant-calibration").classList.toggle("hidden", isHMM);
   $("hmm-states-group").classList.toggle("hidden", !isHMM);
   $("threshold-window-group").classList.toggle("hidden", isHMM);
@@ -1221,16 +1409,42 @@ function updateMethodologyControls() {
   $("cost-bps").disabled = legacy;
   $("cost-bps-group").classList.toggle("methodology-muted", legacy);
   document.querySelectorAll(".tax-settings").forEach((element) => element.classList.toggle("hidden", !italianTaxes));
+  const wrapperUnavailable = $("tax-regime").value === "italy_managed" || !$("tax-terminal-liquidation").checked;
+  $("tax-wrapper-benchmark").disabled = wrapperUnavailable;
   $("garch").disabled = distribution !== "normal";
   const parametric = distribution === "normal" || distribution === "student_t";
   $("joint-macro").disabled = !parametric || isHMM;
+  $("macro-model").disabled = !parametric || isHMM || !$("joint-macro").checked;
+  $("macro-parameter-uncertainty").disabled = !parametric || isHMM || !$("joint-macro").checked;
+  $("structural-returns").disabled = !parametric || isHMM || !$("joint-macro").checked;
   $("dynamic-correlation").disabled = !parametric;
   $("parameter-draws").disabled = isHMM;
   $("transition-uncertainty").disabled = Number($("parameter-draws").value) > 0;
   $("garch-hint").textContent = distribution === "normal"
     ? "GARCH requires the Normal return distribution."
     : "GARCH is disabled because the selected return distribution is not Normal.";
+  updateWithdrawalStartControl();
   updateRunAvailability();
+}
+
+function updateWithdrawalStartControl() {
+  const fields = $("decumulation-fields");
+  const hint = $("withdrawal-start-hint");
+  const periods = Math.max(1, Math.round(Number($("periods").value) || 1));
+  const enabled = $("decumulation-enabled").checked;
+  fields.querySelectorAll("input, select, button").forEach((control) => { control.disabled = !enabled; });
+  fields.setAttribute("aria-disabled", String(!enabled));
+  $("guardrail-settings").classList.toggle("hidden", $("decumulation-policy").value !== "guyton_klinger");
+  $("bequest-field").classList.toggle("hidden", $("decumulation-objective").value !== "minimum_bequest");
+  $("safe-rate-btn").classList.toggle("hidden", !enabled || $("decumulation-mode").value !== "safe_rate");
+  if (enabled) $("safe-rate-btn").disabled = false;
+  if (!enabled) {
+    hint.textContent = "Turn on decumulation to configure spending.";
+  } else if ($("decumulation-mode").value === "safe_rate") {
+    hint.textContent = `The solver tests 0–25% in 0.05-point steps on the same ${Number($("paths").value).toLocaleString()} paths.`;
+  } else {
+    hint.textContent = `${state.decumulation.phases.length} phase${state.decumulation.phases.length === 1 ? "" : "s"}; month 1 means spending begins immediately.`;
+  }
 }
 
 function gatherCorrelationTargets() {
@@ -1263,6 +1477,74 @@ function selectedTickers() {
   return Array.from(document.querySelectorAll('#ticker-list input[type="checkbox"]:checked')).map((el) => el.value);
 }
 
+function defaultTaxMetadata(ticker) {
+  const base = String(ticker).replace(/_SIM$/, "").replace(/SIM$/, "");
+  const government = ["IEF", "TLT", "SHY", "TIP"].includes(base);
+  return {
+    category: government ? "government_bond_fund" : "fund",
+    government_bond_fraction: government ? 1 : 0,
+    annual_income_yield: 0,
+    foreign_withholding_rate: 0,
+    foreign_tax_credit_rate: 0,
+    financial_transaction_tax_rate: 0,
+    account_location: "domestic",
+  };
+}
+
+function gatherTaxMetadata() {
+  const metadata = {};
+  selectedTickers().forEach((ticker) => {
+    metadata[ticker] = { ...(state.taxMetadata[ticker] || defaultTaxMetadata(ticker)) };
+  });
+  return metadata;
+}
+
+function renderTaxInstrumentEditor() {
+  const container = $("tax-instrument-editor");
+  if (!container) return;
+  container.innerHTML = "";
+  selectedTickers().forEach((ticker) => {
+    const metadata = state.taxMetadata[ticker] || defaultTaxMetadata(ticker);
+    state.taxMetadata[ticker] = metadata;
+    const row = document.createElement("div");
+    row.className = "tax-instrument-row";
+    const symbol = document.createElement("strong");
+    symbol.textContent = ticker;
+    row.appendChild(symbol);
+
+    const addSelect = (labelText, key, options) => {
+      const label = document.createElement("label");
+      label.appendChild(document.createTextNode(labelText));
+      const select = document.createElement("select");
+      options.forEach(([value, text]) => {
+        const option = document.createElement("option");
+        option.value = value; option.textContent = text; select.appendChild(option);
+      });
+      select.value = metadata[key];
+      select.addEventListener("change", () => { metadata[key] = select.value; updateRunAvailability(); });
+      label.appendChild(select); row.appendChild(label);
+    };
+    const addPercent = (labelText, key, max = 100) => {
+      const label = document.createElement("label");
+      label.appendChild(document.createTextNode(labelText));
+      const input = document.createElement("input");
+      input.type = "number"; input.min = "0"; input.max = String(max); input.step = "0.1";
+      input.value = String(Number((Number(metadata[key] || 0) * 100).toFixed(4)));
+      input.addEventListener("input", () => { metadata[key] = Number(input.value || 0) / 100; updateRunAvailability(); });
+      label.appendChild(input); row.appendChild(label);
+    };
+
+    addSelect("Category", "category", [
+      ["standard", "Direct security"], ["fund", "Fund / ETF"],
+      ["government_bond", "Government bond"], ["government_bond_fund", "Government-bond fund"],
+    ]);
+    addPercent("Govt share %", "government_bond_fraction");
+    addPercent("Italian FTT %", "financial_transaction_tax_rate", 5);
+    addSelect("Account", "account_location", [["domestic", "Italian intermediary"], ["foreign", "Foreign account"]]);
+    container.appendChild(row);
+  });
+}
+
 let assetColors = {};
 
 function assetColor(ticker) {
@@ -1281,6 +1563,7 @@ function renderWeightEditor() {
     container.innerHTML = "<p class='status'>No assets selected.</p>";
     state.selected = selected;
     updateWeightTotal();
+    renderTaxInstrumentEditor();
     return;
   }
   selected.forEach((ticker) => {
@@ -1321,6 +1604,7 @@ function renderWeightEditor() {
   });
   state.selected = selected;
   updateWeightTotal();
+  renderTaxInstrumentEditor();
 }
 
 function updateWeightTotal() {
@@ -1517,8 +1801,15 @@ function renderScenarioChips(payload, data) {
   chips.push(`${payload.periods} periods x ${payload.paths} paths`);
   chips.push(`Target ${formatMetricValue("target_wealth", payload.target_wealth, data.currency)}`);
   if (Number(payload.contribution) > 0) chips.push(`+${fmt(payload.contribution, 0)}/period`);
-  if (Number(payload.withdrawal) > 0) chips.push(`−${fmt(payload.withdrawal, 0)}/period`);
-  if (payload.tax_country === "IT" && payload.tax_regime === "italy_administered") chips.push("Italy after tax");
+  if (payload.decumulation?.enabled) {
+    const phases = payload.decumulation.phases || [];
+    const events = payload.decumulation.one_time_expenses || [];
+    chips.push(`${phases.length} retirement phase${phases.length === 1 ? "" : "s"}${events.length ? ` + ${events.length} one-time` : ""}`);
+    chips.push(payload.decumulation.mode === "safe_rate" ? "Safe-rate planning" : payload.decumulation.policy?.type === "guyton_klinger" ? "Guardrails" : "Fixed real spending");
+  } else if (Number(payload.withdrawal) > 0) {
+    chips.push(`−${fmt(payload.withdrawal, 0)}/period from month ${payload.withdrawal_start_period}`);
+  }
+  if (payload.tax_country === "IT") chips.push(`Italy · ${String(payload.tax_regime).replace("italy_", "")}`);
   chips.push(data.terms === "real" ? "Real terms" : "Nominal");
   chips.push(data.currency);
   chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
@@ -1527,6 +1818,8 @@ function renderScenarioChips(payload, data) {
   if (payload.probabilistic_regimes) chips.push("HSMM-filtered moment weights");
   if (Number(payload.parameter_draws) > 0) chips.push(`${payload.parameter_draws} parameter draws`);
   if (payload.joint_macro) chips.push("Joint macro paths");
+  if (payload.structural_returns) chips.push("Structural asset links");
+  if (payload.state_dependent_liquidity) chips.push("Regime liquidity costs");
   if (payload.dynamic_correlation) chips.push("Dynamic dependence");
   if (Number(payload.leverage_multiple || 1) > 1) chips.push(`${Number(payload.leverage_multiple).toFixed(1)}x leverage`);
   el.innerHTML = chips.map((text) => `<span class="chip">${escapeHtml(text)}</span>`).join("");
@@ -1548,6 +1841,10 @@ function renderMethodologyReport(data) {
         : hsmmActive ? "HSMM convergence limit reached" : "Return-state HMM selected"],
     [Number(methodology.parameter_draws) > 0, `${Number(methodology.parameter_draws) || 0} parameter recalibrations`],
     [Boolean(methodology.joint_macro), "Joint macro/market paths"],
+    [methodology.macro_model === "bvar_ensemble", "Bayesian VAR with rolling stability blend"],
+    [Boolean(methodology.macro_parameter_uncertainty), "Macro-parameter posterior draws"],
+    [Boolean(methodology.structural_returns), "Structural asset-class priors"],
+    [Boolean(methodology.state_dependent_liquidity), "Regime-dependent trading costs"],
     [methodology.rate_model === "joint_macro_path", "Stochastic policy-rate paths"],
     [Boolean(methodology.dynamic_correlation), "Asymmetric dynamic dependence"],
     [validationAvailable && validation.advantage_vs_student_t_mean > 0, validationAvailable
@@ -1963,6 +2260,110 @@ function renderDecisionAnalytics(data) {
   }
 }
 
+function renderTaxYearReport(data) {
+  const report = $("tax-year-report");
+  const table = $("tax-year-table");
+  if (!report || !table) return;
+  const rows = Object.entries(data.taxes?.by_year || {}).sort(([left], [right]) => Number(left) - Number(right));
+  report.classList.toggle("hidden", rows.length === 0);
+  if (!rows.length) {
+    table.innerHTML = "";
+    return;
+  }
+  const fields = [
+    ["investment_income_tax", "Income tax"],
+    ["foreign_withholding_tax", "Foreign withholding"],
+    ["capital_gains_tax", "Disposal liability"],
+    ["managed_result_tax", "Managed-result tax"],
+    ["deferred_tax_payment", "Deferred payment"],
+    ["financial_transaction_tax", "Italian FTT"],
+    ["stamp_duty", "Bollo"],
+    ["ivafe", "IVAFE"],
+    ["terminal_liquidation_tax", "Final liquidation"],
+    ["expired_losses", "Expired losses"],
+  ];
+  const activeFields = fields.filter(([key]) => rows.some(([, values]) => Math.abs(Number(values[key] || 0)) > 1e-10));
+  const headings = ["Tax year", ...activeFields.map(([, label]) => label)];
+  table.innerHTML = `<table><thead><tr>${headings.map((heading) => `<th>${escapeHtml(heading)}</th>`).join("")}</tr></thead><tbody>${rows.map(([year, values]) => {
+    const cells = [escapeHtml(year), ...activeFields.map(([key]) => escapeHtml(formatMetricValue(key, values[key] || 0, data.currency)))];
+    return `<tr>${cells.map((cell, index) => `<td>${index ? cell : `<strong>${cell}</strong>`}</td>`).join("")}</tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+function renderRetirement(retirement, currency = state.results?.currency || "USD") {
+  if (!retirement?.enabled) {
+    $("retirement-empty").classList.remove("hidden");
+    $("retirement-content").classList.add("hidden");
+    return;
+  }
+  $("retirement-empty").classList.add("hidden");
+  $("retirement-content").classList.remove("hidden");
+  const metrics = retirement.metrics || {};
+  const metricItems = [
+    ["Success probability", pct(metrics.success_probability || 0, 1)],
+    ["Funded-spending ratio", pct(metrics.funded_spending_ratio || 0, 1)],
+    ["Median real spending", formatCurrency(metrics.median_cumulative_real_spending || 0, currency)],
+    ["Exhaustion probability", pct(metrics.probability_of_exhaustion || 0, 1)],
+    ["Median first shortfall", metrics.median_first_shortfall_month ? `Month ${fmt(metrics.median_first_shortfall_month, 0)}` : "Never"],
+    ["Terminal median", formatCurrency(metrics.terminal_median || 0, currency)],
+    ["Chance of a cut", pct(metrics.probability_of_cut || 0, 1)],
+    ["Chance of an increase", pct(metrics.probability_of_increase || 0, 1)],
+  ];
+  $("retirement-metrics").innerHTML = metricItems.map(([label, value]) => `<div class="metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  const policy = retirement.config?.policy?.type || retirement.config?.policy || "fixed";
+  $("retirement-policy-badge").textContent = policy === "guyton_klinger" ? "Guyton–Klinger" : "Fixed real";
+  lineChart($("chart-retirement-survival"), retirement.periods || [], [
+    { name: "Fully funded", color: "#6fa58c", values: retirement.survival_probability || [] },
+  ], { yFormatter: (value) => pct(value, 0), valueFormatter: (value) => pct(value, 1), yLabel: "Probability" });
+  bandChart($("chart-retirement-spending"), retirement.periods || [], {
+    low: retirement.funded_spending?.p05 || [],
+    median: retirement.funded_spending?.median || [],
+    high: retirement.funded_spending?.p95 || [],
+    color: "#b8d0d6",
+  }, { yLabel: "Real net spending", valueFormatter: (value) => formatCurrency(value, currency) });
+  bandChart($("chart-retirement-cumulative"), retirement.periods || [], {
+    low: retirement.cumulative_real_spending?.p05 || [],
+    median: retirement.cumulative_real_spending?.median || [],
+    high: retirement.cumulative_real_spending?.p95 || [],
+    color: "#d7a86e",
+  }, { yLabel: "Cumulative spending", valueFormatter: (value) => formatCurrency(value, currency) });
+
+  const safe = retirement.safe_rate;
+  $("safe-rate-report").classList.toggle("hidden", !safe);
+  if (safe) {
+    const selected = safe.policies?.[safe.selected_policy];
+    $("safe-rate-value").textContent = selected?.display_rate || "—";
+    $("safe-rate-caption").textContent = `${pct(selected?.probability || 0, 1)} estimated success; Wilson 95% interval ${pct(selected?.wilson_95?.[0] || 0, 1)}–${pct(selected?.wilson_95?.[1] || 0, 1)}. Target ${pct(safe.target_probability || 0, 0)}.`;
+    const curve = selected?.curve || [];
+    lineChart($("chart-safe-rate"), curve.map((row) => row.rate * 100), [
+      { name: "Success probability", color: "#a78bfa", values: curve.map((row) => row.probability) },
+      { name: "Target", color: "#d7a86e", values: curve.map(() => safe.target_probability), dash: "5 4" },
+    ], { numericX: true, xLabel: "Initial withdrawal rate (%)", yLabel: "Probability", yFormatter: (value) => pct(value, 0), valueFormatter: (value) => pct(value, 1) });
+  }
+
+  const safePolicies = safe?.policies || {};
+  const comparison = retirement.paired_comparison || [];
+  $("retirement-comparison").innerHTML = comparison.length
+    ? `<table><thead><tr><th>Policy</th><th>Success</th><th>Funded</th><th>Median spending</th><th>Terminal median</th><th>Safe rate</th></tr></thead><tbody>${comparison.map((row) => `<tr><td><strong>${row.policy === "guyton_klinger" ? "Guardrail" : "Fixed"}</strong></td><td>${pct(row.success_probability, 1)}</td><td>${pct(row.funded_spending_ratio, 1)}</td><td>${formatCurrency(row.median_real_spending, currency)}</td><td>${formatCurrency(row.terminal_median, currency)}</td><td>${safePolicies[row.policy]?.display_rate || "Run solver"}</td></tr>`).join("")}</tbody></table>`
+    : '<p class="status">Run a manual analysis or safe-rate solver to compare policies.</p>';
+
+  const taxRows = Object.entries(retirement.tax_by_year || {});
+  $("retirement-tax-card").classList.toggle("hidden", !taxRows.length);
+  if (taxRows.length) {
+    $("retirement-tax-table").innerHTML = `<table><thead><tr><th>Year</th><th>Taxes</th><th>Gross sales</th><th>Net spending</th></tr></thead><tbody>${taxRows.map(([year, values]) => {
+      const disposalTax = Number(values.deferred_tax_payment || 0) || Number(values.managed_result_tax || 0) || Number(values.capital_gains_tax || 0);
+      const tax = disposalTax
+        + Number(values.investment_income_tax || 0)
+        + Number(values.foreign_withholding_tax || 0)
+        + Number(values.financial_transaction_tax || 0)
+        + Number(values.stamp_duty || 0)
+        + Number(values.ivafe || 0)
+        + Number(values.terminal_liquidation_tax || 0);
+      return `<tr><td><strong>${escapeHtml(year)}</strong></td><td>${formatCurrency(tax, currency)}</td><td>${formatCurrency(values.gross_sales_for_spending || 0, currency)}</td><td>${formatCurrency(values.net_spending || 0, currency)}</td></tr>`;
+    }).join("")}</tbody></table>`;
+  }
+}
+
 function renderResults(data) {
   $("intro").classList.add("hidden");
   ["growth", "returns", "drawdowns", "correlations", "monthly"].forEach((name) => {
@@ -1977,9 +2378,21 @@ function renderResults(data) {
   $("macro-chart-title").textContent = data.model_kind === "hmm" ? "HMM states / macro history" : "Macro quadrants";
   renderMetricGrid("metric-grid", METRIC_FIELDS, data);
   renderMetricGrid("goal-metric-grid", GOAL_METRIC_FIELDS, data);
-  const hasCashFlows = Number(data.summary.periodic_contribution || 0) > 0 || Number(data.summary.periodic_withdrawal || 0) > 0;
+  const hasCashFlows = Number(data.summary.periodic_contribution || 0) > 0
+    || Number(data.summary.periodic_withdrawal || 0) > 0
+    || Boolean(data.retirement?.enabled);
   $("cash-flow-performance").classList.toggle("hidden", !hasCashFlows);
-  if (hasCashFlows) renderMetricGrid("flow-metric-grid", FLOW_METRIC_FIELDS, data);
+  if (hasCashFlows) {
+    const flowFields = Number(data.summary.periodic_withdrawal || 0) > 0 || data.retirement?.enabled
+      ? FLOW_METRIC_FIELDS
+      : FLOW_METRIC_FIELDS.slice(0, 3);
+    renderMetricGrid("flow-metric-grid", flowFields, data);
+    $("cash-flow-performance").querySelector(".caption").textContent = data.retirement?.enabled
+      ? "The Retirement tab reports path-specific real spending, funding success, guardrails, and paired-policy results. Performance remains time-weighted."
+      : Number(data.summary.periodic_withdrawal || 0) > 0
+      ? `Decumulation begins in month ${data.summary.withdrawal_start_period}. Performance remains time-weighted and excludes external cash-flow effects.`
+      : "Annualized performance above is time-weighted and excludes external cash-flow effects. Terminal wealth still includes contributions.";
+  }
   const costs = data.costs || {};
   const hasCosts = Number(costs.leverage_multiple || 1) > 1
     || Number(costs.weighted_expense_ratio || 0) > 0
@@ -1987,6 +2400,8 @@ function renderResults(data) {
     || state.lastSimPayload?.tax_country === "IT";
   $("cost-assumptions").classList.toggle("hidden", !hasCosts);
   if (hasCosts) renderMetricGrid("cost-metric-grid", COST_METRIC_FIELDS, { summary: costs, currency: data.currency });
+  renderTaxYearReport(data);
+  renderRetirement(data.retirement, data.currency);
   $("stale-results").classList.add("hidden");
   $("risk-caption").textContent =
     `${data.terms === "real" ? "Real (inflation-adjusted) | " : "Nominal | "}` +
@@ -2181,6 +2596,9 @@ async function onRun() {
     `${Number($("paths").value).toLocaleString()} paths · ${Number($("periods").value)} months`,
   );
   try {
+    if ($("decumulation-enabled").checked && $("decumulation-mode").value === "safe_rate") {
+      throw new Error("Safe-rate mode runs only with Calculate safe rate. Switch to Manual for a quick analysis.");
+    }
     const currentLoadPayload = gatherLoadPayload();
     await fillCsvPayload(currentLoadPayload);
     const dataInputsChanged = JSON.stringify(currentLoadPayload) !== JSON.stringify(state.loadPayload);
@@ -2208,6 +2626,47 @@ async function onRun() {
   } finally {
     hideOverlay();
     updateRunAvailability();
+  }
+}
+
+async function onSafeRate() {
+  const message = $("run-message");
+  const button = $("safe-rate-btn");
+  button.disabled = true;
+  showOverlay(
+    "Calculating safe rate...",
+    "Calibrating once, then comparing fixed and guardrail spending on identical market paths",
+  );
+  try {
+    const errors = validateScenario();
+    if (errors.length) throw new Error(errors[0]);
+    if (!$("decumulation-enabled").checked || $("decumulation-mode").value !== "safe_rate") {
+      throw new Error("Enable decumulation and select Calculate safe rate first.");
+    }
+    const currentLoadPayload = gatherLoadPayload();
+    await fillCsvPayload(currentLoadPayload);
+    const dataInputsChanged = JSON.stringify(currentLoadPayload) !== JSON.stringify(state.loadPayload);
+    if (!state.loadResult || dataInputsChanged) {
+      await onLoad();
+      if (!state.loadResult) return;
+      showOverlay("Calculating safe rate...", "Reusing one calibrated set of market paths for both policies");
+    }
+    const payload = gatherSimPayload();
+    const data = await postJSON("/api/safe-rate", payload);
+    state.lastSimPayload = payload;
+    state.safeRateResults = data;
+    if (state.results) state.results.retirement = data.retirement;
+    setStatus(message, data.message);
+    renderRetirement(data.retirement, state.results?.currency || payload.base_currency);
+    notify("Safe-rate analysis complete", "success");
+    switchTab("tab-retirement");
+    requestAnimationFrame(focusResults);
+  } catch (error) {
+    setStatus(message, error.message, true);
+    notify(error.message, "error");
+  } finally {
+    hideOverlay();
+    updateWithdrawalStartControl();
   }
 }
 
@@ -2294,20 +2753,26 @@ const CONTROL_IDS = [
   "csv-growth", "csv-inflation", "csv-rate", "base-currency", "currency-map", "corr-blend",
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
   "macro-lag", "transition-uncertainty", "periods", "paths", "workers", "seed", "distribution",
-  "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "contribution", "withdrawal",
+  "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "contribution", "contribution-allocation", "withdrawal", "withdrawal-start-period",
+  "decumulation-mode", "decumulation-policy", "decumulation-objective", "decumulation-target",
+  "decumulation-bequest", "decumulation-inflation", "guardrail-upper", "guardrail-lower",
+  "guardrail-adjustment", "guardrail-floor", "guardrail-ceiling",
   "initial-value", "target-wealth",
   "risk-free", "annual-inflation", "expense-ratios", "leverage-multiple", "financing-rate",
   "financing-inflation-sensitivity", "maintenance-margin",
-  "tax-country", "tax-regime", "asset-tax-categories", "italy-wealth-tax",
+  "tax-country", "tax-regime", "italy-wealth-tax",
+  "italy-wealth-tax-mode", "tax-start-date",
   "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
   "regime-temperature", "regime-smoothing-window", "regime-hysteresis",
   "regime-confirmation-periods", "duration-prior-strength", "mean-prior-strength",
   "parameter-draws", "parameter-block-size",
-  "macro-transition-weight", "dcc-alpha", "dcc-beta", "dcc-asymmetry",
+  "macro-transition-weight", "macro-model", "asset-classes", "asset-durations", "asset-income-yields",
+  "dcc-alpha", "dcc-beta", "dcc-asymmetry",
 ];
 
 function saveControls() {
-  const data = { schemaVersion: 7 };
+  syncDecumulationFromRows();
+  const data = { schemaVersion: 14 };
   CONTROL_IDS.forEach((id) => {
     const el = $(id);
     if (el) data[id] = el.value;
@@ -2322,6 +2787,14 @@ function saveControls() {
   data.jointMacro = $("joint-macro").checked;
   data.dynamicCorrelation = $("dynamic-correlation").checked;
   data.taxTerminalLiquidation = $("tax-terminal-liquidation").checked;
+  data.taxWrapperBenchmark = $("tax-wrapper-benchmark").checked;
+  data.macroParameterUncertainty = $("macro-parameter-uncertainty").checked;
+  data.structuralReturns = $("structural-returns").checked;
+  data.stateDependentLiquidity = $("state-dependent-liquidity").checked;
+  data.decumulationEnabled = $("decumulation-enabled").checked;
+  data.decumulation = JSON.parse(JSON.stringify(state.decumulation));
+  data.guardrailSkipInflation = $("guardrail-skip-inflation").checked;
+  data.taxMetadata = state.taxMetadata;
   data.corrTargets = gatherCorrelationTargets();
   localStorage.setItem("mcq-controls", JSON.stringify(data));
 }
@@ -2343,6 +2816,14 @@ function applyControlSnapshot(data) {
   if (data.jointMacro !== undefined) $("joint-macro").checked = data.jointMacro;
   if (data.dynamicCorrelation !== undefined) $("dynamic-correlation").checked = data.dynamicCorrelation;
   if (data.taxTerminalLiquidation !== undefined) $("tax-terminal-liquidation").checked = data.taxTerminalLiquidation;
+  if (data.taxWrapperBenchmark !== undefined) $("tax-wrapper-benchmark").checked = data.taxWrapperBenchmark;
+  if (data.macroParameterUncertainty !== undefined) $("macro-parameter-uncertainty").checked = data.macroParameterUncertainty;
+  if (data.structuralReturns !== undefined) $("structural-returns").checked = data.structuralReturns;
+  if (data.stateDependentLiquidity !== undefined) $("state-dependent-liquidity").checked = data.stateDependentLiquidity;
+  if (data.decumulationEnabled !== undefined) $("decumulation-enabled").checked = data.decumulationEnabled;
+  if (data.decumulation) state.decumulation = data.decumulation;
+  if (data.guardrailSkipInflation !== undefined) $("guardrail-skip-inflation").checked = data.guardrailSkipInflation;
+  if (data.taxMetadata) state.taxMetadata = data.taxMetadata;
   document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
     if (data.corrTargets && data.corrTargets[slider.dataset.state] !== undefined) slider.value = data.corrTargets[slider.dataset.state];
   });
@@ -2372,6 +2853,34 @@ function restoreControls() {
         const legacyTaxRegime = String(data["tax-regime"] || "none");
         data["tax-country"] = legacyTaxRegime === "italy_administered" ? "IT" : "none";
         data["tax-regime"] = "italy_administered";
+      }
+      if (Number(data.schemaVersion || 0) < 12 && data.taxMetadata) {
+        Object.values(data.taxMetadata).forEach((metadata) => {
+          if (!metadata) return;
+          metadata.annual_income_yield = 0;
+          metadata.foreign_withholding_rate = 0;
+          metadata.foreign_tax_credit_rate = 0;
+        });
+      }
+      if (Number(data.schemaVersion || 0) < 13) {
+        data.decumulationEnabled = Number(data.withdrawal || 0) > 0;
+      }
+      if (Number(data.schemaVersion || 0) < 14) {
+        const legacyWithdrawal = Number(data.withdrawal || 0);
+        const start = Math.max(1, Number(data["withdrawal-start-period"] || 1));
+        const periods = Math.max(start, Number(data.periods || 120));
+        data.decumulation = {
+          phases: legacyWithdrawal > 0 ? [{
+            start_month: start,
+            end_month: periods,
+            frequency: "monthly",
+            annual_real_amount: legacyWithdrawal * 12,
+            spending_multiplier: 1,
+          }] : [],
+          events: [],
+        };
+        data["decumulation-mode"] = "manual";
+        data["decumulation-policy"] = "fixed";
       }
       applyControlSnapshot(data);
     }
@@ -2697,6 +3206,7 @@ function decodeScenario(encoded) {
 function applyScenarioSnapshot(data, reload = true) {
   applyControlSnapshot(data);
   $("csv-enabled").checked = false;
+  renderDecumulationEditor();
   renderTickerComposer();
   syncDataSourceUI();
   updateMethodologyControls();
@@ -2808,6 +3318,7 @@ function init() {
   document.querySelectorAll(".tab-btn").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
 
   $("run-btn").addEventListener("click", onRun);
+  $("safe-rate-btn").addEventListener("click", onSafeRate);
   $("compare-btn").addEventListener("click", onCompare);
   $("download-summary").addEventListener("click", onDownloadSummary);
   $("download-diagnostics").addEventListener("click", onDownloadDiagnostics);
@@ -2826,9 +3337,33 @@ function init() {
   $("share-scenario-btn").addEventListener("click", shareScenario);
   $("load-scenario-btn").addEventListener("click", loadSavedScenario);
   $("delete-scenario-btn").addEventListener("click", deleteSavedScenario);
+  $("add-decumulation-phase").addEventListener("click", () => {
+    syncDecumulationFromRows();
+    const next = defaultDecumulationPhase();
+    const previous = state.decumulation.phases.at(-1);
+    if (previous) {
+      if (previous.end_month >= Number($("periods").value)) {
+        notify("Shorten the current last phase before adding another one.", "error");
+        return;
+      }
+      next.start_month = Math.min(Number($("periods").value), previous.end_month + 1);
+      next.end_month = Number($("periods").value);
+    }
+    state.decumulation.phases.push(next);
+    renderDecumulationEditor();
+    saveControls();
+  });
+  $("add-decumulation-event").addEventListener("click", () => {
+    syncDecumulationFromRows();
+    state.decumulation.events.push({ month: 1, real_amount: Math.max(Number($("initial-value").value) * 0.1, 1) });
+    renderDecumulationEditor();
+    saveControls();
+  });
+  $("decumulation-mode").addEventListener("change", () => { syncDecumulationFromRows(); renderDecumulationEditor(); });
+  $("periods").addEventListener("change", renderDecumulationEditor);
 
-  document.addEventListener("input", () => { saveControls(); updateMethodologyControls(); });
-  document.addEventListener("change", () => { saveControls(); updateMethodologyControls(); });
+  document.addEventListener("input", () => { updateMethodologyControls(); saveControls(); });
+  document.addEventListener("change", () => { updateMethodologyControls(); saveControls(); });
   document.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !$("run-btn").disabled) {
       event.preventDefault();
@@ -2837,6 +3372,7 @@ function init() {
   });
 
   restoreControls();
+  renderDecumulationEditor();
   setupMarketDataExperience();
   restoreScenarioFromUrl();
   refreshScenarioLibrary();

@@ -12,14 +12,16 @@ from mc_quadrants.tax_policy import (
 )
 
 
-def test_builtin_registry_exposes_only_italy_for_now():
+def test_builtin_registry_exposes_italian_tax_regimes():
     assert available_tax_countries() == [
         {
             "code": "IT",
             "label": "Italy",
-            "regimes": [
-                {"value": "italy_administered", "label": "Simplified administered regime"}
-            ],
+                "regimes": [
+                    {"value": "italy_administered", "label": "Simplified administered regime"},
+                    {"value": "italy_declarative", "label": "Declarative regime"},
+                    {"value": "italy_managed", "label": "Managed regime"},
+                ],
         }
     ]
     assert resolve_tax_selection().enabled is False

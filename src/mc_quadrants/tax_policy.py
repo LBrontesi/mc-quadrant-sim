@@ -13,6 +13,8 @@ from mc_quadrants.taxes import (
     ITALY_LOSS_CARRY_YEARS,
     ITALY_STANDARD_TAX_RATE,
     ITALY_TAX_CATEGORIES,
+    ITALY_TAX_REGIMES,
+    ITALY_WEALTH_TAX_MODES,
     simulate_italian_portfolio_tax,
 )
 
@@ -27,11 +29,23 @@ class TaxSimulationContext:
     initial_value: float
     rebalance_frequency: int
     transaction_cost_bps: float
+    transaction_cost_rate_paths: np.ndarray | None
     contribution: float
+    contribution_allocation: str
     withdrawal: float
+    withdrawal_start_period: int
+    decumulation: Any
+    withdrawal_inflation_paths: np.ndarray | None
+    annual_inflation: float
+    safe_withdrawal_rate: float
     asset_categories: Mapping[str, str] | None
+    asset_metadata: Mapping[str, Mapping[str, object]] | None
     annual_wealth_tax: float
+    wealth_tax_mode: str
     terminal_liquidation: bool
+    start_date: str | None
+    wrapper_benchmark: bool
+    native_threads: int
 
 
 class TaxPolicy(Protocol):
@@ -97,11 +111,24 @@ class ItalyAdministeredTaxPolicy:
             initial_value=context.initial_value,
             rebalance_frequency=context.rebalance_frequency,
             transaction_cost_bps=context.transaction_cost_bps,
+            transaction_cost_rate_paths=context.transaction_cost_rate_paths,
             contribution=context.contribution,
+            contribution_allocation=context.contribution_allocation,
             withdrawal=context.withdrawal,
+            withdrawal_start_period=context.withdrawal_start_period,
+            decumulation=context.decumulation,
+            withdrawal_inflation_paths=context.withdrawal_inflation_paths,
+            annual_inflation=context.annual_inflation,
+            safe_withdrawal_rate=context.safe_withdrawal_rate,
             asset_tax_categories=context.asset_categories,
+            asset_tax_metadata=context.asset_metadata,
             annual_wealth_tax=context.annual_wealth_tax,
             terminal_liquidation=context.terminal_liquidation,
+            tax_regime=self.regime,
+            wealth_tax_mode=context.wealth_tax_mode,
+            start_date=context.start_date,
+            wrapper_benchmark=context.wrapper_benchmark,
+            native_threads=context.native_threads,
         )
 
     def metadata(self, context: TaxSimulationContext | None = None) -> dict[str, Any]:
@@ -121,15 +148,28 @@ class ItalyAdministeredTaxPolicy:
                 context.terminal_liquidation if context is not None else False
             ),
             "loss_carry_years": ITALY_LOSS_CARRY_YEARS,
+            "rule_snapshot": "IT-2026",
             "supported_asset_categories": sorted(ITALY_TAX_CATEGORIES),
+            "supported_regimes": sorted(ITALY_TAX_REGIMES),
+            "supported_wealth_tax_modes": sorted(ITALY_WEALTH_TAX_MODES),
         }
 
 
 ITALY_ADMINISTERED_POLICY = ItalyAdministeredTaxPolicy()
+ITALY_DECLARATIVE_POLICY = ItalyAdministeredTaxPolicy(
+    regime="italy_declarative",
+    regime_label="Declarative regime",
+)
+ITALY_MANAGED_POLICY = ItalyAdministeredTaxPolicy(
+    regime="italy_managed",
+    regime_label="Managed regime",
+)
 TAX_POLICY_REGISTRY: dict[tuple[str, str], TaxPolicy] = {
     (ITALY_ADMINISTERED_POLICY.country_code, ITALY_ADMINISTERED_POLICY.regime): (
         ITALY_ADMINISTERED_POLICY
     ),
+    (ITALY_DECLARATIVE_POLICY.country_code, ITALY_DECLARATIVE_POLICY.regime): ITALY_DECLARATIVE_POLICY,
+    (ITALY_MANAGED_POLICY.country_code, ITALY_MANAGED_POLICY.regime): ITALY_MANAGED_POLICY,
 }
 TAX_COUNTRY_ALIASES = {
     "IT": "IT",
@@ -140,6 +180,10 @@ TAX_REGIME_ALIASES = {
     "ITALY": "italy_administered",
     "ITALY_ADMINISTERED": "italy_administered",
     "ADMINISTERED": "italy_administered",
+    "ITALY_DECLARATIVE": "italy_declarative",
+    "DECLARATIVE": "italy_declarative",
+    "ITALY_MANAGED": "italy_managed",
+    "MANAGED": "italy_managed",
 }
 
 
@@ -195,6 +239,9 @@ def resolve_tax_selection(
         available = ", ".join(sorted({entry[0] for entry in TAX_POLICY_REGISTRY}))
         raise ValueError(f"Unknown tax country '{country}'. Available countries: {available}.")
     if normalized_regime in {"", "none"}:
+        default_policy = TAX_POLICY_REGISTRY.get((normalized_country, "italy_administered"))
+        if default_policy is not None:
+            return TaxSelection(default_policy.country_code, default_policy.regime, default_policy)
         country_policies = [
             policy
             for (code, _), policy in TAX_POLICY_REGISTRY.items()

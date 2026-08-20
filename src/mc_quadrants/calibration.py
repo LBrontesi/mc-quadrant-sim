@@ -20,6 +20,7 @@ from mc_quadrants.regimes import (
     smooth_macro_for_regimes,
     sojourn_durations,
 )
+from mc_quadrants.structural import build_asset_profiles, structural_beta_prior
 from mc_quadrants.types import RegimeMoments, ScenarioModel
 
 CorrelationOverrides = Mapping[str, Mapping[tuple[str, str], float]]
@@ -348,6 +349,9 @@ def _fit_joint_macro_dynamics(
     growth_threshold: ThresholdSpec,
     inflation_threshold: ThresholdSpec,
     temperature: float,
+    asset_profiles: Mapping[str, Mapping[str, object]],
+    structural_returns: bool = False,
+    macro_model: str = "bvar_ensemble",
     ridge: float = 1e-3,
 ) -> dict[str, object]:
     """Fit a compact regime-conditioned macro VAR and return-factor link.
@@ -366,17 +370,62 @@ def _fit_joint_macro_dynamics(
     macro_clean = macro.loc[:, columns].apply(pd.to_numeric, errors="coerce").dropna().sort_index()
     if len(macro_clean) < 24:
         raise ValueError("Joint macro dynamics require at least 24 complete macro observations.")
+    macro_model = str(macro_model).strip().lower()
+    if macro_model not in {"ridge_var", "bvar", "bvar_ensemble"}:
+        raise ValueError("macro_model must be 'ridge_var', 'bvar', or 'bvar_ensemble'.")
     macro_values = macro_clean.to_numpy(dtype=float)
     global_mean = macro_values.mean(axis=0)
     x = macro_values[:-1] - global_mean
     y = macro_values[1:] - global_mean
-    coefficient = np.linalg.solve(x.T @ x + ridge * np.eye(len(columns)), x.T @ y)
+    scale = np.maximum(macro_values.std(axis=0, ddof=1), 1e-6)
+    x_scaled = x / scale
+    y_scaled = y / scale
+    prior = np.zeros((len(columns), len(columns)), dtype=float)
+    for index in range(len(columns)):
+        denominator = float(x_scaled[:, index] @ x_scaled[:, index])
+        slope = (
+            float(x_scaled[:, index] @ y_scaled[:, index]) / denominator
+            if denominator > 1e-12
+            else 0.5
+        )
+        prior[index, index] = float(np.clip(slope, -0.20, 0.98))
+    prior_strength = 4.0 if macro_model != "ridge_var" else float(ridge)
+
+    def fit_coefficients(x_values: np.ndarray, y_values: np.ndarray) -> np.ndarray:
+        precision = x_values.T @ x_values + prior_strength * np.eye(len(columns))
+        target = x_values.T @ y_values + prior_strength * prior
+        return np.linalg.solve(precision, target)
+
+    full_coefficient_scaled = fit_coefficients(x_scaled, y_scaled)
+    rolling_observations = min(len(x_scaled), max(36, len(x_scaled) // 2))
+    rolling_coefficient_scaled = fit_coefficients(
+        x_scaled[-rolling_observations:],
+        y_scaled[-rolling_observations:],
+    )
+    if macro_model == "bvar_ensemble":
+        coefficient_scaled = 0.65 * full_coefficient_scaled + 0.35 * rolling_coefficient_scaled
+    else:
+        coefficient_scaled = full_coefficient_scaled
+    coefficient = (coefficient_scaled * scale[None, :]) / scale[:, None]
     eigenvalues = np.linalg.eigvals(coefficient)
     radius = float(np.max(np.abs(eigenvalues))) if len(eigenvalues) else 0.0
     if radius >= 0.98:
         coefficient *= 0.98 / radius
     residuals = y - x @ coefficient
     global_residual_covariance = nearest_psd(np.atleast_2d(np.cov(residuals, rowvar=False)))
+    scaled_residuals = y_scaled - x_scaled @ coefficient_scaled
+    posterior_precision = np.linalg.inv(
+        x_scaled.T @ x_scaled + max(prior_strength, 1e-9) * np.eye(len(columns))
+    )
+    equation_variances = np.maximum(scaled_residuals.var(axis=0, ddof=1), 1e-12)
+    coefficient_std_scaled = np.sqrt(
+        np.maximum(np.diag(posterior_precision)[:, None] * equation_variances[None, :], 0.0)
+    )
+    coefficient_std = (coefficient_std_scaled * scale[None, :]) / scale[:, None]
+    instability_score = float(
+        np.linalg.norm(full_coefficient_scaled - rolling_coefficient_scaled)
+        / max(np.linalg.norm(full_coefficient_scaled), 1e-9)
+    )
 
     if probabilities is not None:
         macro_membership = probabilities.reindex(macro_clean.index, method="ffill")
@@ -409,10 +458,37 @@ def _fit_joint_macro_dynamics(
     return_values = joint.loc[:, returns.columns].to_numpy(dtype=float)
     change_values = joint.loc[:, [f"__macro_{column}" for column in columns]].to_numpy(dtype=float)
     centered_returns = return_values - return_values.mean(axis=0)
-    betas = np.linalg.solve(
-        change_values.T @ change_values + ridge * np.eye(len(columns)),
-        change_values.T @ centered_returns,
+    inflation_is_percent = float(macro_clean[inflation_col].abs().quantile(0.90)) >= 0.50
+    growth_is_percent = float(macro_clean[growth_col].abs().quantile(0.90)) >= 0.50
+    rate_is_percent = False
+    rate_bounds = None
+    if active_rate_col is not None:
+        rate_values = macro_clean[active_rate_col]
+        rate_is_percent = float(rate_values.abs().quantile(0.90)) >= 0.50
+        rate_bounds = [-5.0, 50.0] if rate_is_percent else [-0.05, 0.50]
+    macro_is_percent = {
+        growth_col: growth_is_percent,
+        inflation_col: inflation_is_percent,
+        **({active_rate_col: rate_is_percent} if active_rate_col is not None else {}),
+    }
+    beta_prior = structural_beta_prior(
+        list(returns.columns),
+        columns,
+        asset_profiles,
+        growth_col=growth_col,
+        inflation_col=inflation_col,
+        rate_col=active_rate_col,
+        macro_is_percent=macro_is_percent,
+    ) if structural_returns else np.zeros((len(columns), len(returns.columns)), dtype=float)
+    change_scale = np.maximum(change_values.std(axis=0, ddof=1), 1e-9)
+    standardized_changes = change_values / change_scale
+    beta_prior_scaled = beta_prior * change_scale[:, None]
+    beta_prior_strength = 8.0 if structural_returns else 1.0
+    betas_scaled = np.linalg.solve(
+        standardized_changes.T @ standardized_changes + beta_prior_strength * np.eye(len(columns)),
+        standardized_changes.T @ centered_returns + beta_prior_strength * beta_prior_scaled,
     )
+    betas = betas_scaled / change_scale[:, None]
     explained = betas.T @ global_residual_covariance @ betas
     total_variance = np.maximum(np.diag(np.atleast_2d(np.cov(return_values, rowvar=False))), 1e-12)
     explained_share = np.max(np.diag(explained) / total_variance)
@@ -435,25 +511,27 @@ def _fit_joint_macro_dynamics(
         * temperature,
         1e-6,
     )
-    inflation_scale_hint = float(macro_clean[inflation_col].abs().quantile(0.90))
-    rate_is_percent = False
-    rate_bounds = None
-    if active_rate_col is not None:
-        rate_values = macro_clean[active_rate_col]
-        rate_is_percent = float(rate_values.abs().quantile(0.90)) >= 0.50
-        rate_bounds = [-5.0, 50.0] if rate_is_percent else [-0.05, 0.50]
     return {
         "columns": columns,
         "latest": macro_values[-1].tolist(),
         "global_mean": global_mean.tolist(),
         "var_coefficient": coefficient.tolist(),
+        "var_coefficient_std": coefficient_std.tolist(),
+        "macro_model": macro_model,
+        "macro_prior_strength": float(prior_strength),
+        "macro_rolling_observations": int(rolling_observations),
+        "macro_instability_score": instability_score,
         "state_centers": state_centers,
         "state_innovation_covariances": state_covariances,
         "return_betas": betas.tolist(),
+        "return_beta_priors": beta_prior.tolist(),
+        "structural_returns": bool(structural_returns),
+        "asset_profiles": {asset: dict(profile) for asset, profile in asset_profiles.items()},
         "return_residual_covariances": residual_covariances,
         "thresholds": thresholds,
         "probability_scales": scales.tolist(),
-        "inflation_is_percent": inflation_scale_hint >= 0.50,
+        "growth_is_percent": growth_is_percent,
+        "inflation_is_percent": inflation_is_percent,
         "rate_col": active_rate_col,
         "rate_is_percent": rate_is_percent,
         "rate_bounds": rate_bounds,
@@ -485,6 +563,11 @@ def calibrate_quadrant_model(
     duration_prior_strength: float = 8.0,
     mean_prior_strength: float = 0.0,
     joint_macro: bool = False,
+    structural_returns: bool = False,
+    asset_classes: Mapping[str, str] | None = None,
+    asset_durations: Mapping[str, float] | None = None,
+    asset_income_yields: Mapping[str, float] | None = None,
+    macro_model: str = "bvar_ensemble",
     hsmm_max_iterations: int = 30,
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
@@ -578,6 +661,12 @@ def calibrate_quadrant_model(
                 if (regimes == state).any()
             }
 
+    asset_profiles = build_asset_profiles(
+        list(returns.columns),
+        asset_classes=asset_classes,
+        durations=asset_durations,
+        income_yields=asset_income_yields,
+    )
     duration_hazards = hsmm.duration_hazards
     expected_durations = hsmm.expected_duration_months
     metadata: dict[str, object] = {
@@ -621,6 +710,9 @@ def calibrate_quadrant_model(
         "data_vintage": macro.attrs.get("data_vintage", "user_supplied"),
         "point_in_time": bool(macro.attrs.get("point_in_time", False)),
         "availability_aligned": bool(macro.attrs.get("availability_aligned", False)),
+        "structural_returns": bool(structural_returns),
+        "asset_profiles": asset_profiles,
+        "macro_model": str(macro_model),
     }
     latest_probabilities = hsmm.filtered_probabilities.dropna().iloc[-1]
     metadata["latest_regime_probabilities"] = latest_probabilities.to_dict()
@@ -639,6 +731,9 @@ def calibrate_quadrant_model(
             growth_threshold,
             inflation_threshold,
             regime_temperature,
+            asset_profiles,
+            structural_returns=structural_returns,
+            macro_model=macro_model,
         )
 
     model = ScenarioModel(

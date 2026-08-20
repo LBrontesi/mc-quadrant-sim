@@ -4,3 +4,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .DS_Store
+src/mc_quadrants/_native_sim.so
+src/mc_quadrants/_native_sim.dylib
+src/mc_quadrants/_native_sim.dll

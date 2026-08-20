@@ -102,6 +102,7 @@ class SimulationResult:
     transition_concentration: float | None = None
     macro_paths: np.ndarray | None = None
     macro_columns: list[str] = field(default_factory=list)
+    native_portfolio: dict[str, Any] | None = None
 
     def returns_frame(self) -> pd.DataFrame:
         periods, paths, _ = self.returns.shape

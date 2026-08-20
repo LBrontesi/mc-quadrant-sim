@@ -20,6 +20,7 @@ if SRC_DIR.is_dir() and str(SRC_DIR) not in sys.path:
 from mc_quadrants.api import (  # noqa: E402
     build_compare_response,
     build_load_response,
+    build_safe_rate_response,
     build_simulate_response,
     build_wealth_csv,
     load_data_source,
@@ -29,7 +30,12 @@ WEB_DIR = str((PROJECT_DIR / "web").resolve())
 PORT = int(os.getenv("PORT", "7860"))
 MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(10 * 1024 * 1024)))
 MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "1")))
-HEAVY_ENDPOINTS = {"/api/simulate", "/api/compare", "/api/wealth"}
+HEAVY_ENDPOINTS = {
+    "/api/simulate",
+    "/api/compare",
+    "/api/wealth",
+    "/api/safe-rate",
+}
 JOB_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
 
 logging.basicConfig(
@@ -136,6 +142,8 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._send_json(200, build_load_response(macro, returns, tickers, growth_col, inflation_col, message))
             elif path == "/api/simulate":
                 self._send_json(200, build_simulate_response(payload))
+            elif path == "/api/safe-rate":
+                self._send_json(200, build_safe_rate_response(payload))
             elif path == "/api/compare":
                 self._send_json(200, build_compare_response(payload))
             elif path == "/api/wealth":
