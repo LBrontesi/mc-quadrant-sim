@@ -50,9 +50,7 @@ def _csv_payload(**overrides):
         "inflation_threshold": "median",
         "macro_lag": 1,
         "transition_uncertainty": 0,
-        "distribution": "normal",
-        "degrees_of_freedom": 5,
-        "block_size": 3,
+        "distribution": "mnts",
         "rebalance": "monthly",
         "cost_bps": 10,
         "start_state": "Stationary",
@@ -300,9 +298,9 @@ def test_scenario_kwargs_reject_invalid_methodology_options():
 
 
 def test_scenario_kwargs_reject_incompatible_settings():
-    with pytest.raises(ValueError, match="Normal return distribution"):
+    with pytest.raises(ValueError, match="Unknown return distribution"):
         api.scenario_kwargs(
-            {"weights": {"SPY": 100}, "distribution": "student_t", "garch": True}
+            {"weights": {"SPY": 100}, "distribution": "legacy", "garch": True}
         )
     with pytest.raises(ValueError, match="transaction costs"):
         api.scenario_kwargs({"weights": {"SPY": 100}, "rebalance": "legacy", "cost_bps": 10})
@@ -731,7 +729,7 @@ def test_simulate_response_separates_model_and_market_uncertainty():
     response = api.build_simulate_response(
         _csv_payload(
             paths=24,
-            distribution="student_t",
+            distribution="mnts",
             probabilistic_regimes=True,
             mean_prior_strength=24,
             parameter_draws=3,
@@ -829,31 +827,6 @@ def test_simulate_csv_with_correlation_overrides():
     response = api.build_simulate_response(payload)
     assert response["ok"] is True
     assert response["summary"]["mean"] > 0
-
-
-def test_compare_csv_returns_two_rows():
-    payload = _csv_payload(periods=12, paths=30)
-    response = api.build_compare_response(payload)
-    assert response["ok"] is True
-    assert response["columns"] == [
-        "distribution",
-        "mean",
-        "p05",
-        "median",
-        "p95",
-        "annualized_return",
-        "annualized_volatility",
-        "sharpe_ratio",
-        "probability_of_loss",
-        "var_95",
-        "expected_shortfall_95",
-        "worst_max_drawdown",
-        "ulcer_index_mean",
-        "sortino_ratio",
-        "calmar_ratio",
-        "geometric_annualized_return",
-    ]
-    assert [row[0] for row in response["rows"]] == ["Normal", "Student-t"]
 
 
 def test_simulate_rejects_missing_weights():

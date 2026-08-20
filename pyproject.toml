@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mc-quadrant-sim"
 version = "0.1.0"
-description = "Four-quadrant macro regime Monte Carlo simulator with Markov transitions and regime-specific asset correlations."
+description = "Four-quadrant macro regime Monte Carlo simulator with native MRS-MNTS-GARCH returns."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

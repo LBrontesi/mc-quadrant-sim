@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
 
 from mc_quadrants.calibration import _clean_aligned_returns, calibrate_quadrant_model
 from mc_quadrants.matrix import nearest_psd
+from mc_quadrants.mnts import (
+    fit_mnts_parameters,
+    resolved_mnts_parameters,
+    sample_mnts_subordinators,
+)
+from mc_quadrants.native import native_available, sample_mnts_subordinators_native
 from mc_quadrants.regimes import classify_persistent_quadrants
+from mc_quadrants.types import RegimeMoments
 
 
 @dataclass(frozen=True)
@@ -21,41 +27,74 @@ class WalkForwardResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def _log_gaussian_density(
+def _energy_score(
     observation: np.ndarray,
-    mean: np.ndarray,
-    covariance: np.ndarray,
+    draws: np.ndarray,
 ) -> float:
-    """Log density of one observation under a multivariate Gaussian."""
+    """Monte Carlo multivariate energy score; lower values are better."""
 
-    chol = np.linalg.cholesky(nearest_psd(covariance))
-    difference = observation - mean
-    standardized = np.linalg.solve(chol, difference)
-    log_determinant = 2.0 * np.log(np.diag(chol)).sum()
-    dimension = len(mean)
-    return -0.5 * (dimension * np.log(2.0 * np.pi) + log_determinant + standardized @ standardized)
+    values = np.asarray(draws, dtype=float)
+    first = np.linalg.norm(values - np.asarray(observation, dtype=float), axis=1).mean()
+    second = np.linalg.norm(values - np.roll(values, len(values) // 2, axis=0), axis=1).mean()
+    return float(first - 0.5 * second)
 
 
-def _log_student_t_density(
-    observation: np.ndarray,
-    mean: np.ndarray,
-    covariance: np.ndarray,
-    degrees_of_freedom: float = 5.0,
-) -> float:
-    """Multivariate Student-t log density parameterized by covariance."""
+def _sample_mnts_observations(
+    moments: RegimeMoments,
+    samples: int,
+    random_seed: int,
+) -> np.ndarray:
+    """Draw from one calibrated MNTS state for proper-score validation."""
 
-    dimension = len(mean)
-    scale = nearest_psd(covariance * (degrees_of_freedom - 2.0) / degrees_of_freedom)
-    chol = np.linalg.cholesky(scale)
-    difference = observation - mean
-    standardized = np.linalg.solve(chol, difference)
-    quadratic = float(standardized @ standardized)
-    log_determinant = 2.0 * np.log(np.diag(chol)).sum()
-    return float(
-        math.lgamma((degrees_of_freedom + dimension) / 2.0)
-        - math.lgamma(degrees_of_freedom / 2.0)
-        - 0.5 * (dimension * np.log(degrees_of_freedom * np.pi) + log_determinant)
-        - 0.5 * (degrees_of_freedom + dimension) * np.log1p(quadratic / degrees_of_freedom)
+    parameters = resolved_mnts_parameters(moments)
+    rng = np.random.default_rng(random_seed)
+    if native_available():
+        subordinator = sample_mnts_subordinators_native(
+            samples,
+            parameters.tail_index,
+            parameters.tempering,
+            random_seed,
+        )
+    else:
+        subordinator = sample_mnts_subordinators(
+            rng,
+            samples,
+            parameters.tail_index,
+            parameters.tempering,
+        )
+    assets = list(moments.mean.index)
+    skewness = parameters.skewness.reindex(assets).to_numpy(dtype=float)
+    variance_t = (2.0 - parameters.tail_index) / (2.0 * parameters.tempering)
+    gaussian_scale = np.sqrt(np.maximum(1.0 - skewness * skewness * variance_t, 1e-10))
+    correlation = parameters.gaussian_correlation.reindex(
+        index=assets, columns=assets
+    ).to_numpy(dtype=float)
+    factor = np.linalg.cholesky(correlation + np.eye(len(assets)) * 1e-10)
+    latent = rng.standard_normal((samples, len(assets))) @ factor.T
+    standardized = (
+        skewness * (subordinator[:, None] - 1.0)
+        + np.sqrt(subordinator)[:, None] * gaussian_scale * latent
+    )
+    covariance = moments.covariance.reindex(index=assets, columns=assets).to_numpy(dtype=float)
+    volatility = np.sqrt(np.maximum(np.diag(covariance), 0.0))
+    return moments.mean.reindex(assets).to_numpy(dtype=float) + standardized * volatility
+
+
+def _unconditional_mnts_moments(training_returns: pd.DataFrame) -> RegimeMoments:
+    assets = list(training_returns.columns)
+    covariance = nearest_psd(training_returns.cov().to_numpy(dtype=float))
+    volatility = np.sqrt(np.maximum(np.diag(covariance), 1e-12))
+    correlation = covariance / np.outer(volatility, volatility)
+    np.fill_diagonal(correlation, 1.0)
+    moments = RegimeMoments(
+        mean=training_returns.mean().reindex(assets),
+        covariance=pd.DataFrame(covariance, index=assets, columns=assets),
+        correlation=pd.DataFrame(correlation, index=assets, columns=assets),
+        observations=len(training_returns),
+    )
+    return replace(
+        moments,
+        mnts=fit_mnts_parameters(moments, training_returns, training_returns),
     )
 
 
@@ -165,10 +204,9 @@ def walk_forward_validation(
 
     Each split fits the quadrant model on data available up to period ``t``
     and scores the *next* return observation with regime-conditional and
-    unconditional Gaussian and Student-t densities. The like-for-like
-    Student-t comparison isolates the incremental value of regime conditioning
-    from the value of simply using fatter tails. The regime hit rate measures
-    whether the most likely next state matches the state actually realized.
+    unconditional MNTS predictive draws. The multivariate energy score remains
+    proper when the MNTS density is not evaluated in closed form. The regime
+    hit rate measures whether the most likely next state matches reality.
 
     Thresholds are re-estimated causally on each training window, so no
     future information enters a split.
@@ -252,19 +290,9 @@ def walk_forward_validation(
             hsmm_max_iterations=hsmm_max_iterations,
         )
         next_observation = observations[split]
-        unconditional_mean = observations[:split].mean(axis=0)
-        unconditional_covariance = np.cov(observations[:split], rowvar=False)
-        unconditional_covariance = np.atleast_2d(unconditional_covariance)
-        benchmark_llk = _log_gaussian_density(
-            next_observation,
-            unconditional_mean,
-            unconditional_covariance,
-        )
-        student_t_llk = _log_student_t_density(
-            next_observation,
-            unconditional_mean,
-            unconditional_covariance,
-        )
+        unconditional_moments = _unconditional_mnts_moments(train_returns)
+        unconditional_mean = unconditional_moments.mean.to_numpy(dtype=float)
+        unconditional_covariance = unconditional_moments.covariance.to_numpy(dtype=float)
         current_state = str(aligned_regimes.iloc[split - 1])
         current_age = _current_run_length(aligned_regimes.iloc[:split])
         state_probabilities, switch_probability = _semi_markov_state_probabilities(
@@ -272,40 +300,6 @@ def walk_forward_validation(
             current_state,
             current_age,
             min_regime_duration,
-        )
-        gaussian_densities = np.array(
-            [
-                _log_gaussian_density(
-                    next_observation,
-                    model.moments[state].mean.to_numpy(dtype=float),
-                    model.moments[state].covariance.to_numpy(dtype=float),
-                )
-                for state in model.states
-            ]
-        )
-        gaussian_weighted = gaussian_densities + np.log(
-            np.maximum(state_probabilities, 1e-300)
-        )
-        gaussian_maximum = gaussian_weighted.max()
-        regime_llk = gaussian_maximum + np.log(
-            float(np.exp(gaussian_weighted - gaussian_maximum).sum())
-        )
-        conditional_t_densities = np.array(
-            [
-                _log_student_t_density(
-                    next_observation,
-                    model.moments[state].mean.to_numpy(dtype=float),
-                    model.moments[state].covariance.to_numpy(dtype=float),
-                )
-                for state in model.states
-            ]
-        )
-        student_t_weighted = conditional_t_densities + np.log(
-            np.maximum(state_probabilities, 1e-300)
-        )
-        student_t_maximum = student_t_weighted.max()
-        regime_student_t_llk = student_t_maximum + np.log(
-            float(np.exp(student_t_weighted - student_t_maximum).sum())
         )
         predicted_state = model.states[int(np.argmax(state_probabilities))]
         actual_state = str(aligned_regimes.iloc[split])
@@ -324,21 +318,24 @@ def walk_forward_validation(
         sampled_states = validation_rng.choice(
             len(model.states), size=512, p=state_probabilities
         )
-        portfolio_draws = np.empty(512, dtype=float)
+        conditional_draws = np.empty((512, next_observation.shape[0]), dtype=float)
         for state_index, state in enumerate(model.states):
             mask = sampled_states == state_index
             if not mask.any():
                 continue
-            draws = validation_rng.multivariate_normal(
-                np.zeros(next_observation.shape[0]),
-                model.moments[state].covariance.to_numpy(dtype=float),
-                size=int(mask.sum()),
+            conditional_draws[mask] = _sample_mnts_observations(
+                model.moments[state],
+                int(mask.sum()),
+                split * 101 + state_index,
             )
-            draws *= np.sqrt(
-                3.0 / validation_rng.chisquare(5.0, size=int(mask.sum()))
-            )[:, None]
-            draws += model.moments[state].mean.to_numpy(dtype=float)
-            portfolio_draws[mask] = draws @ portfolio_weights
+        benchmark_draws = _sample_mnts_observations(
+            unconditional_moments,
+            512,
+            split * 101 + len(model.states),
+        )
+        regime_energy_score = _energy_score(next_observation, conditional_draws)
+        benchmark_energy_score = _energy_score(next_observation, benchmark_draws)
+        portfolio_draws = conditional_draws @ portfolio_weights
         predicted_var = float(np.quantile(portfolio_draws, 0.05))
         predicted_es = float(portfolio_draws[portfolio_draws <= predicted_var].mean())
         actual_portfolio_return = float(next_observation @ portfolio_weights)
@@ -396,12 +393,9 @@ def walk_forward_validation(
         rows.append(
             {
                 "date": aligned_returns.index[split],
-                "regime_log_likelihood": float(regime_llk),
-                "regime_student_t_log_likelihood": float(regime_student_t_llk),
-                "unconditional_log_likelihood": float(benchmark_llk),
-                "student_t_log_likelihood": float(student_t_llk),
-                "advantage": float(regime_llk - benchmark_llk),
-                "advantage_vs_student_t": float(regime_student_t_llk - student_t_llk),
+                "regime_energy_score": regime_energy_score,
+                "unconditional_mnts_energy_score": benchmark_energy_score,
+                "advantage": benchmark_energy_score - regime_energy_score,
                 "regime_hit": int(predicted_state == actual_state),
                 "regime_brier_score": float(np.square(state_probabilities - one_hot).sum()),
                 "transition_brier_score": float(
@@ -448,17 +442,14 @@ def walk_forward_validation(
     summary = pd.Series(
         {
             "splits": int(len(splits)),
-            "regime_log_likelihood_mean": float(splits["regime_log_likelihood"].mean()),
-            "regime_student_t_log_likelihood_mean": float(
-                splits["regime_student_t_log_likelihood"].mean()
+            "regime_energy_score_mean": float(splits["regime_energy_score"].mean()),
+            "unconditional_mnts_energy_score_mean": float(
+                splits["unconditional_mnts_energy_score"].mean()
             ),
-            "unconditional_log_likelihood_mean": float(splits["unconditional_log_likelihood"].mean()),
-            "student_t_log_likelihood_mean": float(splits["student_t_log_likelihood"].mean()),
             "advantage_mean": float(splits["advantage"].mean()),
-            "advantage_vs_student_t_mean": float(splits["advantage_vs_student_t"].mean()),
             "advantage_positive_share": float((splits["advantage"] > 0).mean()),
-            "dm_t_statistic_vs_student_t": _newey_west_t_statistic(
-                splits["advantage_vs_student_t"].to_numpy(dtype=float)
+            "dm_t_statistic": _newey_west_t_statistic(
+                splits["advantage"].to_numpy(dtype=float)
             ),
             "regime_hit_rate": float(splits["regime_hit"].mean()),
             "regime_brier_score": float(splits["regime_brier_score"].mean()),
@@ -513,17 +504,13 @@ def walk_forward_validation(
     warnings: list[str] = []
     if summary["advantage_mean"] <= 0:
         warnings.append(
-            "The regime model does not beat an unconditional benchmark out of sample "
-            f"(advantage {summary['advantage_mean']:.4f} log-likelihood units per period)."
+            "The regime-switching MNTS model does not beat an unconditional MNTS benchmark "
+            f"out of sample (energy-score advantage {summary['advantage_mean']:.4f} per period)."
         )
     if summary["regime_hit_rate"] < 0.40:
         warnings.append(
             f"The one-step regime prediction matched reality on only "
             f"{summary['regime_hit_rate']:.0%} of splits."
-        )
-    if summary["advantage_vs_student_t_mean"] <= 0:
-        warnings.append(
-            "The regime model does not beat the stronger unconditional Student-t benchmark out of sample."
         )
     if summary["regime_brier_score"] >= summary["benchmark_brier_score"]:
         warnings.append("Regime probabilities do not improve on historical-frequency probabilities.")

@@ -8,6 +8,39 @@ import pandas as pd
 
 
 @dataclass(frozen=True)
+class MNTSParameters:
+    """Standardized multivariate normal tempered-stable parameters."""
+
+    tail_index: float
+    tempering: float
+    skewness: pd.Series
+    gaussian_correlation: pd.DataFrame
+
+    def validate(self, assets: list[str]) -> None:
+        if not np.isfinite(self.tail_index) or not 0 < self.tail_index < 2:
+            raise ValueError("MNTS tail_index must be finite and between 0 and 2.")
+        if not np.isfinite(self.tempering) or self.tempering <= 0:
+            raise ValueError("MNTS tempering must be positive and finite.")
+        if list(self.skewness.index) != assets:
+            raise ValueError("MNTS skewness assets do not match the regime assets.")
+        if list(self.gaussian_correlation.index) != assets or list(
+            self.gaussian_correlation.columns
+        ) != assets:
+            raise ValueError("MNTS Gaussian-correlation assets do not match the regime assets.")
+        skewness = self.skewness.to_numpy(dtype=float)
+        correlation = self.gaussian_correlation.to_numpy(dtype=float)
+        if not np.isfinite(skewness).all() or not np.isfinite(correlation).all():
+            raise ValueError("MNTS parameters must contain only finite values.")
+        variance_t = (2.0 - self.tail_index) / (2.0 * self.tempering)
+        if np.any(skewness * skewness * variance_t >= 1.0):
+            raise ValueError("MNTS skewness violates the unit-variance parameter bound.")
+        if not np.allclose(correlation, correlation.T, atol=1e-8):
+            raise ValueError("MNTS Gaussian correlation must be symmetric.")
+        if not np.allclose(np.diag(correlation), 1.0, atol=1e-8):
+            raise ValueError("MNTS Gaussian correlation must have a unit diagonal.")
+
+
+@dataclass(frozen=True)
 class RegimeMoments:
     """Expected returns and covariance estimates for one macro regime."""
 
@@ -15,6 +48,7 @@ class RegimeMoments:
     covariance: pd.DataFrame
     correlation: pd.DataFrame
     observations: int
+    mnts: MNTSParameters | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +120,8 @@ class ScenarioModel:
                 raise ValueError(f"Covariance contains non-finite values for state: {state}")
             if not np.isfinite(moments.correlation.to_numpy(dtype=float)).all():
                 raise ValueError(f"Correlation contains non-finite values for state: {state}")
+            if moments.mnts is not None:
+                moments.mnts.validate(assets)
 
 
 @dataclass(frozen=True)
@@ -97,8 +133,7 @@ class SimulationResult:
     assets: list[str]
     states: list[str]
     frequency: str
-    distribution: str = "normal"
-    degrees_of_freedom: float | None = None
+    distribution: str = "mnts"
     transition_concentration: float | None = None
     macro_paths: np.ndarray | None = None
     macro_columns: list[str] = field(default_factory=list)

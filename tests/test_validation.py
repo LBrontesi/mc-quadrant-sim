@@ -38,9 +38,8 @@ def test_walk_forward_validation_reports_predictive_metrics():
 
     assert result.summary["splits"] >= 10
     assert {
-        "regime_log_likelihood_mean",
-        "regime_student_t_log_likelihood_mean",
-        "unconditional_log_likelihood_mean",
+        "regime_energy_score_mean",
+        "unconditional_mnts_energy_score_mean",
         "advantage_mean",
         "regime_hit_rate",
         "transition_brier_score",
@@ -50,7 +49,7 @@ def test_walk_forward_validation_reports_predictive_metrics():
         "duration_log_score_mean",
         "rolling_vintage_expected_duration_std",
     }.issubset(result.summary.index)
-    assert "advantage_vs_student_t" in result.splits
+    assert "regime_energy_score" in result.splits
     assert "switch_brier_score" in result.splits
     assert "completed_duration" in result.splits
     assert "vintage_expected_duration" in result.splits

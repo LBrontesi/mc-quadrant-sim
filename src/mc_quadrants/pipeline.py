@@ -219,8 +219,6 @@ def _run_chunk(
         start_state=state["start_state"],
         random_seed=seed,
         distribution=state["distribution"],
-        degrees_of_freedom=state["degrees_of_freedom"],
-        block_size=state["block_size"],
         transition_concentration=state["transition_concentration"],
         duration_model=state["duration_model"],
         min_regime_duration=state["min_regime_duration"],
@@ -387,8 +385,6 @@ def _simulate_chunked(
     random_seed: int,
     start_state: str | None,
     distribution: str,
-    degrees_of_freedom: float,
-    block_size: int,
     transition_concentration: float | None,
     duration_model: str,
     min_regime_duration: int,
@@ -455,7 +451,7 @@ def _simulate_chunked(
     ) and decumulation.legacy_nominal
     native_threads = max(1, int(workers)) if native_tax_execution else 1
     native_portfolio_config: dict[str, object] | None = None
-    if native_tax_execution and distribution in {"normal", "student_t"}:
+    if native_tax_execution:
         native_weights = weight_series.reindex(model.assets).fillna(0.0).to_numpy(dtype=float)
         native_weights = native_weights / native_weights.sum()
         native_portfolio_config = prepare_italian_native_configuration(
@@ -501,8 +497,6 @@ def _simulate_chunked(
             start_state=start_state,
             random_seed=seed,
             distribution=distribution,
-            degrees_of_freedom=degrees_of_freedom,
-            block_size=block_size,
             transition_concentration=transition_concentration,
             duration_model=duration_model,
             min_regime_duration=min_regime_duration,
@@ -720,8 +714,6 @@ def _simulate_chunked(
             "periods": periods,
             "start_state": start_state,
             "distribution": distribution,
-            "degrees_of_freedom": float(degrees_of_freedom),
-            "block_size": int(block_size),
             "transition_concentration": transition_concentration,
             "duration_model": duration_model,
             "min_regime_duration": int(min_regime_duration),
@@ -885,9 +877,7 @@ def _simulate_chunked(
             "wrapper_terminal_values": wrapper_terminal_values,
             "wrapper_annualized_returns": wrapper_annualized_returns,
             "native_backend": native_tax_execution,
-            "native_fused_backend": bool(
-                native_tax_execution and distribution in {"normal", "student_t"}
-            ),
+            "native_fused_backend": bool(native_tax_execution),
             "decumulation": decumulation.to_dict(),
             "paired_policy": (
                 _alternative_decumulation(decumulation).policy
@@ -908,9 +898,7 @@ def _simulate_chunked(
                 "tax_country": "none",
                 "tax_regime": "none",
                 "native_backend": native_tax_execution,
-                "native_fused_backend": bool(
-                    native_tax_execution and distribution in {"normal", "student_t"}
-                ),
+                "native_fused_backend": bool(native_tax_execution),
             }
         )
     else:
@@ -921,8 +909,7 @@ def _simulate_chunked(
         assets=model.assets,
         states=model.states.copy(),
         frequency=model.frequency,
-        distribution=distribution,
-        degrees_of_freedom=(float(degrees_of_freedom) if distribution == "student_t" else None),
+        distribution="mnts",
         transition_concentration=transition_concentration,
         macro_paths=macro_paths,
         macro_columns=macro_columns,
@@ -947,9 +934,7 @@ def run_scenario(
     correlation_overrides: CorrelationOverrides | None = None,
     override_weight: float = 1.0,
     macro_lag_periods: int = 0,
-    distribution: str = "normal",
-    degrees_of_freedom: float = 5.0,
-    block_size: int = 3,
+    distribution: str = "mnts",
     transition_uncertainty: float = 0.0,
     rebalance_frequency: int | None = None,
     transaction_cost_bps: float = 0.0,
@@ -987,7 +972,7 @@ def run_scenario(
     threshold_window: int | None = None,
     duration_model: str = "semi_markov",
     min_regime_duration: int = 5,
-    garch: bool = False,
+    garch: bool = True,
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
     walk_forward: bool = True,
@@ -1018,16 +1003,16 @@ def run_scenario(
 ) -> SimulationRun:
     """Calibrate and simulate one fully specified investment scenario.
 
-    ``model_kind="quadrant"`` builds the four-quadrant macro model from growth
-    and inflation thresholds; ``model_kind="hmm"`` fits a Gaussian-emission
-    hidden Markov model directly on the asset returns instead. ``duration_model``
-    controls whether regime run lengths follow the Markov chain or regularized
-    state-specific duration hazards, and ``garch`` adds within-regime
-    GARCH(1,1) conditional variance dynamics. ``walk_forward`` runs a
-    strictly out-of-sample predictive check of the regime model against an
-    unconditional benchmark.
+    ``model_kind="quadrant"`` builds the four macro states from high/low growth
+    crossed with high/low inflation. Returns in every state follow the
+    calibrated MNTS-GARCH process. ``duration_model`` controls whether regime
+    run lengths follow the Markov chain or regularized state-specific duration
+    hazards. ``walk_forward`` runs a strictly out-of-sample predictive check.
     """
 
+    distribution = str(distribution).strip().lower().replace("-", "_")
+    if distribution != "mnts":
+        raise ValueError("distribution must be 'mnts'.")
     transition_uncertainty = float(transition_uncertainty)
     if not 0 <= transition_uncertainty <= 1:
         raise ValueError("transition_uncertainty must be between 0 and 1.")
@@ -1262,8 +1247,6 @@ def run_scenario(
                 random_seed=int(random_seed) + draw * 100_003,
                 start_state=start_state,
                 distribution=distribution,
-                degrees_of_freedom=float(degrees_of_freedom),
-                block_size=int(block_size),
                 transition_concentration=(
                     None
                     if transition_uncertainty == 0.0 or parameter_models
@@ -1322,7 +1305,6 @@ def run_scenario(
                 states=draw_result.states,
                 frequency=draw_result.frequency,
                 distribution=draw_result.distribution,
-                degrees_of_freedom=draw_result.degrees_of_freedom,
                 transition_concentration=draw_result.transition_concentration,
                 macro_paths=draw_result.macro_paths,
                 macro_columns=draw_result.macro_columns,
@@ -1436,10 +1418,7 @@ def run_scenario(
             assets=model.assets,
             states=model.states.copy(),
             frequency=model.frequency,
-            distribution=distribution,
-            degrees_of_freedom=(
-                float(degrees_of_freedom) if distribution == "student_t" else None
-            ),
+            distribution="mnts",
             macro_paths=(np.concatenate(macro_parts, axis=1) if macro_parts else None),
             macro_columns=(simulation_runs[0][0].macro_columns if macro_parts else []),
         )
@@ -1780,36 +1759,3 @@ def run_scenario(
         gross_reporting_wealth=gross_reporting_wealth,
         parameter_uncertainty=parameter_summary,
     )
-
-
-def compare_distributions(
-    distributions: Mapping[str, str],
-    **scenario_kwargs: Any,
-) -> pd.DataFrame:
-    """Run identical inputs under several return distributions."""
-
-    rows: list[dict[str, Any]] = []
-    for label, distribution in distributions.items():
-        scenario = run_scenario(distribution=distribution, **scenario_kwargs)
-        summary = scenario.summary
-        rows.append(
-            {
-                "distribution": label,
-                "mean": summary["mean"],
-                "p05": summary["p05"],
-                "median": summary["p50"],
-                "p95": summary["p95"],
-                "annualized_return": summary["annualized_return"],
-                "annualized_volatility": summary["annualized_volatility"],
-                "sharpe_ratio": summary["sharpe_ratio"],
-                "probability_of_loss": summary["probability_of_loss"],
-                "var_95": summary["var_95"],
-                "expected_shortfall_95": summary["expected_shortfall_95"],
-                "worst_max_drawdown": summary["max_drawdown_worst"],
-                "ulcer_index_mean": summary["ulcer_index_mean"],
-                "sortino_ratio": summary["sortino_ratio"],
-                "calmar_ratio": summary["calmar_ratio"],
-                "geometric_annualized_return": summary["geometric_annualized_return"],
-            }
-        )
-    return pd.DataFrame(rows)

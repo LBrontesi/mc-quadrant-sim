@@ -34,8 +34,8 @@ class RandomStream {
         return radius * std::cos(angle);
     }
 
-    double chi_squared(double degrees_of_freedom) {
-        return 2.0 * gamma(degrees_of_freedom / 2.0);
+    double exponential() {
+        return -std::log(std::max(uniform(), std::numeric_limits<double>::min()));
     }
 
   private:
@@ -66,23 +66,6 @@ class RandomStream {
         return result;
     }
 
-    double gamma(double shape) {
-        if (shape < 1.0) {
-            const double draw = std::max(uniform(), std::numeric_limits<double>::min());
-            return gamma(shape + 1.0) * std::pow(draw, 1.0 / shape);
-        }
-        const double d = shape - 1.0 / 3.0;
-        const double c = 1.0 / std::sqrt(9.0 * d);
-        while (true) {
-            const double x = normal();
-            const double base = 1.0 + c * x;
-            if (base <= 0.0) continue;
-            const double v = base * base * base;
-            const double u = uniform();
-            if (u < 1.0 - 0.0331 * x * x * x * x) return d * v;
-            if (std::log(u) < 0.5 * x * x + d * (1.0 - v + std::log(v))) return d * v;
-        }
-    }
 };
 
 inline const double *state_matrix(const double *values, int state, int assets) {
@@ -112,6 +95,145 @@ void cholesky(const std::vector<double> &matrix, std::vector<double> &factor, in
     }
 }
 
+double sinc(double value) {
+    if (std::abs(value) < 1e-6) {
+        const double square = value * value;
+        return 1.0 - square / 6.0 + square * square / 120.0;
+    }
+    return std::sin(value) / value;
+}
+
+double zolotarev_b_ratio(double value, double alpha) {
+    const double complement = 1.0 - alpha;
+    const double log_ratio = std::log(std::max(sinc(value), 1e-300))
+        - alpha * std::log(std::max(sinc(alpha * value), 1e-300))
+        - complement * std::log(std::max(sinc(complement * value), 1e-300));
+    return std::exp(log_ratio);
+}
+
+double zolotarev_a(double value, double alpha, double b_ratio) {
+    const double complement = 1.0 - alpha;
+    const double log_b_zero = -alpha * std::log(alpha)
+        - complement * std::log(complement);
+    return std::exp(-(log_b_zero + std::log(std::max(b_ratio, 1e-300))) / complement);
+}
+
+// Devroye's uniformly fast double-rejection generator for the exponentially
+// tilted unilateral stable law S_{alpha, lambda}. Its Laplace transform is
+// exp(lambda^alpha - (lambda + s)^alpha). The implementation follows the
+// full algorithm in ACM TOMACS 19(4), 2009, using sinc ratios near zero.
+double exponentially_tilted_stable(RandomStream &random, double alpha, double lambda) {
+    constexpr double pi = 3.141592653589793238462643383279502884;
+    constexpr double sqrt_pi_over_two = 1.253314137315500251207882642406;
+    const double complement = 1.0 - alpha;
+    const double lambda_alpha = std::pow(lambda, alpha);
+    const double gamma_parameter = lambda_alpha * alpha * complement;
+    const double sqrt_gamma = std::sqrt(gamma_parameter);
+    const double xi = (2.0 + sqrt_pi_over_two) * std::sqrt(2.0 * gamma_parameter + 1.0) / pi;
+    const double psi = std::exp(-gamma_parameter * pi * pi / 8.0)
+        * (2.0 + sqrt_pi_over_two) * std::sqrt(gamma_parameter * pi) / pi;
+    const double w1 = xi * std::sqrt(pi / (2.0 * gamma_parameter));
+    const double w2 = 2.0 * psi * std::sqrt(pi);
+    const double w3 = xi * pi;
+    const double b = complement / alpha;
+
+    while (true) {
+        double u = 0.0;
+        double z_uniform = 0.0;
+        double a_value = 0.0;
+        double z_value = 0.0;
+
+        while (true) {
+            const double selector = random.uniform();
+            const double mixture_uniform = random.uniform();
+            if (gamma_parameter >= 1.0) {
+                if (selector < w1 / (w1 + w2)) {
+                    u = std::abs(random.normal()) / sqrt_gamma;
+                } else {
+                    u = pi * (1.0 - mixture_uniform * mixture_uniform);
+                }
+            } else if (selector < w3 / (w3 + w2)) {
+                u = pi * mixture_uniform;
+            } else {
+                u = pi * (1.0 - mixture_uniform * mixture_uniform);
+            }
+            if (!(u > 0.0 && u < pi)) continue;
+
+            const double b_ratio = zolotarev_b_ratio(u, alpha);
+            const double zeta = std::sqrt(std::max(b_ratio, 1e-300));
+            const double phi = std::pow(sqrt_gamma + alpha * zeta, 1.0 / alpha);
+            const double gamma_power = std::pow(sqrt_gamma, 1.0 / alpha);
+            const double denominator = std::max(phi - gamma_power, 1e-300);
+            z_value = phi / denominator;
+
+            double envelope = psi / std::sqrt(std::max(pi - u, 1e-300));
+            if (gamma_parameter >= 1.0) {
+                envelope += xi * std::exp(-gamma_parameter * u * u / 2.0);
+            } else {
+                envelope += xi;
+            }
+            const double rho_denominator =
+                (1.0 + sqrt_pi_over_two) * sqrt_gamma / zeta + z_value;
+            const double log_rho = std::log(pi)
+                - lambda_alpha * (1.0 - 1.0 / (zeta * zeta))
+                + std::log(std::max(envelope, 1e-300))
+                - std::log(std::max(rho_denominator, 1e-300));
+            const double log_uniform = std::log(
+                std::max(random.uniform(), std::numeric_limits<double>::min())
+            );
+            if (log_uniform + log_rho > 0.0) continue;
+
+            z_uniform = std::exp(log_uniform + log_rho);
+            a_value = zolotarev_a(u, alpha, b_ratio);
+            break;
+        }
+
+        const double m = std::pow(b * lambda / a_value, alpha);
+        const double delta = std::sqrt(m * alpha / a_value);
+        const double a1 = delta * sqrt_pi_over_two;
+        const double a2 = delta;
+        const double a3 = z_value / a_value;
+        const double sum = a1 + a2 + a3;
+        const double selector = random.uniform();
+        double x = 0.0;
+        double normal_draw = 0.0;
+        double exponential_draw = 0.0;
+        if (selector < a1 / sum) {
+            normal_draw = random.normal();
+            x = m - delta * std::abs(normal_draw);
+        } else if (selector < (a1 + a2) / sum) {
+            x = m + delta * random.uniform();
+        } else {
+            exponential_draw = random.exponential();
+            x = m + delta + exponential_draw * a3;
+        }
+        if (x < 0.0 || !std::isfinite(x)) continue;
+
+        const double energy = -std::log(
+            std::max(z_uniform, std::numeric_limits<double>::min())
+        );
+        double acceptance = a_value * (x - m)
+            + lambda * (std::pow(x, -b) - std::pow(m, -b));
+        if (x < m) acceptance -= normal_draw * normal_draw / 2.0;
+        if (x > m + delta) acceptance -= exponential_draw;
+        if (acceptance <= energy) return std::pow(x, -b);
+    }
+}
+
+double nts_subordinator(RandomStream &random, double tail_index, double tempering) {
+    const double alpha = tail_index / 2.0;
+    const double log_scale = (
+        (1.0 - alpha) * std::log(tempering) - std::log(alpha)
+    ) / alpha;
+    const double scale = std::exp(log_scale);
+    const double tilted = exponentially_tilted_stable(
+        random,
+        alpha,
+        tempering * scale
+    );
+    return scale * tilted;
+}
+
 template <typename Function>
 void parallel_paths(int paths, int requested_threads, Function function) {
     const int thread_count = std::max(1, std::min(paths, requested_threads));
@@ -131,6 +253,41 @@ void parallel_paths(int paths, int requested_threads, Function function) {
 
 }  // namespace
 
+extern "C" int mc_sample_mnts_subordinators(
+    int samples,
+    double tail_index,
+    double tempering,
+    std::uint64_t seed,
+    double *output
+) {
+    if (samples <= 0 || !(tail_index > 0.0 && tail_index < 2.0) ||
+        !(tempering > 0.0) || !output) return 1;
+    RandomStream random(seed, 0);
+    for (int index = 0; index < samples; ++index) {
+        output[index] = nts_subordinator(random, tail_index, tempering);
+        if (!std::isfinite(output[index]) || output[index] <= 0.0) return 2;
+    }
+    return 0;
+}
+
+extern "C" int mc_sample_exponentially_tilted_stable(
+    int samples,
+    double alpha,
+    double lambda,
+    std::uint64_t seed,
+    double *output
+) {
+    if (samples <= 0 || !(alpha > 0.0 && alpha < 1.0) || !(lambda > 0.0) || !output) {
+        return 1;
+    }
+    RandomStream random(seed, 0);
+    for (int index = 0; index < samples; ++index) {
+        output[index] = exponentially_tilted_stable(random, alpha, lambda);
+        if (!std::isfinite(output[index]) || output[index] <= 0.0) return 2;
+    }
+    return 0;
+}
+
 extern "C" int mc_simulate_parametric(
     int periods,
     int paths,
@@ -139,15 +296,16 @@ extern "C" int mc_simulate_parametric(
     int macro_dimensions,
     const std::uint8_t *regimes,
     const double *means,
-    const double *covariance_cholesky,
-    const double *correlation_cholesky,
-    const double *base_correlations,
+    const double *gaussian_correlation_cholesky,
+    const double *gaussian_correlations,
     const double *volatilities,
+    const double *tail_indexes,
+    const double *temperings,
+    const double *skewness,
+    const double *gaussian_scales,
     const double *macro_shocks,
     const double *macro_betas,
     std::uint64_t seed,
-    int student_t,
-    double degrees_of_freedom,
     int garch,
     double garch_alpha,
     double garch_beta,
@@ -159,8 +317,16 @@ extern "C" int mc_simulate_parametric(
     double *output
 ) {
     if (periods <= 0 || paths <= 0 || assets <= 0 || states <= 0 || !regimes || !means ||
-        !covariance_cholesky || !correlation_cholesky || !base_correlations ||
-        !volatilities || !output) return 1;
+        !gaussian_correlation_cholesky || !gaussian_correlations || !volatilities ||
+        !tail_indexes || !temperings || !skewness || !gaussian_scales || !output) return 1;
+    for (int state = 0; state < states; ++state) {
+        if (!(tail_indexes[state] > 0.0 && tail_indexes[state] < 2.0) ||
+            !(temperings[state] > 0.0)) return 2;
+        for (int asset = 0; asset < assets; ++asset) {
+            const std::size_t index = static_cast<std::size_t>(state) * assets + asset;
+            if (!std::isfinite(skewness[index]) || !(gaussian_scales[index] > 0.0)) return 3;
+        }
+    }
 
     parallel_paths(paths, requested_threads, [&](int begin, int end) {
     for (int path = begin; path < end; ++path) {
@@ -178,11 +344,16 @@ extern "C" int mc_simulate_parametric(
             const int state = static_cast<int>(regimes[path_offset]);
             if (state < 0 || state >= states) continue;
             const bool reanchored = previous_state != state;
-            const double *base = state_matrix(base_correlations, state, assets);
-            const double *covariance_factor = state_matrix(covariance_cholesky, state, assets);
-            const double *correlation_factor = state_matrix(correlation_cholesky, state, assets);
+            const double *base = state_matrix(gaussian_correlations, state, assets);
+            const double *correlation_factor = state_matrix(
+                gaussian_correlation_cholesky,
+                state,
+                assets
+            );
             const double *state_mean = state_vector(means, state, assets);
             const double *state_volatility = state_vector(volatilities, state, assets);
+            const double *state_skewness = state_vector(skewness, state, assets);
+            const double *state_gaussian_scale = state_vector(gaussian_scales, state, assets);
 
             for (int asset = 0; asset < assets; ++asset) independent[asset] = random.normal();
 
@@ -210,7 +381,7 @@ extern "C" int mc_simulate_parametric(
                     }
                     standardized[row] = value / std::sqrt(std::max(q[row * assets + row], 1e-10));
                 }
-            } else if (garch) {
+            } else {
                 for (int row = 0; row < assets; ++row) {
                     double value = 0.0;
                     for (int column = 0; column <= row; ++column) {
@@ -218,21 +389,17 @@ extern "C" int mc_simulate_parametric(
                     }
                     standardized[row] = value;
                 }
-            } else {
-                for (int row = 0; row < assets; ++row) {
-                    double value = 0.0;
-                    for (int column = 0; column <= row; ++column) {
-                        value += covariance_factor[row * assets + column] * independent[column];
-                    }
-                    standardized[row] = value;
-                }
             }
 
-            if (student_t) {
-                const double scale = std::sqrt(
-                    (degrees_of_freedom - 2.0) / random.chi_squared(degrees_of_freedom)
-                );
-                for (double &value : standardized) value *= scale;
+            const double subordinator = nts_subordinator(
+                random,
+                tail_indexes[state],
+                temperings[state]
+            );
+            const double root_subordinator = std::sqrt(subordinator);
+            for (int asset = 0; asset < assets; ++asset) {
+                standardized[asset] = state_skewness[asset] * (subordinator - 1.0)
+                    + root_subordinator * state_gaussian_scale[asset] * standardized[asset];
             }
 
             for (int asset = 0; asset < assets; ++asset) {
@@ -245,7 +412,7 @@ extern "C" int mc_simulate_parametric(
                         (1.0 - garch_alpha - garch_beta) * level
                         + garch_alpha * residual * residual
                         + garch_beta * conditional_variance[asset];
-                } else if (dynamic_correlation) {
+                } else {
                     residual *= state_volatility[asset];
                 }
 
@@ -1282,15 +1449,16 @@ struct MCParametricPortfolioConfig {
     int requested_threads;
     const std::uint8_t *regimes;
     const double *means;
-    const double *covariance_cholesky;
-    const double *correlation_cholesky;
-    const double *base_correlations;
+    const double *gaussian_correlation_cholesky;
+    const double *gaussian_correlations;
     const double *volatilities;
+    const double *tail_indexes;
+    const double *temperings;
+    const double *skewness;
+    const double *gaussian_scales;
     const double *macro_shocks;
     const double *macro_betas;
     std::uint64_t seed;
-    int student_t;
-    double degrees_of_freedom;
     int garch;
     double garch_alpha;
     double garch_beta;
@@ -1337,8 +1505,9 @@ extern "C" int mc_simulate_parametric_italian_portfolios(
     double *year_stats
 ) {
     if (!parametric || !tax || !parametric->regimes || !parametric->means ||
-        !parametric->covariance_cholesky || !parametric->correlation_cholesky ||
-        !parametric->base_correlations || !parametric->volatilities ||
+        !parametric->gaussian_correlation_cholesky || !parametric->gaussian_correlations ||
+        !parametric->volatilities || !parametric->tail_indexes || !parametric->temperings ||
+        !parametric->skewness || !parametric->gaussian_scales ||
         !parametric->monthly_fee_log || !tax->weights || !tax->taxable_fraction ||
         !tax->offsettable || !tax->ftt_rates || !tax->stamp_mask || !tax->ivafe_mask ||
         !tax->year_slots || !gross_wealth || !diy_wealth || !tax_stats ||
@@ -1398,15 +1567,16 @@ extern "C" int mc_simulate_parametric_italian_portfolios(
                 parametric->macro_dimensions,
                 path_regimes.data(),
                 parametric->means,
-                parametric->covariance_cholesky,
-                parametric->correlation_cholesky,
-                parametric->base_correlations,
+                parametric->gaussian_correlation_cholesky,
+                parametric->gaussian_correlations,
                 parametric->volatilities,
+                parametric->tail_indexes,
+                parametric->temperings,
+                parametric->skewness,
+                parametric->gaussian_scales,
                 path_macro.empty() ? nullptr : path_macro.data(),
                 parametric->macro_betas,
                 adjusted_seed,
-                parametric->student_t,
-                parametric->degrees_of_freedom,
                 parametric->garch,
                 parametric->garch_alpha,
                 parametric->garch_beta,
@@ -1545,4 +1715,4 @@ extern "C" int mc_simulate_parametric_italian_portfolios(
     return failure.load(std::memory_order_relaxed);
 }
 
-extern "C" int mc_native_version() { return 3; }
+extern "C" int mc_native_version() { return 4; }

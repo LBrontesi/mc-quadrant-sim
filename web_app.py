@@ -18,7 +18,6 @@ if SRC_DIR.is_dir() and str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from mc_quadrants.api import (  # noqa: E402
-    build_compare_response,
     build_load_response,
     build_safe_rate_response,
     build_simulate_response,
@@ -32,7 +31,6 @@ MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", str(10 * 1024 * 1024)))
 MAX_CONCURRENT_JOBS = max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "1")))
 HEAVY_ENDPOINTS = {
     "/api/simulate",
-    "/api/compare",
     "/api/wealth",
     "/api/safe-rate",
 }
@@ -144,8 +142,6 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._send_json(200, build_simulate_response(payload))
             elif path == "/api/safe-rate":
                 self._send_json(200, build_safe_rate_response(payload))
-            elif path == "/api/compare":
-                self._send_json(200, build_compare_response(payload))
             elif path == "/api/wealth":
                 self._send_json(200, build_wealth_csv(payload))
             else:

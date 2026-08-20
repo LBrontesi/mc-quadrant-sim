@@ -70,6 +70,7 @@ def build_calibration_diagnostics(
         observations = int((aligned == state).sum())
         covariance = moments.covariance.to_numpy(dtype=float)
         condition_number = float(np.linalg.cond(covariance)) if covariance.size else np.nan
+        mnts = moments.mnts
         rows.append(
             {
                 "regime": state,
@@ -83,6 +84,14 @@ def build_calibration_diagnostics(
                 ),
                 "expected_duration_months": float(
                     model.metadata.get("expected_duration_months", {}).get(state, np.nan)
+                ),
+                "mnts_tail_index": float(mnts.tail_index) if mnts is not None else np.nan,
+                "mnts_tempering": float(mnts.tempering) if mnts is not None else np.nan,
+                "mnts_skewness_min": (
+                    float(mnts.skewness.min()) if mnts is not None else np.nan
+                ),
+                "mnts_skewness_max": (
+                    float(mnts.skewness.max()) if mnts is not None else np.nan
                 ),
             }
         )
@@ -133,6 +142,7 @@ def build_hmm_diagnostics(
         observations = int(moments.observations)
         covariance = moments.covariance.to_numpy(dtype=float)
         condition_number = float(np.linalg.cond(covariance)) if covariance.size else np.nan
+        mnts = moments.mnts
         rows.append(
             {
                 "regime": state,
@@ -140,6 +150,14 @@ def build_hmm_diagnostics(
                 "share": observations / total,
                 "covariance_condition_number": condition_number,
                 "shrinkage": np.nan,
+                "mnts_tail_index": float(mnts.tail_index) if mnts is not None else np.nan,
+                "mnts_tempering": float(mnts.tempering) if mnts is not None else np.nan,
+                "mnts_skewness_min": (
+                    float(mnts.skewness.min()) if mnts is not None else np.nan
+                ),
+                "mnts_skewness_max": (
+                    float(mnts.skewness.max()) if mnts is not None else np.nan
+                ),
             }
         )
         if observations < minimum_observations:

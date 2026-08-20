@@ -17,7 +17,7 @@ The model is designed to be calibrated from real historical data:
 3. Parametric return means are shrunk and covariance matrices use Ledoit-Wolf shrinkage.
 4. Optional stationary-bootstrap recalibrations measure parameter uncertainty.
 5. Growth, inflation, the short rate, regimes, returns, dynamic correlations, and portfolio accounting are simulated together.
-6. Walk-forward validation compares the model with Gaussian and Student-t benchmarks.
+6. Walk-forward validation compares regime-switching MNTS forecasts with an unconditional MNTS benchmark.
 
 ## Methodology
 
@@ -230,21 +230,21 @@ numbers so sparse or unstable calibrations are visible rather than hidden.
 
 ### 5. Return Sampling
 
-Each simulated period first draws a regime, then draws asset returns using that
-regime's parameters:
+Each simulated month first draws one of the four growth/inflation states, then
+draws returns from that state's **multivariate normal tempered-stable (MNTS)**
+law. The model calibrates a common state-level tail index and tempering rate,
+asset-specific skew parameters, and a latent dependence matrix. A shared
+tempered-stable subordinator produces fat tails and joint extremes while the
+latent factor preserves cross-asset dependence. Parameters are standardized so
+the fitted state means, volatilities, and correlations remain the target first
+two moments.
 
-- `normal`: multivariate Gaussian sampling.
-- `student_t`: a scale-mixture multivariate Student-t draw. The covariance is
-  rescaled so finite degrees of freedom preserve the calibrated covariance.
-- `bootstrap`: samples historical returns observed in the selected regime.
-- `block_bootstrap`: samples short consecutive blocks from regime history,
-  preserving some local return structure while a path remains in a regime.
-
-Student-t degrees of freedom must be greater than `2` so the variance is
-finite. Bootstrap methods require historical returns saved during calibration.
+The tempered-stable subordinator is sampled exactly with Devroye's double-
+rejection algorithm. The product exposes no alternative return-path sampler;
+MNTS-GARCH is the single production law.
 
 **GARCH(1,1) volatility clustering** adds conditional-variance dynamics within
-each regime (Gaussian draws only): every asset's variance follows
+each regime: every asset's variance follows
 `h_t = omega + alpha * eps_{t-1}^2 + beta * h_{t-1}` anchored so the
 unconditional level matches the regime covariance, and the variance re-anchors
 when a path enters a new regime. Shocks therefore cluster in time without
@@ -255,8 +255,8 @@ of past variance (default 0.85).
 **Asymmetric dynamic correlation (ADCC)** evolves the correlation matrix after
 each standardized shock. `dcc_alpha` controls shock response, `dcc_beta`
 controls persistence, and `dcc_asymmetry` increases the response to joint
-negative shocks. ADCC works with Normal or Student-t returns and re-anchors to
-the relevant regime correlation after a state change.
+negative MNTS shocks. It re-anchors to the relevant state-level latent
+correlation after a regime change.
 
 **Joint macro-financial paths** default to a shrinkage Bayesian VAR(1) ensemble
 that blends full-history and rolling-window coefficients for growth, inflation,
@@ -277,13 +277,14 @@ model, or a full yield-curve model.
 **Walk-forward validation** (quadrant model only, enabled by default in the
 dashboard) checks the regime model and selected portfolio strictly out of sample: each split fits on
 data up to period `t` and scores the next observation under the one-step
-regime mixture density versus unconditional Gaussian and Student-t models fitted
-on the same history. It also reports transition Brier and log scores, observed
+regime-switching MNTS predictive draws versus an unconditional MNTS model fitted
+on the same history. A multivariate energy score provides a proper scoring rule
+without approximating the MNTS density. Validation also reports transition Brier and log scores, observed
 versus predicted switches per decade, completed-duration log scores and errors,
 stability of expected durations across rolling calibration vintages,
 actual-state probabilities, portfolio probability-integral-transform
 diagnostics, 95% VaR breach frequency and clustering, and a Newey-West/HAC
-log-score comparison. Multi-horizon 3/12/60-month errors and a mean-variance
+score comparison. Multi-horizon 3/12/60-month errors and a mean-variance
 certainty-equivalent advantage test whether complexity adds decision value.
 The UI shows expected months in every state and expected
 switches per decade, and warns when the implied persistence is unusually low.
@@ -509,7 +510,7 @@ average or percentile.
 - Latest-revised FRED mode still contains revision look-ahead; select ALFRED initial releases for point-in-time analysis.
 - The Bayesian macro ensemble and structural priors remain statistical and do not model the complete yield curve or monetary-policy reaction function.
 - Parameter bootstrap quantifies historical estimation instability, not every possible future structural break.
-- Parametric tail and ADCC specifications remain model assumptions; empirical bootstrap remains a useful benchmark.
+- MNTS tail, GARCH, and ADCC specifications remain model assumptions and should be stress-tested.
 - Transaction costs are charged only at modeled rebalancing events.
 - Italian taxes are an optional simplified planning approximation, not tax advice or a filing calculation.
 - Results are scenario estimates, not forecasts or investment advice.
@@ -524,8 +525,8 @@ in practice:
 - Regime conditioning captures the well-documented tendency for asset
   correlations and volatilities to change with the growth/inflation cycle,
   which a single full-sample covariance matrix misses.
-- Student-t and bootstrap/block-bootstrap sampling produce fat tails and
-  extreme outcomes instead of assuming Gaussian returns.
+- State-specific MNTS sampling produces skewed fat tails and common-subordinator
+  joint extremes while preserving calibrated first and second moments.
 - Rebalancing with transaction costs models the friction investors actually
   pay. Release alignment reduces timing bias, while ALFRED initial-release
   mode also avoids using later macro revisions.
@@ -534,7 +535,7 @@ in practice:
 
 **Limitations and honest approximations**
 
-- Student-t tails are symmetric and monthly paths do not model intramonth jumps.
+- Monthly MNTS paths do not resolve intramonth jumps or liquidity spirals.
 - Annualized volatility scales periodic dispersion by the square root of time;
   it does not claim that monthly returns are independent or normally distributed.
 - Bond returns still come from historical price behavior rather than explicit
@@ -559,7 +560,7 @@ in practice:
 
 The dashboard's **Methodology integrity** panel shows data-vintage quality,
 release alignment, regime assignment, parameter recalibrations, joint macro
-paths, dynamic dependence, and Student-t benchmark performance separately.
+paths, dynamic dependence, and unconditional-MNTS benchmark performance separately.
 It never treats a larger number of Monte Carlo paths as evidence that the
 calibrated model itself is more certain.
 
@@ -589,10 +590,9 @@ Build the optional C++17 backend on macOS (including Apple Silicon) or Linux:
 ```
 
 The native backend uses `std::thread`; the scenario `workers` setting controls
-that thread pool. For Normal and Student-t scenarios a fused kernel generates
-one path at a time and immediately updates gross, DIY, and optional wrapper
-ledgers, so no full asset-return cube is retained. Bootstrap returns continue
-to use the Python generator and are then passed to the same C++ ledger. If the shared
+that thread pool. A fused MNTS-GARCH kernel generates one path at a time and
+immediately updates gross, DIY, and optional wrapper ledgers, so no full asset-
+return cube is retained. If the shared
 library is missing or its ABI version does not match, execution automatically
 falls back to the Python reference implementation. Set
 `MC_DISABLE_NATIVE_SIM=1` to force that reference path for verification.
@@ -697,7 +697,7 @@ The web UI uses an editorial research-studio layout:
 an interactive four-regime hero, warm light and charcoal dark themes, scroll
 progress, section reveals, responsive motion, and a compact allocation editor.
 Tabbed result views cover Growth, Returns, Drawdowns, Correlations, Monthly
-returns, Retirement, paired research, and distribution comparison. The
+returns, Retirement, paired research, and diagnostics. The
 Retirement tab reports the safe-rate curve, spending-survival curve, funded and
 cumulative real-spending fans, cuts/increases, exhaustion, terminal capital,
 paired fixed-versus-guardrail outcomes, and—when Italy is selected—annual tax,
@@ -788,13 +788,13 @@ model = calibrate_quadrant_model(
 
 result = simulate_returns(
     model,
-    periods=120,
-    paths=5000,
+    periods=360,
+    paths=100000,
     random_seed=7,
-    distribution="student_t",
-    degrees_of_freedom=5,
+    distribution="mnts",
     duration_model="semi_markov",
     min_regime_duration=5,
+    garch=True,
     joint_macro=True,
     dynamic_correlation=True,
 )
@@ -851,9 +851,8 @@ inflation above 3 percent.
 - Correlations are estimated separately by quadrant.
 - A covariance shrinkage parameter blends each quadrant estimate with the full-sample covariance. This helps when one quadrant has few observations.
 - Correlation overrides are optional. They are useful when history is sparse or when you want to blend empirical estimates with an investment view.
-- Returns can be sampled from either a Gaussian or finite-variance Student-t distribution within each quadrant. Lower Student-t degrees of freedom create heavier tails.
-- Historical and block bootstrap sampling preserve observed regime-specific return shapes and unusual outcomes.
-- Parameter recalibrations use paired stationary-bootstrap blocks and refit the complete parametric model; this is distinct from empirical return-path bootstrap sampling.
+- Every quadrant uses a calibrated MNTS return law with state-specific tails, skewness, volatility, and dependence.
+- Parameter recalibrations use paired stationary-bootstrap blocks and refit the complete MNTS model; this measures parameter uncertainty rather than selecting another return law.
 - A non-zero transition uncertainty setting samples the Markov matrix row-by-row only when parameter recalibration is disabled.
 - Portfolio paths can model periodic rebalancing and transaction costs charged on traded notional. The default `rebalance_frequency=None` preserves the original weighted-log behavior.
 - ALFRED initial-release mode and custom `AvailableDate` values provide point-in-time macro alignment; the release lag remains the fallback for latest-revised FRED history.

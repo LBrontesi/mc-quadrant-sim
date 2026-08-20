@@ -19,6 +19,11 @@ from numbers import Real
 import numpy as np
 import pandas as pd
 
+from mc_quadrants.mnts import (
+    DEFAULT_TAIL_INDEX,
+    DEFAULT_TEMPERING,
+    sample_mnts_subordinators,
+)
 from mc_quadrants.regimes import (
     REGIME_ORDER,
     ThresholdSpec,
@@ -57,7 +62,6 @@ DEFAULT_ANCHOR_UNIVERSE: list[str] = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", 
 
 _MIN_OBSERVATIONS_DEFAULT = 12
 _CAUSAL_WINDOW_DEFAULT = 36
-_DEGREES_OF_FREEDOM_DEFAULT = 5.0
 
 
 def categorize_asset(ticker: str, overrides: Mapping[str, str] | None = None) -> str:
@@ -96,15 +100,23 @@ def backward_price_levels(
     return pd.Series(levels, index=synthetic_log_returns.sort_index().index, name="price")
 
 
-def _t_noise(rng: np.random.Generator, mean: float, std: float, degrees_of_freedom: float) -> float:
-    """Draw one Student-t deviate preserving the requested standard deviation."""
+def _mnts_noise(rng: np.random.Generator, mean: float, std: float) -> float:
+    """Draw one standardized skewed, fat-tailed MNTS residual."""
 
     if not np.isfinite(std) or std <= 0:
         return float(mean)
-    dof = degrees_of_freedom if np.isfinite(degrees_of_freedom) and degrees_of_freedom > 2 else 5.0
-    scale = std * np.sqrt((dof - 2.0) / dof)
-    chi_squared = rng.chisquare(dof)
-    return float(mean + scale * rng.standard_normal() / np.sqrt(chi_squared / dof))
+    subordinator = sample_mnts_subordinators(
+        rng,
+        1,
+        DEFAULT_TAIL_INDEX,
+        DEFAULT_TEMPERING,
+    )[0]
+    skewness = -0.35
+    variance_t = (2.0 - DEFAULT_TAIL_INDEX) / (2.0 * DEFAULT_TEMPERING)
+    gaussian_scale = np.sqrt(1.0 - skewness * skewness * variance_t)
+    innovation = skewness * (subordinator - 1.0)
+    innovation += np.sqrt(subordinator) * gaussian_scale * rng.standard_normal()
+    return float(mean + std * innovation)
 
 
 def _fit_factor_model(
@@ -184,7 +196,6 @@ def simulate_regime_conditioned_pre_inception_returns(
     anchor_returns: pd.DataFrame | None = None,
     min_observations: int = _MIN_OBSERVATIONS_DEFAULT,
     random_seed: int = 42,
-    degrees_of_freedom: float = _DEGREES_OF_FREEDOM_DEFAULT,
     categories: Mapping[str, str] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, dict[str, object]]]:
     """Generate regime-conditioned pre-inception returns for each synthetic asset.
@@ -291,17 +302,14 @@ def simulate_regime_conditioned_pre_inception_returns(
                     mean, std = residual_by_regime[state]
                 else:
                     mean, std = 0.0, full_residual_vol
-                generated[date] = _t_noise(rng, factor_part + mean, std, degrees_of_freedom)
+                generated[date] = _mnts_noise(rng, factor_part + mean, std)
             elif state in regime_mean:
-                generated[date] = _t_noise(
-                    rng, regime_mean[state], regime_std[state], degrees_of_freedom
-                )
+                generated[date] = _mnts_noise(rng, regime_mean[state], regime_std[state])
             else:
-                generated[date] = _t_noise(
+                generated[date] = _mnts_noise(
                     rng,
                     float(observed.mean()),
                     float(observed.std(ddof=1) or 0.0),
-                    degrees_of_freedom,
                 )
 
         simulated_series = pd.Series(generated, dtype=float).sort_index()

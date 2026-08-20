@@ -13,8 +13,8 @@ from mc_quadrants.decumulation import (
     inflation_index,
     normalize_decumulation,
 )
-
-from mc_quadrants.matrix import nearest_psd
+from mc_quadrants.matrix import nearest_correlation, nearest_psd
+from mc_quadrants.mnts import resolved_mnts_parameters, sample_mnts_subordinators
 from mc_quadrants.native import (
     simulate_parametric_italian_portfolios_native,
     simulate_parametric_native,
@@ -466,13 +466,11 @@ def simulate_returns(
     paths: int,
     start_state: str | None = None,
     random_seed: int | None = None,
-    distribution: str = "normal",
-    degrees_of_freedom: float = 5.0,
-    block_size: int = 3,
+    distribution: str = "mnts",
     transition_concentration: float | None = None,
     duration_model: str = "markov",
     min_regime_duration: int = 5,
-    garch: bool = False,
+    garch: bool = True,
     garch_alpha: float = 0.10,
     garch_beta: float = 0.85,
     joint_macro: bool = False,
@@ -486,48 +484,32 @@ def simulate_returns(
     native_threads: int = 1,
     native_portfolio_config: Mapping[str, object] | None = None,
 ) -> SimulationResult:
-    """Simulate regime-dependent multivariate asset returns.
+    """Simulate four-state, regime-switching MNTS-GARCH asset returns.
 
-    ``distribution="student_t"`` preserves each regime's calibrated mean and
-    covariance while allowing more extreme outcomes than a Gaussian draw.
-    ``distribution="bootstrap"`` samples historical observations for each
-    regime, while ``distribution="block_bootstrap"`` keeps short blocks of
-    observations together. Finite-variance Student-t sampling requires more
-    than two degrees of freedom.
+    Every quadrant has its own multivariate normal tempered-stable parameters.
+    A common tempered-stable subordinator creates joint tail dependence, while
+    asset-specific skew parameters and a latent correlation matrix preserve the
+    calibrated first two moments. GARCH(1,1) is enabled by default.
 
     ``duration_model="semi_markov"`` draws regime run lengths from regularized
     state-specific duration hazards instead of the geometric lengths implied by
     a first-order chain.
 
-    ``garch=True`` (Gaussian draws only) adds GARCH(1,1) conditional variance
-    dynamics within each regime: each asset's unconditional variance anchors
-    the long-run level, ``garch_alpha`` governs the response to new shocks,
-    and ``garch_beta`` the persistence of past variance. Variance is re-anchored
-    to the new regime's level when a path switches states, so volatility
-    clusters without drifting away from the calibrated regime covariance.
+    Conditional variance is re-anchored to a quadrant's calibrated level when
+    a path changes state, preventing stale volatility from leaking across
+    macro regimes. The C++ backend is the production path; the Python sampler
+    is an exact but intentionally slower reference implementation.
     """
 
     distribution = str(distribution).lower().replace("-", "_")
-    if distribution not in {"normal", "student_t", "t", "bootstrap", "block_bootstrap"}:
-        raise ValueError("distribution must be 'normal', 'student_t', 'bootstrap', or 'block_bootstrap'.")
-    if distribution == "t":
-        distribution = "student_t"
-    if distribution == "student_t" and (not np.isfinite(degrees_of_freedom) or degrees_of_freedom <= 2):
-        raise ValueError("degrees_of_freedom must be finite and greater than 2 for Student-t returns.")
-    if block_size <= 0:
-        raise ValueError("block_size must be positive.")
+    if distribution != "mnts":
+        raise ValueError("distribution must be 'mnts'.")
     if not np.isfinite(garch_alpha) or not 0 <= garch_alpha < 1:
         raise ValueError("garch_alpha must be between 0 and 1.")
     if not np.isfinite(garch_beta) or not 0 <= garch_beta < 1:
         raise ValueError("garch_beta must be between 0 and 1.")
     if garch_alpha + garch_beta >= 1:
         raise ValueError("garch_alpha + garch_beta must be less than 1.")
-    if garch and distribution != "normal":
-        raise ValueError("GARCH volatility clustering requires distribution='normal'.")
-    if joint_macro and distribution in {"bootstrap", "block_bootstrap"}:
-        raise ValueError("Joint macro simulation requires a parametric return distribution.")
-    if dynamic_correlation and distribution in {"bootstrap", "block_bootstrap"}:
-        raise ValueError("Dynamic correlation requires a parametric return distribution.")
     if not 0 <= dcc_alpha < 1 or not 0 <= dcc_beta < 1 or not 0 <= dcc_asymmetry < 1:
         raise ValueError("DCC parameters must be between 0 and 1.")
     if dcc_alpha + dcc_beta + dcc_asymmetry >= 1:
@@ -601,103 +583,80 @@ def simulate_returns(
     )
     diagonal_indexes = np.arange(len(assets))
     state_correlations[:, diagonal_indexes, diagonal_indexes] = 1.0
-    state_covariance_cholesky = np.linalg.cholesky(
-        state_covariances + np.eye(len(assets))[None, :, :] * 1e-10
+    mnts_parameters = [resolved_mnts_parameters(model.moments[state]) for state in model.states]
+    state_tail_indexes = np.array(
+        [parameters.tail_index for parameters in mnts_parameters], dtype=float
     )
-    state_correlation_cholesky = np.linalg.cholesky(
-        state_correlations + np.eye(len(assets))[None, :, :] * 1e-10
+    state_temperings = np.array(
+        [parameters.tempering for parameters in mnts_parameters], dtype=float
+    )
+    state_skewness = np.stack(
+        [parameters.skewness.reindex(assets).to_numpy(dtype=float) for parameters in mnts_parameters]
+    )
+    alphas = state_tail_indexes / 2.0
+    subordinator_variances = (1.0 - alphas) / state_temperings
+    state_gaussian_scales = np.sqrt(
+        np.maximum(1.0 - state_skewness**2 * subordinator_variances[:, None], 1e-10)
     )
 
-    if distribution in {"normal", "student_t"}:
-        native_seed = (
-            int(np.random.SeedSequence().generate_state(1, dtype=np.uint64)[0])
-            if random_seed is None
-            else int(random_seed) + 1
+    gaussian_correlations: list[np.ndarray] = []
+    for state_index, parameters in enumerate(mnts_parameters):
+        if isinstance(macro_dynamics, Mapping):
+            latent = (
+                state_correlations[state_index]
+                - subordinator_variances[state_index]
+                * np.outer(state_skewness[state_index], state_skewness[state_index])
+            ) / np.outer(state_gaussian_scales[state_index], state_gaussian_scales[state_index])
+            latent_frame = nearest_correlation(
+                pd.DataFrame(latent, index=assets, columns=assets)
+            )
+        else:
+            latent_frame = parameters.gaussian_correlation.reindex(
+                index=assets, columns=assets
+            )
+        gaussian_correlations.append(latent_frame.to_numpy(dtype=float))
+    state_gaussian_correlations = np.stack(gaussian_correlations)
+    state_gaussian_correlation_cholesky = np.linalg.cholesky(
+        state_gaussian_correlations + np.eye(len(assets))[None, :, :] * 1e-10
+    )
+
+    native_seed = (
+        int(np.random.SeedSequence().generate_state(1, dtype=np.uint64)[0])
+        if random_seed is None
+        else int(random_seed) + 1
+    )
+    if native_portfolio_config is not None:
+        native_kwargs = dict(native_portfolio_config["native_kwargs"])
+        transaction_multipliers = native_portfolio_config.get(
+            "state_transaction_cost_multipliers"
         )
-        if native_portfolio_config is not None:
-            native_kwargs = dict(native_portfolio_config["native_kwargs"])
-            transaction_multipliers = native_portfolio_config.get(
-                "state_transaction_cost_multipliers"
+        if transaction_multipliers:
+            normalized_multipliers = {
+                str(state): float(value)
+                for state, value in dict(transaction_multipliers).items()
+            }
+            state_cost_values = np.array(
+                [normalized_multipliers.get(state, 1.0) for state in model.states],
+                dtype=float,
             )
-            if transaction_multipliers:
-                normalized_multipliers = {
-                    str(state): float(value)
-                    for state, value in dict(transaction_multipliers).items()
-                }
-                state_cost_values = np.array(
-                    [normalized_multipliers.get(state, 1.0) for state in model.states],
-                    dtype=float,
-                )
-                native_kwargs["transaction_cost_rate_paths"] = (
-                    state_cost_values[np.asarray(regime_paths, dtype=int)]
-                    * float(native_kwargs["transaction_cost_bps"])
-                    / 10_000.0
-                )
-            expense_ratios = np.asarray(
-                native_portfolio_config["expense_ratios"], dtype=float
+            native_kwargs["transaction_cost_rate_paths"] = (
+                state_cost_values[np.asarray(regime_paths, dtype=int)]
+                * float(native_kwargs["transaction_cost_bps"])
+                / 10_000.0
             )
-            monthly_fee_log = np.log1p(-expense_ratios) / 12.0
-            fused_portfolio = simulate_parametric_italian_portfolios_native(
-                regime_codes=regime_paths,
-                means=state_means,
-                covariance_cholesky=state_covariance_cholesky,
-                correlation_cholesky=state_correlation_cholesky,
-                base_correlations=state_correlations,
-                volatilities=state_volatilities,
-                random_seed=native_seed,
-                distribution=distribution,
-                degrees_of_freedom=degrees_of_freedom,
-                garch=garch,
-                garch_alpha=garch_alpha,
-                garch_beta=garch_beta,
-                dynamic_correlation=dynamic_correlation,
-                dcc_alpha=dcc_alpha,
-                dcc_beta=dcc_beta,
-                dcc_asymmetry=dcc_asymmetry,
-                monthly_fee_log=monthly_fee_log,
-                return_kind=str(native_portfolio_config["return_kind"]),
-                macro_shocks=macro_shocks,
-                macro_betas=macro_betas,
-                workers=native_threads,
-                **native_kwargs,
-            )
-            if fused_portfolio is not None:
-                fused_portfolio["frame_metadata"] = dict(
-                    native_portfolio_config["frame_metadata"]
-                )
-                return SimulationResult(
-                    returns=np.empty((periods, 0, len(assets)), dtype=float),
-                    regimes=(
-                        regime_paths
-                        if return_regime_codes
-                        else _decode_regime_codes(regime_paths, model.states)
-                    ),
-                    assets=assets,
-                    states=model.states.copy(),
-                    frequency=model.frequency,
-                    distribution=distribution,
-                    degrees_of_freedom=(
-                        float(degrees_of_freedom) if distribution == "student_t" else None
-                    ),
-                    transition_concentration=transition_concentration,
-                    macro_paths=macro_paths,
-                    macro_columns=(
-                        list(macro_dynamics["columns"])
-                        if isinstance(macro_dynamics, Mapping)
-                        else []
-                    ),
-                    native_portfolio=fused_portfolio,
-                )
-        native_returns = simulate_parametric_native(
+        expense_ratios = np.asarray(native_portfolio_config["expense_ratios"], dtype=float)
+        monthly_fee_log = np.log1p(-expense_ratios) / 12.0
+        fused_portfolio = simulate_parametric_italian_portfolios_native(
             regime_codes=regime_paths,
             means=state_means,
-            covariance_cholesky=state_covariance_cholesky,
-            correlation_cholesky=state_correlation_cholesky,
-            base_correlations=state_correlations,
+            gaussian_correlation_cholesky=state_gaussian_correlation_cholesky,
+            gaussian_correlations=state_gaussian_correlations,
             volatilities=state_volatilities,
+            tail_indexes=state_tail_indexes,
+            temperings=state_temperings,
+            skewness=state_skewness,
+            gaussian_scales=state_gaussian_scales,
             random_seed=native_seed,
-            distribution=distribution,
-            degrees_of_freedom=degrees_of_freedom,
             garch=garch,
             garch_alpha=garch_alpha,
             garch_beta=garch_beta,
@@ -705,13 +664,17 @@ def simulate_returns(
             dcc_alpha=dcc_alpha,
             dcc_beta=dcc_beta,
             dcc_asymmetry=dcc_asymmetry,
+            monthly_fee_log=monthly_fee_log,
+            return_kind=str(native_portfolio_config["return_kind"]),
             macro_shocks=macro_shocks,
             macro_betas=macro_betas,
             workers=native_threads,
+            **native_kwargs,
         )
-        if native_returns is not None:
+        if fused_portfolio is not None:
+            fused_portfolio["frame_metadata"] = dict(native_portfolio_config["frame_metadata"])
             return SimulationResult(
-                returns=native_returns,
+                returns=np.empty((periods, 0, len(assets)), dtype=float),
                 regimes=(
                     regime_paths
                     if return_regime_codes
@@ -720,10 +683,7 @@ def simulate_returns(
                 assets=assets,
                 states=model.states.copy(),
                 frequency=model.frequency,
-                distribution=distribution,
-                degrees_of_freedom=(
-                    float(degrees_of_freedom) if distribution == "student_t" else None
-                ),
+                distribution="mnts",
                 transition_concentration=transition_concentration,
                 macro_paths=macro_paths,
                 macro_columns=(
@@ -731,43 +691,56 @@ def simulate_returns(
                     if isinstance(macro_dynamics, Mapping)
                     else []
                 ),
+                native_portfolio=fused_portfolio,
             )
+
+    native_returns = simulate_parametric_native(
+        regime_codes=regime_paths,
+        means=state_means,
+        gaussian_correlation_cholesky=state_gaussian_correlation_cholesky,
+        gaussian_correlations=state_gaussian_correlations,
+        volatilities=state_volatilities,
+        tail_indexes=state_tail_indexes,
+        temperings=state_temperings,
+        skewness=state_skewness,
+        gaussian_scales=state_gaussian_scales,
+        random_seed=native_seed,
+        garch=garch,
+        garch_alpha=garch_alpha,
+        garch_beta=garch_beta,
+        dynamic_correlation=dynamic_correlation,
+        dcc_alpha=dcc_alpha,
+        dcc_beta=dcc_beta,
+        dcc_asymmetry=dcc_asymmetry,
+        macro_shocks=macro_shocks,
+        macro_betas=macro_betas,
+        workers=native_threads,
+    )
+    if native_returns is not None:
+        return SimulationResult(
+            returns=native_returns,
+            regimes=(
+                regime_paths
+                if return_regime_codes
+                else _decode_regime_codes(regime_paths, model.states)
+            ),
+            assets=assets,
+            states=model.states.copy(),
+            frequency=model.frequency,
+            distribution="mnts",
+            transition_concentration=transition_concentration,
+            macro_paths=macro_paths,
+            macro_columns=(
+                list(macro_dynamics["columns"])
+                if isinstance(macro_dynamics, Mapping)
+                else []
+            ),
+        )
 
     returns = np.empty((periods, paths, len(assets)), dtype=float)
-    bootstrap_starts = np.full((len(model.states), paths), -1, dtype=int)
-    bootstrap_offsets = np.full((len(model.states), paths), block_size, dtype=int)
     previous_state_indices = np.full(paths, -1, dtype=int)
-
-    historical_by_state: list[np.ndarray] | None = None
-    if distribution in {"bootstrap", "block_bootstrap"}:
-        available = [
-            frame.loc[:, assets]
-            for frame in model.historical_returns.values()
-            if frame is not None and not frame.empty
-        ]
-        if not available:
-            raise ValueError("No historical returns are available for bootstrap sampling.")
-        fallback_history = pd.concat(available).sort_index().to_numpy(dtype=float)
-        historical_by_state = []
-        for state in model.states:
-            historical = model.historical_returns.get(state)
-            historical_by_state.append(
-                fallback_history
-                if historical is None or historical.empty
-                else historical.loc[:, assets].to_numpy(dtype=float)
-            )
-
-    garch_levels: dict[str, np.ndarray] | None = None
-    garch_omega: dict[str, np.ndarray] | None = None
     conditional_variance: np.ndarray | None = None
     if garch:
-        garch_levels = {
-            state: state_volatilities[state_index] ** 2
-            for state_index, state in enumerate(model.states)
-        }
-        garch_omega = {
-            state: (1.0 - garch_alpha - garch_beta) * level for state, level in garch_levels.items()
-        }
         conditional_variance = np.empty((paths, len(assets)), dtype=float)
 
     dcc_q: np.ndarray | None = None
@@ -782,111 +755,68 @@ def simulate_returns(
             if not mask.any():
                 continue
             path_indices = np.flatnonzero(mask)
-            if distribution in {"bootstrap", "block_bootstrap"}:
-                historical_values = historical_by_state[state_index]
-                if distribution == "bootstrap":
-                    row_indices = rng.integers(len(historical_values), size=len(path_indices))
-                else:
-                    state_starts = bootstrap_starts[state_index, path_indices]
-                    state_offsets = bootstrap_offsets[state_index, path_indices]
-                    new_state = previous_state_indices[path_indices] != state_index
-                    reset_block = new_state | (state_offsets >= block_size)
-                    state_starts[reset_block] = rng.integers(
-                        len(historical_values),
-                        size=reset_block.sum(),
+            mean = state_means[state_index]
+            macro_effect = (
+                macro_shocks[period, path_indices] @ macro_betas
+                if macro_shocks is not None and macro_betas is not None
+                else 0.0
+            )
+            reanchored = (period == 0) | (previous_state_indices[path_indices] != state_index)
+            independent = rng.standard_normal((len(path_indices), len(assets)))
+            if dynamic_correlation:
+                base_correlation = state_gaussian_correlations[state_index]
+                if reanchored.any():
+                    dcc_q[path_indices[reanchored]] = base_correlation
+                continuing = ~reanchored
+                if continuing.any():
+                    continuing_paths = path_indices[continuing]
+                    previous = previous_standardized[continuing_paths]
+                    negative = np.minimum(previous, 0.0)
+                    dcc_q[continuing_paths] = (
+                        (1.0 - dcc_alpha - dcc_beta - dcc_asymmetry) * base_correlation
+                        + dcc_alpha * (previous[:, :, None] * previous[:, None, :])
+                        + dcc_beta * dcc_q[continuing_paths]
+                        + dcc_asymmetry * (negative[:, :, None] * negative[:, None, :])
                     )
-                    state_offsets[reset_block] = 0
-                    row_indices = (state_starts + state_offsets) % len(historical_values)
-                    state_offsets += 1
-                    bootstrap_starts[state_index, path_indices] = state_starts
-                    bootstrap_offsets[state_index, path_indices] = state_offsets
-                draws = historical_values[row_indices]
-            else:
-                mean = state_means[state_index]
-                macro_effect = (
-                    macro_shocks[period, path_indices] @ macro_betas
-                    if macro_shocks is not None and macro_betas is not None
-                    else 0.0
+                q_values = dcc_q[path_indices]
+                cholesky = _batched_cholesky(q_values)
+                q_scale = np.sqrt(
+                    np.clip(np.diagonal(q_values, axis1=1, axis2=2), 1e-10, None)
                 )
-                reanchored = (period == 0) | (previous_state_indices[path_indices] != state_index)
-                if dynamic_correlation:
-                    base_correlation = state_correlations[state_index]
-                    if reanchored.any():
-                        dcc_q[path_indices[reanchored]] = base_correlation
-                    continuing = ~reanchored
-                    if continuing.any():
-                        continuing_paths = path_indices[continuing]
-                        previous = previous_standardized[continuing_paths]
-                        negative = np.minimum(previous, 0.0)
-                        outer = previous[:, :, None] * previous[:, None, :]
-                        negative_outer = negative[:, :, None] * negative[:, None, :]
-                        dcc_q[continuing_paths] = (
-                            (1.0 - dcc_alpha - dcc_beta - dcc_asymmetry) * base_correlation
-                            + dcc_alpha * outer
-                            + dcc_beta * dcc_q[continuing_paths]
-                            + dcc_asymmetry * negative_outer
-                        )
-                    q_values = dcc_q[path_indices]
-                    # If R = D^-1 Q D^-1, then chol(R) = D^-1 chol(Q).
-                    # Factoring Q directly avoids materializing and clipping a
-                    # second full stack of correlation matrices.
-                    cholesky = _batched_cholesky(q_values)
-                    q_scale = np.sqrt(
-                        np.clip(np.diagonal(q_values, axis1=1, axis2=2), 1e-10, None)
-                    )
-                    cholesky /= q_scale[:, :, None]
-                    standardized = np.einsum(
-                        "nij,nj->ni",
-                        cholesky,
-                        rng.standard_normal((len(path_indices), len(assets))),
-                    )
-                    if distribution == "student_t":
-                        standardized *= np.sqrt(
-                            (degrees_of_freedom - 2.0)
-                            / rng.chisquare(degrees_of_freedom, size=len(path_indices))
-                        )[:, None]
-                    if garch:
-                        levels = garch_levels[state]
-                        omega = garch_omega[state]
-                        if reanchored.any():
-                            conditional_variance[path_indices[reanchored]] = levels
-                        scale = np.sqrt(conditional_variance[path_indices])
-                        residual_draws = standardized * scale
-                        conditional_variance[path_indices] = (
-                            omega
-                            + garch_alpha * residual_draws**2
-                            + garch_beta * conditional_variance[path_indices]
-                        )
-                    else:
-                        residual_draws = standardized * state_volatilities[state_index]
-                    draws = mean + macro_effect + residual_draws
-                    previous_standardized[path_indices] = standardized
-                elif garch:
-                    levels = garch_levels[state]
-                    omega = garch_omega[state]
-                    if reanchored.any():
-                        conditional_variance[path_indices[reanchored]] = levels
-                    innovations = rng.standard_normal((len(path_indices), len(assets)))
-                    innovations = innovations @ state_correlation_cholesky[state_index].T
-                    scale = np.sqrt(conditional_variance[path_indices])
-                    draws = mean + macro_effect + innovations * scale
-                    conditional_variance[path_indices] = (
-                        omega
-                        + garch_alpha * (innovations * scale) ** 2
-                        + garch_beta * conditional_variance[path_indices]
-                    )
-                elif distribution == "normal":
-                    residual_draws = rng.standard_normal((len(path_indices), len(assets)))
-                    residual_draws = residual_draws @ state_covariance_cholesky[state_index].T
-                    draws = mean + macro_effect + residual_draws
-                else:
-                    residual_draws = rng.standard_normal((len(path_indices), len(assets)))
-                    residual_draws = residual_draws @ state_covariance_cholesky[state_index].T
-                    residual_draws *= np.sqrt(
-                        (degrees_of_freedom - 2.0)
-                        / rng.chisquare(degrees_of_freedom, size=len(path_indices))
-                    )[:, None]
-                    draws = mean + macro_effect + residual_draws
+                gaussian_draws = np.einsum(
+                    "nij,nj->ni", cholesky / q_scale[:, :, None], independent
+                )
+            else:
+                gaussian_draws = independent @ state_gaussian_correlation_cholesky[state_index].T
+
+            subordinator = sample_mnts_subordinators(
+                rng,
+                len(path_indices),
+                state_tail_indexes[state_index],
+                state_temperings[state_index],
+            )
+            standardized = (
+                state_skewness[state_index] * (subordinator[:, None] - 1.0)
+                + np.sqrt(subordinator)[:, None]
+                * state_gaussian_scales[state_index]
+                * gaussian_draws
+            )
+            if garch:
+                levels = state_volatilities[state_index] ** 2
+                if reanchored.any():
+                    conditional_variance[path_indices[reanchored]] = levels
+                scale = np.sqrt(np.maximum(conditional_variance[path_indices], 0.0))
+                residual_draws = standardized * scale
+                conditional_variance[path_indices] = (
+                    (1.0 - garch_alpha - garch_beta) * levels
+                    + garch_alpha * residual_draws**2
+                    + garch_beta * conditional_variance[path_indices]
+                )
+            else:
+                residual_draws = standardized * state_volatilities[state_index]
+            draws = mean + macro_effect + residual_draws
+            if dynamic_correlation:
+                previous_standardized[path_indices] = standardized
             returns[period, mask, :] = draws
             previous_state_indices[path_indices] = state_index
 
@@ -900,8 +830,7 @@ def simulate_returns(
         assets=assets,
         states=model.states.copy(),
         frequency=model.frequency,
-        distribution=distribution,
-        degrees_of_freedom=(float(degrees_of_freedom) if distribution == "student_t" else None),
+        distribution="mnts",
         transition_concentration=transition_concentration,
         macro_paths=macro_paths,
         macro_columns=(list(macro_dynamics["columns"]) if isinstance(macro_dynamics, Mapping) else []),

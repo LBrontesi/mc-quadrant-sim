@@ -16,6 +16,8 @@ from mc_quadrants.backfill import (
     DEFAULT_ANCHOR_UNIVERSE,
     simulate_regime_conditioned_pre_inception_returns,
 )
+from mc_quadrants.mnts import fit_mnts_parameters, sample_mnts_subordinators
+from mc_quadrants.types import RegimeMoments
 
 
 def read_prices_csv(path: str, date_col: str = "Date") -> pd.DataFrame:
@@ -121,8 +123,6 @@ def simulate_pre_inception_returns(
     assets: Sequence[str] | str,
     start: str | pd.Timestamp,
     random_seed: int = 42,
-    distribution: str = "student_t",
-    degrees_of_freedom: float = 5.0,
     frequency: str = "ME",
 ) -> pd.DataFrame:
     """Generate source-labeled monthly returns before each asset's inception.
@@ -144,16 +144,6 @@ def simulate_pre_inception_returns(
     missing_assets = [asset for asset in asset_list if asset not in returns.columns]
     if missing_assets:
         raise KeyError(f"Returns are missing synthetic assets: {', '.join(missing_assets)}")
-
-    distribution = str(distribution).lower().replace("-", "_")
-    if distribution not in {"normal", "student_t", "t"}:
-        raise ValueError("distribution must be 'normal' or 'student_t'.")
-    if distribution == "t":
-        distribution = "student_t"
-    if distribution == "student_t" and (
-        not np.isfinite(degrees_of_freedom) or degrees_of_freedom <= 2
-    ):
-        raise ValueError("degrees_of_freedom must be finite and greater than 2 for Student-t returns.")
 
     try:
         observed = returns.sort_index().loc[:, asset_list].apply(pd.to_numeric, errors="raise")
@@ -190,18 +180,41 @@ def simulate_pre_inception_returns(
     covariance_values = (eigenvectors * np.clip(eigenvalues, 1e-12, None)) @ eigenvectors.T
     covariance_values = (covariance_values + covariance_values.T) / 2.0
 
+    volatility = np.sqrt(np.maximum(np.diag(covariance_values), 1e-12))
+    correlation_values = covariance_values / np.outer(volatility, volatility)
+    np.fill_diagonal(correlation_values, 1.0)
+    moments = RegimeMoments(
+        mean=pd.Series(means, index=asset_list),
+        covariance=pd.DataFrame(covariance_values, index=asset_list, columns=asset_list),
+        correlation=pd.DataFrame(correlation_values, index=asset_list, columns=asset_list),
+        observations=int(observed.dropna().shape[0]),
+    )
+    calibration_values = observed.dropna()
+    parameters = fit_mnts_parameters(
+        moments,
+        calibration_values,
+        calibration_values,
+    )
     rng = np.random.default_rng(random_seed)
-    if distribution == "normal":
-        draws = rng.multivariate_normal(means, covariance_values, size=len(simulation_index))
-    else:
-        scale = covariance_values * (degrees_of_freedom - 2.0) / degrees_of_freedom
-        normal_draws = rng.multivariate_normal(
-            np.zeros(len(asset_list)),
-            scale,
-            size=len(simulation_index),
-        )
-        chi_squared = rng.chisquare(degrees_of_freedom, size=len(simulation_index))
-        draws = means + normal_draws / np.sqrt(chi_squared / degrees_of_freedom)[:, None]
+    subordinator = sample_mnts_subordinators(
+        rng,
+        len(simulation_index),
+        parameters.tail_index,
+        parameters.tempering,
+    )
+    skewness = parameters.skewness.reindex(asset_list).to_numpy(dtype=float)
+    variance_t = (2.0 - parameters.tail_index) / (2.0 * parameters.tempering)
+    gaussian_scale = np.sqrt(np.maximum(1.0 - skewness**2 * variance_t, 1e-10))
+    correlation_factor = np.linalg.cholesky(
+        parameters.gaussian_correlation.to_numpy(dtype=float)
+        + np.eye(len(asset_list)) * 1e-10
+    )
+    latent = rng.standard_normal((len(simulation_index), len(asset_list))) @ correlation_factor.T
+    standardized = (
+        skewness * (subordinator[:, None] - 1.0)
+        + np.sqrt(subordinator)[:, None] * gaussian_scale * latent
+    )
+    draws = means + standardized * volatility
 
     simulated = pd.DataFrame(np.nan, index=simulation_index, columns=columns)
     for index, asset in enumerate(asset_list):

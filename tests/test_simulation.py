@@ -47,6 +47,7 @@ def _calibrated_model():
 
 def test_calibration_and_simulation_shapes():
     model = _calibrated_model()
+    assert all(model.moments[state].mnts is not None for state in model.states)
 
     result = simulate_returns(model, periods=6, paths=10, random_seed=1)
     wealth = simulate_portfolio_paths(result, {"Stocks": 0.6, "Bonds": 0.4})
@@ -83,7 +84,7 @@ def test_vectorized_cholesky_matches_numpy():
     assert np.allclose(actual, expected, rtol=1e-10, atol=1e-12)
 
 
-def test_student_t_sampling_is_reproducible():
+def test_mnts_sampling_is_reproducible_and_is_the_only_return_law():
     model = _calibrated_model()
 
     first = simulate_returns(
@@ -91,35 +92,21 @@ def test_student_t_sampling_is_reproducible():
         periods=6,
         paths=10,
         random_seed=1,
-        distribution="student_t",
-        degrees_of_freedom=5,
+        distribution="mnts",
     )
     second = simulate_returns(
         model,
         periods=6,
         paths=10,
         random_seed=1,
-        distribution="student_t",
-        degrees_of_freedom=5,
+        distribution="mnts",
     )
 
     assert np.array_equal(first.returns, second.returns)
-    assert first.distribution == "student_t"
-    assert first.degrees_of_freedom == 5.0
+    assert first.distribution == "mnts"
 
-    with pytest.raises(ValueError, match="greater than 2"):
-        simulate_returns(model, periods=1, paths=1, distribution="student_t", degrees_of_freedom=2)
-
-    bootstrap = simulate_returns(
-        model,
-        periods=6,
-        paths=10,
-        random_seed=1,
-        distribution="block_bootstrap",
-        block_size=3,
-    )
-    assert bootstrap.distribution == "block_bootstrap"
-    assert np.isfinite(bootstrap.returns).all()
+    with pytest.raises(ValueError, match="distribution must be 'mnts'"):
+        simulate_returns(model, periods=1, paths=1, distribution="legacy")
 
 
 def test_rebalancing_transaction_costs_reduce_wealth():
@@ -1030,7 +1017,7 @@ def test_garch_creates_volatility_clustering():
         centered = squared - squared.mean()
         return float((centered[1:] * centered[:-1]).mean() / (centered**2).mean())
 
-    plain = simulate_returns(model, periods=600, paths=1, random_seed=11)
+    plain = simulate_returns(model, periods=600, paths=1, random_seed=11, garch=False)
     garch_result = simulate_returns(
         model,
         periods=600,
@@ -1063,8 +1050,8 @@ def test_garch_is_reproducible_and_validated():
     )
     assert np.array_equal(first.returns, second.returns)
 
-    with pytest.raises(ValueError, match="distribution='normal'"):
-        simulate_returns(model, periods=4, paths=2, distribution="student_t", garch=True)
+    with pytest.raises(ValueError, match="distribution must be 'mnts'"):
+        simulate_returns(model, periods=4, paths=2, distribution="legacy", garch=True)
     with pytest.raises(ValueError, match="garch_alpha"):
         simulate_returns(model, periods=4, paths=2, garch=True, garch_alpha=1.5)
     with pytest.raises(ValueError, match="less than 1"):
@@ -1102,7 +1089,7 @@ def test_joint_macro_and_dynamic_dependence_produce_consistent_paths():
         periods=24,
         paths=40,
         random_seed=5,
-        distribution="student_t",
+        distribution="mnts",
         joint_macro=True,
         dynamic_correlation=True,
     )

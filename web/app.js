@@ -1226,7 +1226,6 @@ function gatherDecumulation() {
 
 function gatherScenario() {
   const quadrantModel = $("model-kind").value === "quadrant";
-  const parametricReturns = ["normal", "student_t"].includes($("distribution").value);
   const taxCountry = $("tax-country").value;
   const decumulationEnabled = $("decumulation-enabled").checked;
   return {
@@ -1238,9 +1237,7 @@ function gatherScenario() {
     paths: Number($("paths").value),
     seed: Number($("seed").value),
     start_state: $("start-state").value,
-    distribution: $("distribution").value,
-    degrees_of_freedom: Number($("degrees-of-freedom").value),
-    block_size: Number($("block-size").value),
+    distribution: "mnts",
     rebalance: $("rebalance").value,
     cost_bps: ["legacy", "buy_hold"].includes($("rebalance").value) ? 0 : Number($("cost-bps").value),
     state_dependent_liquidity: $("state-dependent-liquidity").checked,
@@ -1288,7 +1285,7 @@ function gatherScenario() {
     mean_prior_strength: Number($("mean-prior-strength").value),
     parameter_draws: quadrantModel ? Number($("parameter-draws").value) : 0,
     parameter_block_size: Number($("parameter-block-size").value),
-    joint_macro: quadrantModel && parametricReturns && $("joint-macro").checked,
+    joint_macro: quadrantModel && $("joint-macro").checked,
     macro_model: $("macro-model").value,
     macro_parameter_uncertainty: $("macro-parameter-uncertainty").checked,
     structural_returns: $("structural-returns").checked,
@@ -1296,7 +1293,7 @@ function gatherScenario() {
     asset_durations: $("asset-durations").value,
     asset_income_yields: $("asset-income-yields").value,
     macro_transition_weight: Number($("macro-transition-weight").value),
-    dynamic_correlation: parametricReturns && $("dynamic-correlation").checked,
+    dynamic_correlation: $("dynamic-correlation").checked,
     dcc_alpha: Number($("dcc-alpha").value),
     dcc_beta: Number($("dcc-beta").value),
     dcc_asymmetry: Number($("dcc-asymmetry").value),
@@ -1311,9 +1308,6 @@ function validateScenario() {
   const errors = [];
   if (activeSource() === "csv" && (!$('csv-prices').files.length || !$('csv-macro').files.length)) {
     errors.push("Attach both asset and macro CSV files to use custom data.");
-  }
-  if ($("garch").checked && $("distribution").value !== "normal") {
-    errors.push("GARCH volatility clustering requires the Normal return distribution.");
   }
   const dccTotal = Number($("dcc-alpha").value) + Number($("dcc-beta").value) + Number($("dcc-asymmetry").value);
   if ($("dynamic-correlation").checked && dccTotal >= 1) {
@@ -1392,7 +1386,6 @@ function validateScenario() {
 
 function updateMethodologyControls() {
   const isHMM = $("model-kind").value === "hmm";
-  const distribution = $("distribution").value;
   const legacy = ["legacy", "buy_hold"].includes($("rebalance").value);
   const italianTaxes = $("tax-country").value === "IT";
   $("quadrant-calibration").classList.toggle("hidden", isHMM);
@@ -1404,25 +1397,19 @@ function updateMethodologyControls() {
   $("corr-blend-group").classList.toggle("hidden", isHMM);
   $("start-state-group").classList.toggle("hidden", isHMM);
   $("min-duration-group").classList.toggle("hidden", $("duration-model").value !== "semi_markov");
-  $("student-t-group").classList.toggle("hidden", distribution !== "student_t");
-  $("block-size-group").classList.toggle("hidden", distribution !== "block_bootstrap");
   $("cost-bps").disabled = legacy;
   $("cost-bps-group").classList.toggle("methodology-muted", legacy);
   document.querySelectorAll(".tax-settings").forEach((element) => element.classList.toggle("hidden", !italianTaxes));
   const wrapperUnavailable = $("tax-regime").value === "italy_managed" || !$("tax-terminal-liquidation").checked;
   $("tax-wrapper-benchmark").disabled = wrapperUnavailable;
-  $("garch").disabled = distribution !== "normal";
-  const parametric = distribution === "normal" || distribution === "student_t";
-  $("joint-macro").disabled = !parametric || isHMM;
-  $("macro-model").disabled = !parametric || isHMM || !$("joint-macro").checked;
-  $("macro-parameter-uncertainty").disabled = !parametric || isHMM || !$("joint-macro").checked;
-  $("structural-returns").disabled = !parametric || isHMM || !$("joint-macro").checked;
-  $("dynamic-correlation").disabled = !parametric;
+  $("joint-macro").disabled = isHMM;
+  $("macro-model").disabled = isHMM || !$("joint-macro").checked;
+  $("macro-parameter-uncertainty").disabled = isHMM || !$("joint-macro").checked;
+  $("structural-returns").disabled = isHMM || !$("joint-macro").checked;
+  $("dynamic-correlation").disabled = false;
   $("parameter-draws").disabled = isHMM;
   $("transition-uncertainty").disabled = Number($("parameter-draws").value) > 0;
-  $("garch-hint").textContent = distribution === "normal"
-    ? "GARCH requires the Normal return distribution."
-    : "GARCH is disabled because the selected return distribution is not Normal.";
+  $("garch-hint").textContent = "GARCH is applied to the calibrated MNTS innovations in each macro quadrant.";
   updateWithdrawalStartControl();
   updateRunAvailability();
 }
@@ -1630,7 +1617,6 @@ function updateRunAvailability() {
   }
   const hasData = Boolean(state.loadResult);
   $("run-btn").disabled = errors.length > 0 || (hasData && (selected.length === 0 || total <= 0));
-  $("compare-btn").disabled = !state.results;
   if (state.results && state.lastSimPayload) {
     const stale = JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload);
     $("stale-results").classList.toggle("hidden", !stale);
@@ -1785,10 +1771,7 @@ function renderSyntheticReport(report) {
 }
 
 const DISTRIBUTION_LABELS = {
-  normal: "Normal",
-  student_t: "Student-t",
-  bootstrap: "Historical bootstrap",
-  block_bootstrap: "Block bootstrap",
+  mnts: "MNTS-GARCH",
 };
 
 function renderScenarioChips(payload, data) {
@@ -1847,8 +1830,8 @@ function renderMethodologyReport(data) {
     [Boolean(methodology.state_dependent_liquidity), "Regime-dependent trading costs"],
     [methodology.rate_model === "joint_macro_path", "Stochastic policy-rate paths"],
     [Boolean(methodology.dynamic_correlation), "Asymmetric dynamic dependence"],
-    [validationAvailable && validation.advantage_vs_student_t_mean > 0, validationAvailable
-      ? (validation.advantage_vs_student_t_mean > 0 ? "Beats Student-t benchmark" : "Student-t benchmark not beaten")
+    [validationAvailable && validation.advantage_mean > 0, validationAvailable
+      ? (validation.advantage_mean > 0 ? "Beats unconditional MNTS benchmark" : "Unconditional MNTS benchmark not beaten")
       : "Validation unavailable"],
   ];
   const score = safeguards.filter(([passed]) => passed).length;
@@ -2494,8 +2477,8 @@ function renderResults(data) {
   if (validation) {
     const summary = validation.summary;
     $("validation-summary").textContent =
-      `Advantage vs Student-t: ${summary.advantage_vs_student_t_mean > 0 ? "+" : ""}${fmt(summary.advantage_vs_student_t_mean, 4)} log-score/period · ` +
-      `HAC t-stat: ${fmt(summary.dm_t_statistic_vs_student_t, 2)} · ` +
+      `MNTS energy-score advantage: ${summary.advantage_mean > 0 ? "+" : ""}${fmt(summary.advantage_mean, 4)}/period · ` +
+      `HAC t-stat: ${fmt(summary.dm_t_statistic, 2)} · ` +
       `Brier: ${fmt(summary.regime_brier_score, 3)} vs ${fmt(summary.benchmark_brier_score, 3)} benchmark · ` +
       `Switches/decade: ${fmt(summary.predicted_switches_per_decade, 1)} predicted vs ${fmt(summary.actual_switches_per_decade, 1)} observed · ` +
       `Duration log score: ${fmt(summary.duration_log_score_mean, 3)} · ` +
@@ -2670,31 +2653,6 @@ async function onSafeRate() {
   }
 }
 
-async function onCompare() {
-  const message = $("run-message");
-  const button = $("compare-btn");
-  button.disabled = true;
-  showOverlay("Comparing distributions...", "Running Normal and Student-t scenarios with identical assumptions");
-  try {
-    const payload = gatherSimPayload();
-    const data = await postJSON("/api/compare", payload);
-    $("comparison-table").innerHTML = "<table><thead><tr>" + data.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
-      data.rows.map((row) => "<tr>" + row.map((value) => `<td>${escapeHtml(fmtNumber(value))}</td>`).join("") + "</tr>").join("") + "</tbody></table>";
-    setStatus(message, "Scenario comparison complete.");
-    notify("Scenario comparison complete", "success");
-    $("compare-content").classList.remove("hidden");
-    document.querySelectorAll("#tab-compare .results-empty").forEach((el) => el.classList.add("hidden"));
-    switchTab("tab-compare");
-    requestAnimationFrame(focusResults);
-  } catch (error) {
-    setStatus(message, error.message, true);
-    notify(error.message, "error");
-  } finally {
-    hideOverlay();
-    updateRunAvailability();
-  }
-}
-
 function onDownloadSummary() {
   if (!state.results) {
     notify("Run a simulation first.", "error");
@@ -2752,8 +2710,8 @@ const CONTROL_IDS = [
   "synthetic-method", "synthetic-categories", "macro-vintage",
   "csv-growth", "csv-inflation", "csv-rate", "base-currency", "currency-map", "corr-blend",
   "growth-threshold", "growth-fixed", "inflation-threshold", "inflation-fixed",
-  "macro-lag", "transition-uncertainty", "periods", "paths", "workers", "seed", "distribution",
-  "degrees-of-freedom", "block-size", "rebalance", "cost-bps", "contribution", "contribution-allocation", "withdrawal", "withdrawal-start-period",
+  "macro-lag", "transition-uncertainty", "periods", "paths", "workers", "seed",
+  "rebalance", "cost-bps", "contribution", "contribution-allocation", "withdrawal", "withdrawal-start-period",
   "decumulation-mode", "decumulation-policy", "decumulation-objective", "decumulation-target",
   "decumulation-bequest", "decumulation-inflation", "guardrail-upper", "guardrail-lower",
   "guardrail-adjustment", "guardrail-floor", "guardrail-ceiling",
@@ -3319,7 +3277,6 @@ function init() {
 
   $("run-btn").addEventListener("click", onRun);
   $("safe-rate-btn").addEventListener("click", onSafeRate);
-  $("compare-btn").addEventListener("click", onCompare);
   $("download-summary").addEventListener("click", onDownloadSummary);
   $("download-diagnostics").addEventListener("click", onDownloadDiagnostics);
   $("download-wealth").addEventListener("click", onDownloadWealth);

@@ -127,7 +127,7 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert 'id="paths" value="100000" min="1000" max="500000"' in html
     assert 'paths > 500000' in javascript
     assert 'Paths must be between 1 and 500,000.' in javascript
-    assert 'id="periods" value="120"' in html
+    assert 'id="periods" value="360"' in html
     assert '<option value="buy_hold">Buy and hold (drifting weights)</option>' in html
     assert 'id="tax-country"' in html
     assert '<option value="IT">Italy</option>' in html

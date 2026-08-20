@@ -56,7 +56,6 @@ def _run(dataset, **overrides):
         "anchor_returns": anchor_returns,
         "random_seed": 7,
         "min_observations": 12,
-        "degrees_of_freedom": 30,
     }
     kwargs.update(overrides)
     return simulate_regime_conditioned_pre_inception_returns(**kwargs)

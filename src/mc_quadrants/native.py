@@ -8,7 +8,7 @@ import numpy as np
 
 from mc_quadrants.decumulation import DecumulationPlan
 
-NATIVE_ABI_VERSION = 3
+NATIVE_ABI_VERSION = 4
 NATIVE_TAX_STAT_NAMES = (
     "capital_gains_tax_total",
     "investment_income_tax_total",
@@ -49,15 +49,16 @@ class _ParametricPortfolioConfig(ctypes.Structure):
         ("requested_threads", ctypes.c_int),
         ("regimes", ctypes.c_void_p),
         ("means", ctypes.c_void_p),
-        ("covariance_cholesky", ctypes.c_void_p),
-        ("correlation_cholesky", ctypes.c_void_p),
-        ("base_correlations", ctypes.c_void_p),
+        ("gaussian_correlation_cholesky", ctypes.c_void_p),
+        ("gaussian_correlations", ctypes.c_void_p),
         ("volatilities", ctypes.c_void_p),
+        ("tail_indexes", ctypes.c_void_p),
+        ("temperings", ctypes.c_void_p),
+        ("skewness", ctypes.c_void_p),
+        ("gaussian_scales", ctypes.c_void_p),
         ("macro_shocks", ctypes.c_void_p),
         ("macro_betas", ctypes.c_void_p),
         ("seed", ctypes.c_uint64),
-        ("student_t", ctypes.c_int),
-        ("degrees_of_freedom", ctypes.c_double),
         ("garch", ctypes.c_int),
         ("garch_alpha", ctypes.c_double),
         ("garch_beta", ctypes.c_double),
@@ -137,17 +138,27 @@ def _load_library() -> ctypes.CDLL | None:
                 ctypes.c_void_p,
                 ctypes.c_void_p,
                 ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
                 ctypes.c_uint64,
                 ctypes.c_int,
                 ctypes.c_double,
-                ctypes.c_int,
-                ctypes.c_double,
                 ctypes.c_double,
                 ctypes.c_int,
                 ctypes.c_double,
                 ctypes.c_double,
                 ctypes.c_double,
                 ctypes.c_int,
+                ctypes.c_void_p,
+            ]
+            subordinator_function = library.mc_sample_mnts_subordinators
+            subordinator_function.restype = ctypes.c_int
+            subordinator_function.argtypes = [
+                ctypes.c_int,
+                ctypes.c_double,
+                ctypes.c_double,
+                ctypes.c_uint64,
                 ctypes.c_void_p,
             ]
             tax_function = library.mc_simulate_italian_portfolios
@@ -235,6 +246,30 @@ def native_available() -> bool:
     return _load_library() is not None
 
 
+def sample_mnts_subordinators_native(
+    samples: int,
+    tail_index: float,
+    tempering: float,
+    random_seed: int = 0,
+) -> np.ndarray:
+    """Draw standardized MNTS subordinators with the exact native sampler."""
+
+    library = _load_library()
+    if library is None:
+        raise RuntimeError("The native MNTS backend is unavailable.")
+    output = np.empty(int(samples), dtype=np.float64)
+    status = library.mc_sample_mnts_subordinators(
+        int(samples),
+        float(tail_index),
+        float(tempering),
+        ctypes.c_uint64(int(random_seed) & ((1 << 64) - 1)),
+        _pointer(output),
+    )
+    if status != 0:
+        raise RuntimeError(f"Native MNTS subordinator sampler failed with status {status}.")
+    return output
+
+
 def _pointer(values: np.ndarray | None) -> ctypes.c_void_p:
     return ctypes.c_void_p(0 if values is None else values.ctypes.data)
 
@@ -242,13 +277,14 @@ def _pointer(values: np.ndarray | None) -> ctypes.c_void_p:
 def simulate_parametric_native(
     regime_codes: np.ndarray,
     means: np.ndarray,
-    covariance_cholesky: np.ndarray,
-    correlation_cholesky: np.ndarray,
-    base_correlations: np.ndarray,
+    gaussian_correlation_cholesky: np.ndarray,
+    gaussian_correlations: np.ndarray,
     volatilities: np.ndarray,
+    tail_indexes: np.ndarray,
+    temperings: np.ndarray,
+    skewness: np.ndarray,
+    gaussian_scales: np.ndarray,
     random_seed: int,
-    distribution: str,
-    degrees_of_freedom: float,
     garch: bool,
     garch_alpha: float,
     garch_beta: float,
@@ -281,14 +317,16 @@ def simulate_parametric_native(
         raise ValueError("regime_codes contains an invalid state index.")
     expected_matrix_shape = (states, assets, assets)
     expected_vector_shape = (states, assets)
-    if np.shape(covariance_cholesky) != expected_matrix_shape:
-        raise ValueError("covariance_cholesky has an invalid shape.")
-    if np.shape(correlation_cholesky) != expected_matrix_shape:
-        raise ValueError("correlation_cholesky has an invalid shape.")
-    if np.shape(base_correlations) != expected_matrix_shape:
-        raise ValueError("base_correlations has an invalid shape.")
+    if np.shape(gaussian_correlation_cholesky) != expected_matrix_shape:
+        raise ValueError("gaussian_correlation_cholesky has an invalid shape.")
+    if np.shape(gaussian_correlations) != expected_matrix_shape:
+        raise ValueError("gaussian_correlations has an invalid shape.")
     if np.shape(volatilities) != expected_vector_shape:
         raise ValueError("volatilities has an invalid shape.")
+    if np.shape(skewness) != expected_vector_shape or np.shape(gaussian_scales) != expected_vector_shape:
+        raise ValueError("MNTS skewness and Gaussian scales have an invalid shape.")
+    if np.shape(tail_indexes) != (states,) or np.shape(temperings) != (states,):
+        raise ValueError("MNTS tail parameters have an invalid shape.")
     if (macro_shocks is None) != (macro_betas is None):
         raise ValueError("macro_shocks and macro_betas must be supplied together.")
     if macro_shocks is not None:
@@ -298,10 +336,16 @@ def simulate_parametric_native(
             raise ValueError("macro_betas has an invalid shape.")
     codes = np.ascontiguousarray(regime_codes, dtype=np.uint8)
     means = np.ascontiguousarray(means, dtype=np.float64)
-    covariance_cholesky = np.ascontiguousarray(covariance_cholesky, dtype=np.float64)
-    correlation_cholesky = np.ascontiguousarray(correlation_cholesky, dtype=np.float64)
-    base_correlations = np.ascontiguousarray(base_correlations, dtype=np.float64)
+    gaussian_correlation_cholesky = np.ascontiguousarray(
+        gaussian_correlation_cholesky,
+        dtype=np.float64,
+    )
+    gaussian_correlations = np.ascontiguousarray(gaussian_correlations, dtype=np.float64)
     volatilities = np.ascontiguousarray(volatilities, dtype=np.float64)
+    tail_indexes = np.ascontiguousarray(tail_indexes, dtype=np.float64)
+    temperings = np.ascontiguousarray(temperings, dtype=np.float64)
+    skewness = np.ascontiguousarray(skewness, dtype=np.float64)
+    gaussian_scales = np.ascontiguousarray(gaussian_scales, dtype=np.float64)
     macro_shocks = (
         np.ascontiguousarray(macro_shocks, dtype=np.float64)
         if macro_shocks is not None
@@ -322,15 +366,16 @@ def simulate_parametric_native(
         macro_dimensions,
         _pointer(codes),
         _pointer(means),
-        _pointer(covariance_cholesky),
-        _pointer(correlation_cholesky),
-        _pointer(base_correlations),
+        _pointer(gaussian_correlation_cholesky),
+        _pointer(gaussian_correlations),
         _pointer(volatilities),
+        _pointer(tail_indexes),
+        _pointer(temperings),
+        _pointer(skewness),
+        _pointer(gaussian_scales),
         _pointer(macro_shocks),
         _pointer(macro_betas),
         ctypes.c_uint64(int(random_seed) & ((1 << 64) - 1)),
-        int(distribution == "student_t"),
-        float(degrees_of_freedom),
         int(garch),
         float(garch_alpha),
         float(garch_beta),
@@ -542,13 +587,14 @@ def simulate_italian_portfolios_native(
 def simulate_parametric_italian_portfolios_native(
     regime_codes: np.ndarray,
     means: np.ndarray,
-    covariance_cholesky: np.ndarray,
-    correlation_cholesky: np.ndarray,
-    base_correlations: np.ndarray,
+    gaussian_correlation_cholesky: np.ndarray,
+    gaussian_correlations: np.ndarray,
     volatilities: np.ndarray,
+    tail_indexes: np.ndarray,
+    temperings: np.ndarray,
+    skewness: np.ndarray,
+    gaussian_scales: np.ndarray,
     random_seed: int,
-    distribution: str,
-    degrees_of_freedom: float,
     garch: bool,
     garch_alpha: float,
     garch_beta: float,
@@ -599,22 +645,34 @@ def simulate_parametric_italian_portfolios_native(
         raise ValueError("regime_codes and means must be two-dimensional.")
     periods, paths = codes.shape
     states, assets = means.shape
+    if states > 256:
+        raise ValueError("The native backend supports at most 256 regimes.")
+    if codes.size and (np.min(codes) < 0 or np.max(codes) >= states):
+        raise ValueError("regime_codes contains an invalid state index.")
+    if return_kind not in {"log", "simple"}:
+        raise ValueError("return_kind must be 'log' or 'simple'.")
     matrix_shape = (states, assets, assets)
     vector_shape = (states, assets)
     matrices = {
-        "covariance_cholesky": covariance_cholesky,
-        "correlation_cholesky": correlation_cholesky,
-        "base_correlations": base_correlations,
+        "gaussian_correlation_cholesky": gaussian_correlation_cholesky,
+        "gaussian_correlations": gaussian_correlations,
     }
     for name, values in matrices.items():
         if np.shape(values) != matrix_shape:
             raise ValueError(f"{name} has an invalid shape.")
     if np.shape(volatilities) != vector_shape:
         raise ValueError("volatilities has an invalid shape.")
-    covariance = np.ascontiguousarray(covariance_cholesky, dtype=np.float64)
-    correlation = np.ascontiguousarray(correlation_cholesky, dtype=np.float64)
-    base = np.ascontiguousarray(base_correlations, dtype=np.float64)
+    if np.shape(skewness) != vector_shape or np.shape(gaussian_scales) != vector_shape:
+        raise ValueError("MNTS skewness and Gaussian scales have an invalid shape.")
+    if np.shape(tail_indexes) != (states,) or np.shape(temperings) != (states,):
+        raise ValueError("MNTS tail parameters have an invalid shape.")
+    correlation = np.ascontiguousarray(gaussian_correlation_cholesky, dtype=np.float64)
+    base = np.ascontiguousarray(gaussian_correlations, dtype=np.float64)
     volatility = np.ascontiguousarray(volatilities, dtype=np.float64)
+    tail_indexes = np.ascontiguousarray(tail_indexes, dtype=np.float64)
+    temperings = np.ascontiguousarray(temperings, dtype=np.float64)
+    skewness = np.ascontiguousarray(skewness, dtype=np.float64)
+    gaussian_scales = np.ascontiguousarray(gaussian_scales, dtype=np.float64)
     if (macro_shocks is None) != (macro_betas is None):
         raise ValueError("macro_shocks and macro_betas must be supplied together.")
     shocks = None
@@ -670,15 +728,16 @@ def simulate_parametric_italian_portfolios_native(
         max(1, int(workers)),
         _pointer(codes),
         _pointer(means),
-        _pointer(covariance),
         _pointer(correlation),
         _pointer(base),
         _pointer(volatility),
+        _pointer(tail_indexes),
+        _pointer(temperings),
+        _pointer(skewness),
+        _pointer(gaussian_scales),
         _pointer(shocks),
         _pointer(betas),
         ctypes.c_uint64(int(random_seed) & ((1 << 64) - 1)),
-        int(distribution == "student_t"),
-        float(degrees_of_freedom),
         int(garch),
         float(garch_alpha),
         float(garch_beta),

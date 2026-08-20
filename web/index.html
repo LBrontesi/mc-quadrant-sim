@@ -104,7 +104,6 @@
       <div class="action-bar">
         <div class="action-bar-buttons">
           <button id="run-btn" class="btn btn-primary btn-lg" disabled>Run analysis</button>
-          <button id="compare-btn" class="btn" disabled>Compare</button>
         </div>
         <div class="quick-start-copy">
           <strong>One-click analysis</strong>
@@ -401,8 +400,8 @@
               </div>
             </details>
           </div>
-          <label class="check-inline" id="garch-group"><input type="checkbox" id="garch"> GARCH(1,1) volatility clustering</label>
-          <span class="hint" id="garch-hint">GARCH requires the Normal return distribution.</span>
+          <label class="check-inline" id="garch-group"><input type="checkbox" id="garch" checked> GARCH(1,1) volatility clustering</label>
+          <span class="hint" id="garch-hint">GARCH is applied to the calibrated MNTS innovations in each macro quadrant.</span>
           <label class="check-inline" id="walk-forward-group"><input type="checkbox" id="walk-forward" checked> Walk-forward validation</label>
           <span class="hint">Validation checks the current portfolio out of sample against an unconditional benchmark.</span>
         </details>
@@ -410,8 +409,8 @@
         <details id="simulation-settings">
           <summary>Simulation</summary>
           <div class="two-col">
-            <label>Periods (months) <input type="number" id="periods" value="120" min="12" max="360" step="12">
-              <span class="hint">The default models a ten-year investment horizon.</span>
+            <label>Periods (months) <input type="number" id="periods" value="360" min="12" max="360" step="12">
+              <span class="hint">The default models a thirty-year investment horizon.</span>
             </label>
             <label>Paths <input type="number" id="paths" value="100000" min="1000" max="500000" step="1000">
               <span class="hint">Up to 500,000 paths; adaptive chunking scales with the horizon and selected assets.</span>
@@ -428,18 +427,7 @@
               </select>
             </label>
           </div>
-          <label>Return distribution
-            <select id="distribution">
-              <option value="normal">Normal</option>
-              <option value="student_t" selected>Student-t</option>
-              <option value="bootstrap">Historical bootstrap</option>
-              <option value="block_bootstrap">Block bootstrap</option>
-            </select>
-          </label>
-          <div class="two-col" id="distribution-params">
-            <label id="student-t-group">Student-t dof <input type="number" id="degrees-of-freedom" value="5" min="3" max="30" step="1"></label>
-            <label id="block-size-group">Block size <input type="number" id="block-size" value="3" min="2" max="12" step="1"></label>
-          </div>
+          <p class="hint"><strong>Return process:</strong> four-state MRS-MNTS-GARCH with state-specific skewness, fat tails, volatility, and dependence.</p>
           <div class="two-col">
             <label>Rebalancing
               <select id="rebalance">
@@ -663,7 +651,6 @@
         <button class="tab-btn" data-tab="tab-monthly">Monthly</button>
         <button class="tab-btn" data-tab="tab-retirement">Retirement</button>
         <button class="tab-btn" data-tab="tab-lab">Research Lab</button>
-        <button class="tab-btn" data-tab="tab-compare">Compare</button>
         <button class="tab-btn" data-tab="tab-diagnostics">Diagnostics</button>
         <button class="tab-btn" data-tab="tab-data">Data</button>
       </div>
@@ -911,17 +898,6 @@
             <div class="card-heading-row"><div><h3>Rebalancing sensitivity</h3><p class="caption">Quick paired sweep using the current portfolio and up to 1,000 paths.</p></div><button type="button" id="rebalance-sensitivity-btn" class="btn">Analyze schedules</button></div>
             <p id="rebalance-status" class="status"></p>
             <div id="rebalance-sensitivity-table" class="table-wrap"></div>
-          </section>
-        </div>
-      </div>
-
-      <div id="tab-compare" class="tab-panel">
-        <div class="results-empty empty-state">Run a simulation, then click Compare to see the Normal vs Student-t comparison.</div>
-        <div id="compare-content" class="hidden">
-          <section class="card">
-            <h3>Scenario Comparison</h3>
-            <p class="caption">Normal vs Student-t distributions under the same methodology and allocation.</p>
-            <div class="table-wrap" id="comparison-table"></div>
           </section>
         </div>
       </div>

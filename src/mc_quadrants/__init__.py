@@ -17,7 +17,7 @@ from mc_quadrants.data import (
 from mc_quadrants.diagnostics import CalibrationDiagnostics, build_calibration_diagnostics
 from mc_quadrants.hmm import HmmFit, fit_hmm_model
 from mc_quadrants.matrix import nearest_psd_higham
-from mc_quadrants.pipeline import SimulationRun, compare_distributions, run_scenario
+from mc_quadrants.pipeline import SimulationRun, run_scenario
 from mc_quadrants.regimes import (
     REGIME_ORDER,
     Regime,
@@ -46,13 +46,14 @@ from mc_quadrants.tax_policy import (
     register_tax_policy,
     resolve_tax_selection,
 )
-from mc_quadrants.types import RegimeMoments, ScenarioModel, SimulationResult
+from mc_quadrants.types import MNTSParameters, RegimeMoments, ScenarioModel, SimulationResult
 from mc_quadrants.uncertainty import bootstrap_quadrant_models, stationary_bootstrap_indices
 from mc_quadrants.validation import WalkForwardResult, walk_forward_validation
 
 __all__ = [
     "REGIME_ORDER",
     "Regime",
+    "MNTSParameters",
     "RegimeMoments",
     "ScenarioModel",
     "SimulationResult",
@@ -66,7 +67,6 @@ __all__ = [
     "available_tax_countries",
     "register_tax_policy",
     "resolve_tax_selection",
-    "compare_distributions",
     "build_calibration_diagnostics",
     "backfill_prices",
     "align_macro_to_availability",

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from mc_quadrants.pipeline import compare_distributions, run_scenario
+from mc_quadrants.pipeline import run_scenario
 
 
 def _scenario_kwargs(extra: dict | None = None) -> dict:
@@ -172,7 +172,7 @@ def test_pipeline_combines_parameter_macro_and_dependence_uncertainty():
                 "paths": 12,
                 "periods": 6,
                 "walk_forward": False,
-                "distribution": "student_t",
+                "distribution": "mnts",
                 "probabilistic_regimes": True,
                 "mean_prior_strength": 24.0,
                 "parameter_draws": 3,
@@ -275,8 +275,7 @@ def test_pipeline_applies_macro_lag_and_normalizes_asset_names():
         weights={"STOCKS": 0.6, "BONDS": 0.4},
         macro_lag_periods=1,
         transition_uncertainty=0.2,
-        distribution="student_t",
-        degrees_of_freedom=5,
+        distribution="mnts",
         rebalance_frequency=1,
         transaction_cost_bps=10,
         base_currency="USD",
@@ -290,27 +289,3 @@ def test_pipeline_applies_macro_lag_and_normalizes_asset_names():
     assert scenario.result.transition_concentration is not None
     assert scenario.model.metadata["base_currency"] == "USD"
     assert any("lagged" in warning for warning in scenario.diagnostics.warnings)
-
-    comparison = compare_distributions(
-        {"Normal": "normal", "Student-t": "student_t"},
-        returns=returns,
-        macro=macro,
-        selected_tickers=["STOCKS", "BONDS"],
-        growth_col="growth",
-        inflation_col="inflation",
-        growth_threshold=0.0,
-        inflation_threshold=3.0,
-        periods=4,
-        paths=8,
-        random_seed=3,
-        start_state=None,
-        weights={"STOCKS": 0.6, "BONDS": 0.4},
-        macro_lag_periods=1,
-        transition_uncertainty=0.2,
-        rebalance_frequency=1,
-        transaction_cost_bps=10,
-    )
-    assert comparison["distribution"].tolist() == ["Normal", "Student-t"]
-    assert {"probability_of_loss", "worst_max_drawdown", "annualized_return", "sharpe_ratio"}.issubset(
-        comparison.columns
-    )

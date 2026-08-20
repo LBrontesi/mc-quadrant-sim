@@ -7,6 +7,7 @@ import pandas as pd
 
 from mc_quadrants.calibration import _ledoit_wolf_alpha
 from mc_quadrants.matrix import covariance_to_correlation
+from mc_quadrants.mnts import attach_mnts_parameters
 from mc_quadrants.regimes import (
     estimate_duration_hazards,
     expected_duration_from_hazards,
@@ -275,6 +276,7 @@ def fit_hmm_model(
             correlation=covariance_to_correlation(covariance),
             observations=int(len(state_observations)),
         )
+    moments = attach_mnts_parameters(moments, historical)
 
     transition_frame = pd.DataFrame(
         final_transitions,

@@ -12,6 +12,7 @@ from mc_quadrants.matrix import (
     nearest_psd,
     nearest_psd_higham,
 )
+from mc_quadrants.mnts import attach_mnts_parameters
 from mc_quadrants.regimes import (
     REGIME_ORDER,
     ThresholdSpec,
@@ -634,6 +635,7 @@ def calibrate_quadrant_model(
         lag_periods=macro_lag_periods,
     )
     historical_returns = {state: clean_returns.loc[aligned_regimes == state].copy() for state in REGIME_ORDER}
+    moments = attach_mnts_parameters(moments, historical_returns)
 
     inflation_values = pd.to_numeric(macro[inflation_col], errors="coerce")
     if inflation_values.notna().any():

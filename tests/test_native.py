@@ -4,6 +4,7 @@ import pytest
 from mc_quadrants.decumulation import inflation_index, normalize_decumulation
 from mc_quadrants.native import (
     native_available,
+    sample_mnts_subordinators_native,
     simulate_italian_portfolios_native,
     simulate_parametric_italian_portfolios_native,
     simulate_parametric_native,
@@ -24,13 +25,14 @@ def _inputs(periods: int = 8, paths: int = 20_000):
     return {
         "regime_codes": regimes,
         "means": means,
-        "covariance_cholesky": np.linalg.cholesky(covariance),
-        "correlation_cholesky": np.linalg.cholesky(correlation),
-        "base_correlations": correlation,
+        "gaussian_correlation_cholesky": np.linalg.cholesky(correlation),
+        "gaussian_correlations": correlation,
         "volatilities": volatility,
+        "tail_indexes": np.array([1.5]),
+        "temperings": np.array([0.5]),
+        "skewness": np.zeros((1, 2)),
+        "gaussian_scales": np.ones((1, 2)),
         "random_seed": 42,
-        "distribution": "normal",
-        "degrees_of_freedom": 5.0,
         "garch": False,
         "garch_alpha": 0.10,
         "garch_beta": 0.85,
@@ -41,7 +43,7 @@ def _inputs(periods: int = 8, paths: int = 20_000):
     }
 
 
-def test_native_normal_is_reproducible_and_preserves_moments():
+def test_native_mnts_is_reproducible_and_preserves_moments():
     inputs = _inputs()
 
     first = simulate_parametric_native(**inputs)
@@ -51,9 +53,40 @@ def test_native_normal_is_reproducible_and_preserves_moments():
     assert np.allclose(first.mean(axis=(0, 1)), inputs["means"][0], atol=0.002)
     assert np.allclose(
         np.cov(first.reshape(-1, 2), rowvar=False),
-        inputs["covariance_cholesky"][0] @ inputs["covariance_cholesky"][0].T,
+        np.diag(inputs["volatilities"][0])
+        @ inputs["gaussian_correlations"][0]
+        @ np.diag(inputs["volatilities"][0]),
         atol=0.002,
     )
+
+
+def test_native_tempered_stable_subordinator_matches_theoretical_moments():
+    draws = sample_mnts_subordinators_native(300_000, 1.5, 0.5, 123)
+    centered = draws - draws.mean()
+
+    assert draws.mean() == pytest.approx(1.0, abs=0.01)
+    assert draws.var() == pytest.approx(0.5, abs=0.025)
+    assert np.mean(centered**3) == pytest.approx(1.25, abs=0.15)
+
+
+def test_native_mnts_innovations_have_asymmetric_fat_tails():
+    inputs = _inputs(periods=1, paths=250_000)
+    inputs["skewness"] = np.array([[-0.65, 0.30]])
+    variance_t = 0.5
+    inputs["gaussian_scales"] = np.sqrt(
+        1.0 - inputs["skewness"] ** 2 * variance_t
+    )
+
+    draws = simulate_parametric_native(**inputs)[0]
+    standardized = (draws - inputs["means"][0]) / inputs["volatilities"][0]
+    centered = standardized - standardized.mean(axis=0)
+    variance = np.mean(centered**2, axis=0)
+    skewness = np.mean(centered**3, axis=0) / variance**1.5
+    excess_kurtosis = np.mean(centered**4, axis=0) / variance**2 - 3.0
+
+    assert skewness[0] < -0.8
+    assert skewness[1] > 0.25
+    assert np.all(excess_kurtosis > 1.0)
 
 
 def test_native_parametric_paths_are_identical_with_one_or_many_threads():
@@ -66,17 +99,12 @@ def test_native_parametric_paths_are_identical_with_one_or_many_threads():
 
 
 @pytest.mark.parametrize(
-    ("distribution", "garch", "dynamic_correlation"),
-    [
-        ("student_t", False, True),
-        ("normal", True, False),
-        ("normal", True, True),
-    ],
+    ("garch", "dynamic_correlation"),
+    [(False, True), (True, False), (True, True)],
 )
-def test_native_advanced_models_are_finite(distribution, garch, dynamic_correlation):
+def test_native_advanced_models_are_finite(garch, dynamic_correlation):
     inputs = _inputs(periods=48, paths=2_000)
     inputs.update(
-        distribution=distribution,
         garch=garch,
         dynamic_correlation=dynamic_correlation,
     )
@@ -203,7 +231,6 @@ def test_native_italian_ledger_is_path_identical_across_thread_counts():
 )
 def test_fused_parametric_kernel_matches_separate_generation_and_ledger(regime):
     inputs = _inputs(periods=24, paths=500)
-    inputs["distribution"] = "student_t"
     weights = np.array([0.6, 0.4])
     monthly_fee_log = np.log1p(-np.array([0.001, 0.002])) / 12.0
     year_slots = np.arange(24, dtype=np.int32) // 12

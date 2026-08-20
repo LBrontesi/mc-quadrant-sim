@@ -24,13 +24,14 @@ from mc_quadrants.data import (
     prices_to_returns,
 )
 from mc_quadrants.decumulation import (
-    GuardrailSettings,
     inflation_index as withdrawal_inflation_index,
+)
+from mc_quadrants.decumulation import (
     normalize_decumulation,
     success_mask,
     wilson_interval,
 )
-from mc_quadrants.pipeline import compare_distributions, run_scenario
+from mc_quadrants.pipeline import run_scenario
 from mc_quadrants.regimes import REGIME_ORDER
 from mc_quadrants.simulation import simulate_portfolio_paths
 from mc_quadrants.tax_policy import available_tax_countries, resolve_tax_selection
@@ -170,10 +171,7 @@ PORTFOLIO_PRESETS: dict[str, dict[str, float]] = {
 }
 
 DISTRIBUTION_KEYS = {
-    "normal": "normal",
-    "student_t": "student_t",
-    "bootstrap": "bootstrap",
-    "block_bootstrap": "block_bootstrap",
+    "mnts": "mnts",
 }
 REBALANCE_KEYS = {
     "legacy": None,
@@ -563,8 +561,8 @@ def _asset_count(payload: Mapping[str, Any]) -> int:
 
 def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
     raw = payload.get("chunk_size")
-    paths = int(payload.get("paths", 3000))
-    periods = int(payload.get("periods", 120))
+    paths = int(payload.get("paths", 100_000))
+    periods = int(payload.get("periods", 360))
     if raw is None or raw == "":
         # Hold the dominant periods x chunk x assets transient near the default
         # eight-asset, 120-period footprint instead of scaling by horizon alone.
@@ -581,8 +579,8 @@ def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
 def _workers_value(payload: Mapping[str, Any]) -> int:
     raw = payload.get("workers")
     if raw is None or raw == "":
-        paths = int(payload.get("paths", 3000))
-        periods = int(payload.get("periods", 120))
+        paths = int(payload.get("paths", 100_000))
+        periods = int(payload.get("periods", 360))
         assets = _asset_count(payload)
         chunk_size = min(_chunk_size_value(payload) or paths, paths)
         chunk_count = max(1, (paths + chunk_size - 1) // chunk_size)
@@ -601,8 +599,8 @@ def _workers_value(payload: Mapping[str, Any]) -> int:
 def simulation_resource_estimate(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Describe the adaptive execution plan for one simulation request."""
 
-    periods = int(payload.get("periods", 120))
-    paths = int(payload.get("paths", 3000))
+    periods = int(payload.get("periods", 360))
+    paths = int(payload.get("paths", 100_000))
     assets = _asset_count(payload)
     workers = _workers_value(payload)
     chunk_size = _chunk_size_value(payload) or paths
@@ -635,7 +633,7 @@ def _validate_simulation_size(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     _validate_simulation_size(payload)
-    distribution = str(payload.get("distribution", "normal")).lower().replace("-", "_")
+    distribution = str(payload.get("distribution", "mnts")).lower().replace("-", "_")
     distribution = DISTRIBUTION_KEYS.get(distribution, distribution)
     if distribution not in DISTRIBUTION_KEYS.values():
         raise ValueError("Unknown return distribution.")
@@ -657,7 +655,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     rebalance_label = str(payload.get("rebalance", "monthly")).lower()
     if rebalance_label not in REBALANCE_KEYS:
         raise ValueError(f"Unknown rebalancing frequency: {rebalance_label}")
-    garch = bool(payload.get("garch", False))
+    garch = bool(payload.get("garch", True))
     default_cost_bps = 0.0 if rebalance_label in {"legacy", "buy_hold"} else 10.0
     cost_bps = float(payload.get("cost_bps", default_cost_bps))
     leverage_multiple = float(payload.get("leverage_multiple", 1.0))
@@ -668,8 +666,6 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "Legacy and buy-and-hold accounting do not support transaction costs; set cost_bps to 0."
         )
-    if garch and distribution != "normal":
-        raise ValueError("GARCH volatility clustering requires the Normal return distribution.")
     if not np.isfinite(leverage_multiple) or leverage_multiple < 1:
         raise ValueError("leverage_multiple must be at least 1.0.")
     if leverage_multiple != 1.0 and rebalance_label in {"legacy", "buy_hold"}:
@@ -833,9 +829,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError(
             "Probabilistic quadrants, parameter bootstrap, and joint macro paths require the quadrant model."
         )
-    if distribution in {"bootstrap", "block_bootstrap"} and (joint_macro or dynamic_correlation):
-        raise ValueError("Joint macro paths and dynamic correlation require a parametric return distribution.")
-    periods = int(payload.get("periods", 120))
+    periods = int(payload.get("periods", 360))
     withdrawal_start_raw = payload.get("withdrawal_start_period", 1)
     try:
         withdrawal_start_value = float(withdrawal_start_raw)
@@ -867,14 +861,12 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "inflation_threshold": _threshold_value(payload.get("inflation_threshold", "median")),
         "rate_col": str(payload.get("rate_col", "interest_rate")).strip() or None,
         "periods": periods,
-        "paths": int(payload.get("paths", 3000)),
+        "paths": int(payload.get("paths", 100_000)),
         "random_seed": int(payload.get("seed", 7)),
         "start_state": start_state,
         "weights": weights,
         "macro_lag_periods": int(payload.get("macro_lag", 1)),
         "distribution": distribution,
-        "degrees_of_freedom": float(payload.get("degrees_of_freedom", 5.0)),
-        "block_size": int(payload.get("block_size", 3)),
         "transition_uncertainty": float(payload.get("transition_uncertainty", 0.0)),
         "rebalance_frequency": REBALANCE_KEYS[rebalance_label],
         "transaction_cost_bps": cost_bps,
@@ -2141,8 +2133,8 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
 def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Solve fixed and guardrail safe rates on one shared set of market paths."""
 
-    requested_paths = int(payload.get("paths", 3000))
-    periods = int(payload.get("periods", 120))
+    requested_paths = int(payload.get("paths", 100_000))
+    periods = int(payload.get("periods", 360))
     plan = normalize_decumulation(
         payload.get("decumulation"),
         periods=periods,
@@ -2392,43 +2384,4 @@ def build_wealth_csv(payload: Mapping[str, Any]) -> dict[str, Any]:
         "requested_paths": requested_paths,
         "replayed_paths": replayed_paths,
         "sampled": export_paths < requested_paths,
-    }
-
-
-def build_compare_response(payload: Mapping[str, Any]) -> dict[str, Any]:
-    macro, returns, tickers, growth_col, inflation_col, _ = load_data_source(payload)
-    selected_tickers = parse_tickers(payload.get("selected_tickers", tickers))
-    if not selected_tickers:
-        raise ValueError("Select at least one ticker.")
-    missing = [ticker for ticker in selected_tickers if ticker not in returns.columns]
-    if missing:
-        raise ValueError(f"Selected tickers are missing from the loaded returns: {', '.join(missing)}")
-    returns = returns.loc[:, selected_tickers]
-    kwargs = scenario_kwargs(payload)
-    kwargs.pop("distribution", None)
-    currency_map = parse_pair_map(payload.get("currency_map", ""), "currency")
-    asset_currencies, fx_rates = prepare_fx_rates(
-        returns, selected_tickers, kwargs["base_currency"], currency_map
-    )
-    correlation_targets, override_weight = correlation_overrides(payload, selected_tickers)
-    comparison = compare_distributions(
-        {"Normal": "normal", "Student-t": "student_t"},
-        returns=returns,
-        macro=macro,
-        selected_tickers=selected_tickers,
-        growth_col=growth_col,
-        inflation_col=inflation_col,
-        correlation_overrides=correlation_targets,
-        override_weight=override_weight,
-        **kwargs,
-        asset_currencies=asset_currencies,
-        fx_rates=fx_rates,
-    )
-    return {
-        "ok": True,
-        "columns": [str(column) for column in comparison.columns],
-        "rows": [
-            [None if pd.isna(value) else _json_value(value) for value in record]
-            for record in comparison.itertuples(index=False, name=None)
-        ],
     }
