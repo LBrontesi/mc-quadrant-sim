@@ -1,7 +1,12 @@
 # MC Quadrant Simulator
 
-A research-oriented Monte Carlo scenario engine built around the classic four
-macro quadrants:
+A research-oriented, monthly Monte Carlo engine for long-horizon portfolio
+planning. The production model combines four macroeconomic states with
+regime-specific multivariate normal tempered-stable returns, GARCH volatility,
+asymmetric dynamic correlation, and a native C++17 simulation backend. New web
+sessions default to a 30-year horizon and 100,000 paths.
+
+The four macro quadrants are:
 
 | Regime | Growth | Inflation | Typical interpretation |
 | --- | --- | --- | --- |
@@ -17,7 +22,8 @@ The model is designed to be calibrated from real historical data:
 3. Parametric return means are shrunk and covariance matrices use Ledoit-Wolf shrinkage.
 4. Optional stationary-bootstrap recalibrations measure parameter uncertainty.
 5. Growth, inflation, the short rate, regimes, returns, dynamic correlations, and portfolio accounting are simulated together.
-6. Walk-forward validation compares regime-switching MNTS forecasts with an unconditional MNTS benchmark.
+6. A fused multithreaded C++ kernel runs the production MNTS-GARCH paths and portfolio ledgers without retaining an unnecessary full return cube.
+7. Walk-forward validation compares regime-switching MNTS forecasts with an unconditional MNTS benchmark.
 
 ## Methodology
 
@@ -289,6 +295,46 @@ certainty-equivalent advantage test whether complexity adds decision value.
 The UI shows expected months in every state and expected
 switches per decade, and warns when the implied persistence is unusually low.
 Weak or miscalibrated results are surfaced as warnings rather than hidden.
+
+#### Legacy-methodology comparison
+
+The removed Student-t and Gaussian-GARCH return laws are retained only in Git
+history for controlled research comparisons; they are not selectable product
+options. A fixed-seed benchmark used the same 2007-2025 monthly SPY/IEF/GLD/DBC
+and FRED history, 40/30/15/15 portfolio, macro/regime paths, monthly
+rebalancing, and 10 basis-point transaction cost for every method.
+
+In 20,000 simulated 30-year paths, MNTS-GARCH left median terminal wealth
+essentially unchanged versus the legacy Student-t model (833.9 from an initial
+100 in both cases), but increased the median maximum drawdown from 21.5% to
+23.8% and the severe 5% drawdown from 36.0% to 42.3%. Its simulated monthly
+skewness was -0.76 versus +0.15 for Student-t and 0.00 for Gaussian-GARCH; the
+historical portfolio estimate was -1.17. This is the intended effect: preserve
+the central long-term scenario while representing asymmetric downside and
+volatility clustering more realistically.
+
+A stricter expanding-window test trained on at least 120 months and forecast
+January 2017 through December 2025. Each of 108 monthly origins used 32,768
+paths; 97 origins also had a realized rolling 12-month outcome. Regime and
+macro-path hashes matched exactly across methods.
+
+| Out-of-sample score | Student-t | Gaussian-GARCH | MNTS-GARCH |
+| --- | ---: | ---: | ---: |
+| One-month portfolio CRPS (lower is better) | 0.01482 | 0.01498 | **0.01449** |
+| One-month kernel log score (higher is better) | 2.169 | 2.158 | **2.219** |
+| Twelve-month portfolio CRPS | 0.06226 | 0.06224 | **0.06045** |
+| Twelve-month kernel log score | 0.781 | 0.779 | **0.834** |
+| Observed one-month 95% VaR breach rate | 4.63% | 4.63% | 3.70% |
+
+Against Student-t, the MNTS-GARCH CRPS improvement was 2.2% at one month
+(`p=0.0012`) and 2.9% at 12 months (`p=0.0015`) using Newey-West/HAC score
+comparisons. MNTS-GARCH nevertheless forecast a conservative average 1% monthly
+VaR of -8.51%, compared with a -6.61% worst realized portfolio month in this
+short validation window. Only about one 1% breach is expected in 108 months, so
+this is evidence for further tail-parameter regularization, not a conclusive
+99% coverage test. The benchmark supports MNTS-GARCH as the production law
+while making clear that tail calibration and macro/mean calibration still
+require ongoing out-of-sample monitoring.
 
 ### 6. Portfolio Accounting
 
@@ -583,7 +629,7 @@ With `uv`, the checked-in lockfile provides a reproducible environment:
 uv sync --extra dev --extra data
 ```
 
-Build the optional C++17 backend on macOS (including Apple Silicon) or Linux:
+Build the C++17 production backend on macOS (including Apple Silicon) or Linux:
 
 ```bash
 ./scripts/build_native.sh
@@ -596,6 +642,12 @@ return cube is retained. If the shared
 library is missing or its ABI version does not match, execution automatically
 falls back to the Python reference implementation. Set
 `MC_DISABLE_NATIVE_SIM=1` to force that reference path for verification.
+
+On the development machine, the fused kernel completed 360 months x 100,000
+paths x four assets x four quadrants in about 6.9 seconds with eight native
+threads. This is a hardware-specific engineering benchmark rather than a
+runtime guarantee; use `scripts/benchmark_native.py` to measure the active
+build and machine.
 
 Then you can adapt:
 
@@ -638,8 +690,8 @@ python web_app.py
 ```
 
 Open `http://127.0.0.1:7860`. Set `PORT` to use a different port. The browser
-client calls the same `/api/load`, `/api/simulate`, `/api/compare`, and
-`/api/wealth` payload contracts used by the other frontends.
+client calls the shared `/api/load`, `/api/simulate`, and `/api/wealth`
+contracts used by the other frontends.
 
 The server uses adaptive path chunking, limits concurrent heavy jobs, caps request bodies, and sends a
 deterministic reporting sample of at most 5,000 paths to the browser instead of serializing every path.
@@ -655,7 +707,7 @@ mobile widths without causing page-level horizontal overflow.
 
 For a faster first run, the web UI starts with the settings collapsed and a
 single **Run analysis** action that loads market data and runs the model. New
-sessions default to 100,000 paths over a ten-year, 120-month horizon.
+sessions default to 100,000 paths over a 30-year, 360-month horizon.
 
 Frontend network and resource-planning logic live in `web/api-client.js` and
 `web/resource-planner.js`; `web/app.js` is responsible for application state,
