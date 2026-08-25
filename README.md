@@ -643,6 +643,13 @@ library is missing or its ABI version does not match, execution automatically
 falls back to the Python reference implementation. Set
 `MC_DISABLE_NATIVE_SIM=1` to force that reference path for verification.
 
+Automatic Italian-tax runs without active decumulation use one fused native
+batch and up to eight threads by default. Tax totals, terminal statistics,
+wealth percentiles, goal success, shortfall, and ruin remain exact across every
+requested path; advanced path diagnostics and charts are deterministically
+bounded to 25,000 representative paths to prevent reporting memory from
+dominating the simulation.
+
 On the development machine, the fused kernel completed 360 months x 100,000
 paths x four assets x four quadrants in about 6.9 seconds with eight native
 threads. This is a hardware-specific engineering benchmark rather than a

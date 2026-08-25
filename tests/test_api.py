@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import mc_quadrants.api as api
+from mc_quadrants.types import SimulationResult
 
 ASSET_TICKERS = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
 
@@ -673,6 +674,66 @@ def test_execution_plan_selects_workers_automatically(monkeypatch):
 
     assert large["workers"] == 4
     assert compact["workers"] == 1
+
+
+def test_execution_plan_uses_full_native_tax_batch(monkeypatch):
+    monkeypatch.setattr(api, "native_available", lambda: True)
+    monkeypatch.setattr(api.os, "cpu_count", lambda: 10)
+    monkeypatch.delenv("MC_SIM_MAX_AUTO_WORKERS", raising=False)
+    payload = {
+        "weights": {ticker: 1 for ticker in ASSET_TICKERS[:4]},
+        "selected_tickers": ASSET_TICKERS[:4],
+        "periods": 120,
+        "paths": 500_000,
+        "tax_country": "IT",
+        "tax_regime": "italy_administered",
+        "decumulation": {
+            "enabled": False,
+            "mode": "manual",
+            "phases": [],
+            "one_time_expenses": [],
+        },
+    }
+
+    plan = api.simulation_resource_estimate(payload)
+
+    assert plan["chunk_size"] == 500_000
+    assert plan["workers"] == 8
+
+
+def test_analytics_inputs_bound_diagnostics_and_slice_path_metadata():
+    periods = 2
+    paths = api.MAX_ANALYTICS_PATHS + 3
+    values = np.arange(periods * paths, dtype=float).reshape(periods, paths)
+    wealth = pd.DataFrame(values)
+    wealth.attrs["withdrawal_funded"] = values + 1.0
+    wealth.attrs["withdrawal_cpi"] = np.ones_like(values)
+    result = SimulationResult(
+        returns=np.empty((periods, 0, 1)),
+        regimes=np.zeros((periods, paths), dtype=np.uint8),
+        assets=["SPY"],
+        states=["state"],
+        frequency="M",
+        macro_paths=np.zeros((periods, paths, 1)),
+        macro_columns=["inflation"],
+    )
+    drawdowns = np.linspace(0.0, 1.0, paths)
+
+    sampled_wealth, sampled_result, sampled_drawdowns, metadata = api._analytics_inputs(
+        wealth, result, drawdowns
+    )
+
+    assert sampled_wealth.shape == (periods, api.MAX_ANALYTICS_PATHS)
+    assert sampled_wealth.attrs["withdrawal_funded"].shape == sampled_wealth.shape
+    assert sampled_result.regimes.shape == sampled_wealth.shape
+    assert sampled_result.macro_paths.shape == (periods, api.MAX_ANALYTICS_PATHS, 1)
+    assert sampled_drawdowns.shape == (api.MAX_ANALYTICS_PATHS,)
+    assert metadata == {
+        "paths": api.MAX_ANALYTICS_PATHS,
+        "total_paths": paths,
+        "sampled": True,
+        "selection": "deterministic_even_spacing",
+    }
 
 
 def test_wealth_export_is_bounded_sample():

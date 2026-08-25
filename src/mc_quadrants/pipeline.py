@@ -448,7 +448,7 @@ def _simulate_chunked(
     native_tax_execution = _native_tax_compatible(
         tax_selection.enabled,
         asset_tax_metadata,
-    ) and decumulation.legacy_nominal
+    ) and (decumulation.legacy_nominal or not decumulation.active)
     native_threads = max(1, int(workers)) if native_tax_execution else 1
     native_portfolio_config: dict[str, object] | None = None
     if native_tax_execution:
@@ -696,16 +696,31 @@ def _simulate_chunked(
     )
     wrapper_terminal_values = np.empty(total, dtype=float) if wrapper_available else None
     wrapper_annualized_returns = np.empty(total, dtype=float) if wrapper_available else None
-    path_attrs: dict[str, np.ndarray] = {
-        "withdrawal_requested": np.zeros((periods, total), dtype=float),
-        "withdrawal_funded": np.zeros((periods, total), dtype=float),
-        "guardrail_events": np.zeros((periods, total), dtype=np.int8),
-        "withdrawal_cpi": np.ones((periods, total), dtype=float),
-        "paired_wealth": np.zeros((periods, total), dtype=float),
-        "paired_withdrawal_requested": np.zeros((periods, total), dtype=float),
-        "paired_withdrawal_funded": np.zeros((periods, total), dtype=float),
-        "paired_guardrail_events": np.zeros((periods, total), dtype=np.int8),
-    }
+    path_attrs: dict[str, np.ndarray] = {}
+    if decumulation.active:
+        path_attrs.update(
+            {
+                "withdrawal_requested": np.zeros((periods, total), dtype=float),
+                "withdrawal_funded": np.zeros((periods, total), dtype=float),
+                "guardrail_events": np.zeros((periods, total), dtype=np.int8),
+                "withdrawal_cpi": np.ones((periods, total), dtype=float),
+            }
+        )
+        if _alternative_decumulation(decumulation) is not None:
+            path_attrs.update(
+                {
+                    "paired_wealth": np.zeros((periods, total), dtype=float),
+                    "paired_withdrawal_requested": np.zeros(
+                        (periods, total), dtype=float
+                    ),
+                    "paired_withdrawal_funded": np.zeros(
+                        (periods, total), dtype=float
+                    ),
+                    "paired_guardrail_events": np.zeros(
+                        (periods, total), dtype=np.int8
+                    ),
+                }
+            )
     specs = _chunk_specs(total, chunk_size, random_seed)
 
     if workers is not None and workers > 1 and not native_tax_execution:
@@ -800,7 +815,8 @@ def _simulate_chunked(
                     if wrapper_annualized_returns is not None and chunk_wrapper_annualized is not None:
                         wrapper_annualized_returns[start:start + count] = chunk_wrapper_annualized
                     for key, values in chunk_path_attrs.items():
-                        path_attrs[key][:, start:start + count] = values
+                        if key in path_attrs:
+                            path_attrs[key][:, start:start + count] = values
         except (NotImplementedError, PermissionError):
             for start, count, seed in specs:
                 chunk_result, chunk_wealth, chunk_gross_wealth = _single(count, seed)
@@ -821,7 +837,7 @@ def _simulate_chunked(
                 if wrapper_terminal_values is not None:
                     wrapper_terminal_values[start:start + count] = chunk_wealth.attrs["wrapper_terminal_values"]
                     wrapper_annualized_returns[start:start + count] = chunk_wealth.attrs["wrapper_annualized_returns"]
-                for key in _PATH_WEALTH_ATTRS:
+                for key in path_attrs:
                     if key in chunk_wealth.attrs:
                         path_attrs[key][:, start:start + count] = chunk_wealth.attrs[key]
     else:
@@ -844,7 +860,7 @@ def _simulate_chunked(
             if wrapper_terminal_values is not None:
                 wrapper_terminal_values[start:start + count] = chunk_wealth.attrs["wrapper_terminal_values"]
                 wrapper_annualized_returns[start:start + count] = chunk_wealth.attrs["wrapper_annualized_returns"]
-            for key in _PATH_WEALTH_ATTRS:
+            for key in path_attrs:
                 if key in chunk_wealth.attrs:
                     path_attrs[key][:, start:start + count] = chunk_wealth.attrs[key]
 
@@ -1535,6 +1551,7 @@ def run_scenario(
                 inflation_paths=inflation_paths,
             )
         )
+    funded_withdrawal_paths = wealth.attrs.get("withdrawal_funded")
     summary = summarize_wealth_risk(
         wealth,
         initial_value=initial_value,
@@ -1543,9 +1560,10 @@ def run_scenario(
         contribution=float(contribution),
         withdrawal=float(withdrawal),
         withdrawal_start_period=int(withdrawal_start_period),
-        withdrawal_paths=np.asarray(
-            wealth.attrs.get("withdrawal_funded", np.zeros(wealth.shape)),
-            dtype=float,
+        withdrawal_paths=(
+            np.asarray(funded_withdrawal_paths, dtype=float)
+            if funded_withdrawal_paths is not None
+            else None
         ),
         inflation_paths=inflation_paths,
         risk_free_paths=risk_free_paths,

@@ -1,6 +1,8 @@
 import numpy as np
 import pandas as pd
+import pytest
 
+from mc_quadrants.native import native_available
 from mc_quadrants.pipeline import run_scenario
 
 
@@ -110,6 +112,36 @@ def test_pipeline_reports_italian_tax_accounting_across_chunks():
         "after_tax_terminal_wealth_median"
     ]
     assert scenario.summary["terminal_tax_drag_median"] > 0
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend unavailable")
+def test_disabled_decumulation_keeps_native_fused_tax_execution():
+    common = {
+        "periods": 12,
+        "paths": 12,
+        "walk_forward": False,
+        "rebalance_frequency": 3,
+        "tax_country": "IT",
+        "tax_regime": "italy_administered",
+    }
+    legacy = run_scenario(**_scenario_kwargs(common))
+    disabled = run_scenario(
+        **_scenario_kwargs(
+            {
+                **common,
+                "decumulation": {
+                    "enabled": False,
+                    "mode": "manual",
+                    "phases": [],
+                    "one_time_expenses": [],
+                },
+            }
+        )
+    )
+
+    assert disabled.wealth.attrs["native_fused_backend"] is True
+    assert np.array_equal(disabled.result.regimes, legacy.result.regimes)
+    assert np.array_equal(disabled.wealth.to_numpy(), legacy.wealth.to_numpy())
 
 
 def test_taxed_scenario_reuses_the_country_neutral_gross_paths():

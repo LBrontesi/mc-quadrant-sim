@@ -31,6 +31,7 @@ from mc_quadrants.decumulation import (
     success_mask,
     wilson_interval,
 )
+from mc_quadrants.native import native_available
 from mc_quadrants.pipeline import run_scenario
 from mc_quadrants.regimes import REGIME_ORDER
 from mc_quadrants.simulation import simulate_portfolio_paths
@@ -184,6 +185,7 @@ MAX_PERIODS = 360
 MAX_PATHS = 500_000
 MAX_WORKERS = 16
 MAX_REPORTING_PATHS = 5_000
+MAX_ANALYTICS_PATHS = 25_000
 DEFAULT_EXPORT_PATHS = 1_000
 MAX_EXPORT_PATHS = 5_000
 
@@ -559,11 +561,39 @@ def _asset_count(payload: Mapping[str, Any]) -> int:
     return max(len(parse_tickers(payload.get("tickers", []))), 1)
 
 
+def _native_fused_payload(payload: Mapping[str, Any]) -> bool:
+    """Return whether an automatic request can use the fused tax kernel."""
+
+    try:
+        tax_enabled = resolve_tax_selection(
+            payload.get("tax_country"), payload.get("tax_regime")
+        ).enabled
+    except ValueError:
+        return False
+    if not tax_enabled or not native_available():
+        return False
+    decumulation = payload.get("decumulation")
+    if isinstance(decumulation, Mapping) and bool(decumulation.get("enabled", True)):
+        return False
+    if decumulation is not None and not isinstance(decumulation, Mapping):
+        return False
+    metadata = payload.get("asset_tax_metadata") or {}
+    if not isinstance(metadata, Mapping):
+        return False
+    return all(
+        not isinstance(values, Mapping)
+        or np.isclose(float(values.get("annual_income_yield", 0.0)), 0.0)
+        for values in metadata.values()
+    )
+
+
 def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
     raw = payload.get("chunk_size")
     paths = int(payload.get("paths", 100_000))
     periods = int(payload.get("periods", 360))
     if raw is None or raw == "":
+        if _native_fused_payload(payload):
+            return None
         # Hold the dominant periods x chunk x assets transient near the default
         # eight-asset, 120-period footprint instead of scaling by horizon alone.
         assets = _asset_count(payload)
@@ -579,17 +609,21 @@ def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
 def _workers_value(payload: Mapping[str, Any]) -> int:
     raw = payload.get("workers")
     if raw is None or raw == "":
+        native_fused = _native_fused_payload(payload)
         paths = int(payload.get("paths", 100_000))
         periods = int(payload.get("periods", 360))
         assets = _asset_count(payload)
         chunk_size = min(_chunk_size_value(payload) or paths, paths)
         chunk_count = max(1, (paths + chunk_size - 1) // chunk_size)
         work_units = periods * paths * assets
-        if chunk_count < 2 or work_units < 2_000_000:
+        if (chunk_count < 2 and not native_fused) or work_units < 2_000_000:
             return 1
-        configured_cap = int(os.getenv("MC_SIM_MAX_AUTO_WORKERS", "4"))
+        configured_cap = int(
+            os.getenv("MC_SIM_MAX_AUTO_WORKERS", "8" if native_fused else "4")
+        )
         auto_cap = max(1, min(configured_cap, MAX_WORKERS))
-        return min(max(os.cpu_count() or 1, 1), auto_cap, chunk_count)
+        parallel_units = paths if native_fused else chunk_count
+        return min(max(os.cpu_count() or 1, 1), auto_cap, parallel_units)
     workers = int(raw)
     if workers < 1 or workers > MAX_WORKERS:
         raise ValueError(f"workers must be between 1 and {MAX_WORKERS}.")
@@ -966,10 +1000,30 @@ def run_scenario_payload(payload: Mapping[str, Any]) -> tuple[Any, list[str], pd
     return scenario, selected_tickers, macro
 
 
+def _period_quantiles(
+    values: np.ndarray,
+    probabilities: tuple[float, ...] = (0.05, 0.50, 0.95),
+    target_block_values: int = 4_000_000,
+) -> np.ndarray:
+    """Compute cross-path quantiles with bounded partition workspace."""
+
+    matrix = np.asarray(values, dtype=float)
+    if matrix.ndim != 2:
+        raise ValueError("values must be a periods x paths matrix.")
+    periods, paths = matrix.shape
+    result = np.empty((len(probabilities), periods), dtype=float)
+    period_block = max(1, min(periods, target_block_values // max(paths, 1)))
+    for start in range(0, periods, period_block):
+        stop = min(start + period_block, periods)
+        result[:, start:stop] = np.quantile(
+            matrix[start:stop], probabilities, axis=1
+        )
+    return result
+
+
 def _wealth_percentiles(wealth: pd.DataFrame) -> pd.DataFrame:
-    """Compute per-period wealth percentiles without copying the full matrix."""
-    values = wealth.to_numpy(dtype=float)
-    quantiles = np.quantile(values, [0.05, 0.50, 0.95], axis=1)
+    """Compute exact per-period wealth percentiles with bounded workspace."""
+    quantiles = _period_quantiles(wealth.to_numpy(dtype=float))
     return pd.DataFrame(quantiles.T, columns=[0.05, 0.50, 0.95])
 
 
@@ -1045,6 +1099,55 @@ def _reporting_indices(paths: int, limit: int = MAX_REPORTING_PATHS) -> np.ndarr
     if paths <= 0:
         return np.empty(0, dtype=int)
     return np.linspace(0, paths - 1, min(paths, limit), dtype=int)
+
+
+def _analytics_inputs(
+    wealth: pd.DataFrame,
+    result: Any,
+    drawdowns: np.ndarray,
+) -> tuple[pd.DataFrame, Any, np.ndarray, dict[str, Any]]:
+    """Bound high-dimensional diagnostics while retaining exact core outputs."""
+
+    total_paths = wealth.shape[1]
+    indices = _reporting_indices(total_paths, MAX_ANALYTICS_PATHS)
+    metadata = {
+        "paths": int(len(indices)),
+        "total_paths": int(total_paths),
+        "sampled": bool(len(indices) < total_paths),
+        "selection": "deterministic_even_spacing",
+    }
+    if len(indices) == total_paths:
+        return wealth, result, drawdowns, metadata
+
+    sampled_wealth = wealth.iloc[:, indices].copy()
+    for key in ("withdrawal_funded", "withdrawal_cpi"):
+        values = wealth.attrs.get(key)
+        if values is None:
+            continue
+        array = np.asarray(values)
+        if array.ndim == 2 and array.shape[1] == total_paths:
+            sampled_wealth.attrs[key] = array[:, indices]
+    macro_paths = result.macro_paths
+    sampled_result = replace(
+        result,
+        regimes=result.regimes[:, indices],
+        macro_paths=(
+            macro_paths[:, indices, :]
+            if macro_paths is not None and macro_paths.shape[1] == total_paths
+            else macro_paths
+        ),
+    )
+    return sampled_wealth, sampled_result, drawdowns[indices], metadata
+
+
+def _risk_of_ruin(wealth: pd.DataFrame, block_size: int = 4096) -> float:
+    """Compute exact path ruin probability without a full boolean matrix."""
+
+    ruined = 0
+    for start in range(0, wealth.shape[1], block_size):
+        values = wealth.iloc[:, start:start + block_size].to_numpy(dtype=float)
+        ruined += int(np.any(values <= 0.0, axis=0).sum())
+    return float(ruined / max(wealth.shape[1], 1))
 
 
 def _distribution_summary(values: np.ndarray) -> dict[str, float]:
@@ -1615,7 +1718,7 @@ def _macro_path_response(result: Any) -> dict[str, Any] | None:
     response: dict[str, Any] = {"periods": list(range(1, len(result.macro_paths) + 1)), "series": {}}
     for index, column in enumerate(result.macro_columns):
         values = result.macro_paths[:, :, index]
-        quantiles = np.quantile(values, [0.05, 0.50, 0.95], axis=1)
+        quantiles = _period_quantiles(values)
         response["series"][str(column)] = {
             "p05": quantiles[0].tolist(),
             "median": quantiles[1].tolist(),
@@ -1642,6 +1745,65 @@ def _retirement_response(
             legacy_start_period=int(payload.get("withdrawal_start_period", 1)),
             annual_inflation_fallback=float(payload.get("annual_inflation", 0.0)) / 100.0,
         ).to_dict()
+    if not bool(plan.get("enabled", False)):
+        policy_values = plan.get("policy", {})
+        current_policy = (
+            str(policy_values.get("type", "fixed"))
+            if isinstance(policy_values, Mapping)
+            else str(policy_values)
+        )
+        terminal = wealth.iloc[-1].to_numpy(dtype=float)
+        terminal_quantiles = np.quantile(terminal, [0.05, 0.50, 0.95])
+        zero_curve = [0.0] * periods
+        return {
+            "enabled": False,
+            "mode": str(plan.get("mode", "manual")),
+            "config": dict(plan),
+            "periods": list(range(1, periods + 1)),
+            "survival_probability": [1.0] * periods,
+            "funded_spending": {
+                "p05": zero_curve.copy(),
+                "median": zero_curve.copy(),
+                "p95": zero_curve.copy(),
+            },
+            "cumulative_real_spending": {
+                "p05": zero_curve.copy(),
+                "median": zero_curve.copy(),
+                "p95": zero_curve.copy(),
+            },
+            "metrics": {
+                "success_probability": 1.0,
+                "funded_spending_ratio": 1.0,
+                "median_cumulative_real_spending": 0.0,
+                "probability_of_exhaustion": 0.0,
+                "median_first_shortfall_month": None,
+                "probability_of_cut": 0.0,
+                "probability_of_increase": 0.0,
+                "mean_cuts": 0.0,
+                "mean_increases": 0.0,
+                "terminal_p05": float(terminal_quantiles[0]),
+                "terminal_median": float(terminal_quantiles[1]),
+                "terminal_p95": float(terminal_quantiles[2]),
+            },
+            "paired_comparison": [
+                {
+                    "policy": current_policy,
+                    "success_probability": 1.0,
+                    "funded_spending_ratio": 1.0,
+                    "median_real_spending": 0.0,
+                    "terminal_p05": float(terminal_quantiles[0]),
+                    "terminal_median": float(terminal_quantiles[1]),
+                    "terminal_p95": float(terminal_quantiles[2]),
+                    "probability_of_cut": 0.0,
+                    "probability_of_increase": 0.0,
+                }
+            ],
+            "tax_by_year": {
+                str(year): {str(name): float(value) for name, value in metrics.items()}
+                for year, metrics in (tax_by_year or {}).items()
+            },
+            "safe_rate": None,
+        }
     requested = np.asarray(
         wealth.attrs.get("withdrawal_requested", np.zeros((periods, paths))),
         dtype=float,
@@ -1915,17 +2077,52 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "wrapper_advantage_percent": summary_values.get("wrapper_advantage_percent", 0.0),
         "wrapper_annual_drag_bps": summary_values.get("wrapper_annual_drag_bps", 0.0),
     }
+    analytics_wealth, analytics_result, analytics_drawdowns, analytics_sample = (
+        _analytics_inputs(wealth, result, drawdown_values)
+    )
     path_analytics = _path_analytics(
-        wealth,
-        result,
+        analytics_wealth,
+        analytics_result,
         payload,
         model=model,
         initial_value=float(payload.get("initial_value", 100.0)),
-        drawdowns=drawdown_values,
+        drawdowns=analytics_drawdowns,
+    )
+    target_wealth = float(path_analytics["decision_metrics"]["target_wealth"])
+    misses = terminal_values < target_wealth
+    path_analytics["decision_metrics"].update(
+        {
+            "goal_success_probability": float(
+                np.mean(terminal_values >= target_wealth)
+            ),
+            "expected_goal_shortfall": (
+                float(np.mean(target_wealth - terminal_values[misses]))
+                if misses.any()
+                else 0.0
+            ),
+            "risk_of_ruin": _risk_of_ruin(wealth),
+        }
+    )
+    path_analytics["goal_curve"] = _goal_probability_curve(
+        terminal_values,
+        float(payload.get("initial_value", 100.0)),
+        target_wealth,
+    )
+    path_analytics["rolling_horizons"]["total_paths"] = int(len(terminal_values))
+    path_analytics["drawdown_episodes"]["total_paths"] = int(len(terminal_values))
+    path_analytics["drawdown_episodes"]["sampled"] = bool(
+        path_analytics["drawdown_episodes"]["sampled"]
+        or analytics_sample["sampled"]
     )
     summary_values.update(path_analytics["decision_metrics"])
     persistence = _persistence_response(model, result)
     warnings = list(scenario.diagnostics.warnings)
+    if analytics_sample["sampled"]:
+        warnings.append(
+            "Core simulation, tax totals, terminal statistics, wealth percentiles, goal success, shortfall, "
+            f"and ruin use all paths; advanced path diagnostics and charts use a deterministic "
+            f"{analytics_sample['paths']:,}-path sample."
+        )
     if persistence["low_persistence_warning"]:
         warnings.append(
             "Regime persistence is unusually low for a macro-state model; review the "
@@ -2047,6 +2244,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "total_paths": int(len(terminal_values)),
             "sampled": bool(len(reporting_indices) < len(terminal_values)),
         },
+        "analytics_sample": analytics_sample,
         **path_analytics,
         "regime_timeline": regime_timelines["median"],
         "regime_timelines": regime_timelines,
