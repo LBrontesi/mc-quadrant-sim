@@ -245,9 +245,13 @@ latent factor preserves cross-asset dependence. Parameters are standardized so
 the fitted state means, volatilities, and correlations remain the target first
 two moments.
 
-The tempered-stable subordinator is sampled exactly with Devroye's double-
-rejection algorithm. The product exposes no alternative return-path sampler;
-MNTS-GARCH is the single production law.
+The tempered-stable subordinator is sampled exactly with a hybrid rejection
+scheme. For the moderate exponential tilts produced by the calibrated model,
+the native engine draws a positive stable proposal and accepts it with the
+exponential tilt; for stronger tilts it uses Devroye's uniformly bounded
+double-rejection algorithm. This changes execution speed, not the target MNTS
+law. The product exposes no alternative return-path sampler; MNTS-GARCH is the
+single production law.
 
 **GARCH(1,1) volatility clustering** adds conditional-variance dynamics within
 each regime: every asset's variance follows
@@ -643,6 +647,15 @@ library is missing or its ABI version does not match, execution automatically
 falls back to the Python reference implementation. Set
 `MC_DISABLE_NATIVE_SIM=1` to force that reference path for verification.
 
+The MNTS subordinator uses an exact hybrid rejection sampler. For the moderate
+exponential tilts produced by the calibrated model it samples a positive stable
+proposal directly and applies the exponential tilt; stronger tilts retain
+Devroye's uniformly bounded double-rejection algorithm. The cutoff was checked
+against theoretical moments, two-sample distribution tests, and runtime grids.
+This parameter-specific choice follows the efficiency direction studied by
+[Qu, Dassios, and Zhao (2021)](https://doi.org/10.1145/3449357), while preserving
+the exact [Devroye (2009)](https://doi.org/10.1145/1596519.1596523) fallback.
+
 Automatic Italian-tax runs without active decumulation use one fused native
 batch and up to eight threads by default. Tax totals, terminal statistics,
 wealth percentiles, goal success, shortfall, and ruin remain exact across every
@@ -651,10 +664,12 @@ bounded to 25,000 representative paths to prevent reporting memory from
 dominating the simulation.
 
 On the development machine, the fused kernel completed 360 months x 100,000
-paths x four assets x four quadrants in about 6.9 seconds with eight native
-threads. This is a hardware-specific engineering benchmark rather than a
-runtime guarantee; use `scripts/benchmark_native.py` to measure the active
-build and machine.
+paths x four assets x four quadrants in about 3.2 seconds with eight native
+threads. A single 500,000-path run completed in about 16.0 seconds. These are
+hardware-specific engineering benchmarks rather than runtime guarantees; use
+`scripts/benchmark_native.py` to measure the active build and machine. Pass
+`--repeats 1` for a single large-scale measurement instead of the default
+three-run median.
 
 Then you can adapt:
 

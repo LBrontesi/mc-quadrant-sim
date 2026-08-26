@@ -69,6 +69,17 @@ def test_native_tempered_stable_subordinator_matches_theoretical_moments():
     assert np.mean(centered**3) == pytest.approx(1.25, abs=0.15)
 
 
+def test_native_tempered_stable_subordinator_fallback_matches_moments():
+    # tail_index=1 gives alpha=0.5 and lambda**alpha=2.0, above the
+    # simple-rejection cutoff, so this covers the Devroye fallback.
+    first = sample_mnts_subordinators_native(300_000, 1.0, 1.0, 321)
+    second = sample_mnts_subordinators_native(300_000, 1.0, 1.0, 321)
+
+    assert np.array_equal(first, second)
+    assert first.mean() == pytest.approx(1.0, abs=0.01)
+    assert first.var() == pytest.approx(0.5, abs=0.025)
+
+
 def test_native_mnts_innovations_have_asymmetric_fat_tails():
     inputs = _inputs(periods=1, paths=250_000)
     inputs["skewness"] = np.array([[-0.65, 0.30]])

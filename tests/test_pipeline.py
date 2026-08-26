@@ -2,8 +2,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from mc_quadrants import pipeline
 from mc_quadrants.native import native_available
 from mc_quadrants.pipeline import run_scenario
+from mc_quadrants.validation import WalkForwardResult
 
 
 def _scenario_kwargs(extra: dict | None = None) -> dict:
@@ -262,6 +264,56 @@ def test_pipeline_runs_walk_forward_validation_on_long_history():
     assert scenario.walk_forward is not None
     assert scenario.walk_forward is not None
     assert scenario.walk_forward.summary["splits"] > 0
+
+
+def test_walk_forward_cache_reuses_identical_inputs_and_invalidates_changes(monkeypatch):
+    pipeline._clear_walk_forward_cache()
+    calls = 0
+
+    def fake_validation(returns, macro, **kwargs):
+        nonlocal calls
+        calls += 1
+        return WalkForwardResult(
+            splits=pd.DataFrame({"score": [float(returns.iloc[0, 0])]}),
+            summary=pd.Series({"splits": 1}),
+            warnings=[str(kwargs["growth_threshold"])],
+        )
+
+    monkeypatch.setattr(pipeline, "walk_forward_validation", fake_validation)
+    dates = pd.date_range("2020-01-31", periods=3, freq="ME")
+    returns = pd.DataFrame({"Stocks": [0.01, 0.02, 0.03]}, index=dates)
+    macro = pd.DataFrame(
+        {"growth": [1.0, 2.0, 3.0], "inflation": [2.0, 2.5, 3.0]},
+        index=dates,
+    )
+    kwargs = {
+        "growth_col": "growth",
+        "inflation_col": "inflation",
+        "growth_threshold": "median",
+        "inflation_threshold": "median",
+        "weights": {"Stocks": 1.0},
+    }
+
+    first = pipeline._cached_walk_forward_validation(returns, macro, **kwargs)
+    first.warnings.append("caller mutation")
+    second = pipeline._cached_walk_forward_validation(
+        returns.copy(), macro.copy(), **kwargs
+    )
+
+    assert calls == 1
+    assert "caller mutation" not in second.warnings
+
+    changed_returns = returns.copy()
+    changed_returns.iloc[0, 0] += 0.001
+    pipeline._cached_walk_forward_validation(changed_returns, macro, **kwargs)
+    pipeline._cached_walk_forward_validation(
+        returns,
+        macro,
+        **{**kwargs, "growth_threshold": 0.0},
+    )
+
+    assert calls == 3
+    pipeline._clear_walk_forward_cache()
 
 
 def test_pipeline_reports_when_walk_forward_validation_is_unavailable():

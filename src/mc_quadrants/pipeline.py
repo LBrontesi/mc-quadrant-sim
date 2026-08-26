@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import hashlib
+import threading
 from collections.abc import Mapping
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
@@ -56,6 +59,9 @@ class SimulationRun:
 
 
 _CHUNK_WORKER_STATE: dict[str, Any] = {}
+_WALK_FORWARD_CACHE_MAX_ENTRIES = 8
+_WALK_FORWARD_CACHE: dict[bytes, WalkForwardResult] = {}
+_WALK_FORWARD_CACHE_LOCK = threading.Lock()
 _ADDITIVE_WEALTH_ATTRS = (
     "margin_calls",
     "capital_gains_tax_total",
@@ -83,6 +89,61 @@ _PATH_WEALTH_ATTRS = (
     "paired_withdrawal_funded",
     "paired_guardrail_events",
 )
+
+
+def _frame_cache_digest(frame: pd.DataFrame) -> bytes:
+    """Return a stable in-process digest for one validation input frame."""
+
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(
+        pd.util.hash_pandas_object(frame, index=True, categorize=True)
+        .to_numpy(dtype=np.uint64, copy=False)
+        .tobytes()
+    )
+    digest.update(repr(tuple(str(column) for column in frame.columns)).encode())
+    digest.update(repr(tuple(str(dtype) for dtype in frame.dtypes)).encode())
+    return digest.digest()
+
+
+def _cached_walk_forward_validation(
+    returns: pd.DataFrame,
+    macro: pd.DataFrame,
+    **kwargs: Any,
+) -> WalkForwardResult:
+    """Cache deterministic walk-forward refits across simulation-only changes."""
+
+    normalized_kwargs = tuple(
+        sorted(
+            (
+                key,
+                tuple(sorted(value.items())) if isinstance(value, Mapping) else value,
+            )
+            for key, value in kwargs.items()
+        )
+    )
+    digest = hashlib.blake2b(digest_size=20)
+    digest.update(_frame_cache_digest(returns))
+    digest.update(_frame_cache_digest(macro))
+    digest.update(repr(normalized_kwargs).encode())
+    key = digest.digest()
+    with _WALK_FORWARD_CACHE_LOCK:
+        cached = _WALK_FORWARD_CACHE.get(key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
+    result = walk_forward_validation(returns, macro, **kwargs)
+    with _WALK_FORWARD_CACHE_LOCK:
+        _WALK_FORWARD_CACHE[key] = copy.deepcopy(result)
+        while len(_WALK_FORWARD_CACHE) > _WALK_FORWARD_CACHE_MAX_ENTRIES:
+            _WALK_FORWARD_CACHE.pop(next(iter(_WALK_FORWARD_CACHE)))
+    return result
+
+
+def _clear_walk_forward_cache() -> None:
+    """Clear cached validation results (used by tests and long-lived hosts)."""
+
+    with _WALK_FORWARD_CACHE_LOCK:
+        _WALK_FORWARD_CACHE.clear()
 
 
 def _alternative_decumulation(plan: DecumulationPlan) -> DecumulationPlan | None:
@@ -1479,7 +1540,7 @@ def run_scenario(
     walk_forward_result = None
     if walk_forward and model_kind == "quadrant":
         try:
-            walk_forward_result = walk_forward_validation(
+            walk_forward_result = _cached_walk_forward_validation(
                 scenario_returns,
                 macro,
                 growth_col=growth_col,

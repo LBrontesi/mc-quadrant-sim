@@ -26,7 +26,10 @@ def benchmark(
     paths: int,
     workers: int,
     compare_python: bool = False,
+    repeats: int = 3,
 ) -> dict[str, object]:
+    if repeats < 1:
+        raise ValueError("repeats must be at least 1")
     assets = ["Equity", "Bonds", "Gold", "Commodities"]
     states = [
         "high_growth_low_inflation",
@@ -145,7 +148,7 @@ def benchmark(
     baseline_result = None
     baseline = None
     wrapper = None
-    for _ in range(3):
+    for _ in range(repeats):
         baseline_started = time.perf_counter()
         baseline_result, baseline = run_fused(False)
         baseline_runs.append(time.perf_counter() - baseline_started)
@@ -204,6 +207,8 @@ def benchmark(
         out=np.ones(advanced_paths, dtype=float),
         where=requested.sum(axis=0) > 0,
     )
+    terminal_values = baseline.iloc[-1].to_numpy(dtype=float)
+    terminal_quantiles = np.quantile(terminal_values, (0.05, 0.50, 0.95))
     report: dict[str, object] = {
         "native_available": native_available(),
         "native_backend_used": bool(baseline.attrs.get("native_backend", False)),
@@ -212,6 +217,7 @@ def benchmark(
         "assets": len(assets),
         "quadrants": len(states),
         "workers": workers,
+        "repeats": repeats,
         "fused_total_seconds": round(baseline_seconds, 4),
         "return_cube_shape": list(baseline_result.returns.shape),
         "wrapper_fused_seconds": round(wrapper_seconds, 4),
@@ -225,7 +231,11 @@ def benchmark(
         "advanced_guardrail_event_rate": float(
             np.mean(np.asarray(advanced.attrs["guardrail_events"]) != 0)
         ),
-        "terminal_median": float(baseline.iloc[-1].median()),
+        "terminal_p05": float(terminal_quantiles[0]),
+        "terminal_median": float(terminal_quantiles[1]),
+        "terminal_p95": float(terminal_quantiles[2]),
+        "terminal_mean": float(np.mean(terminal_values)),
+        "terminal_std": float(np.std(terminal_values)),
         "wrapper_terminal_median": float(np.median(wrapper.attrs["wrapper_terminal_values"])),
     }
     if compare_python:
@@ -270,11 +280,18 @@ def main() -> None:
     parser.add_argument("--periods", type=int, default=360)
     parser.add_argument("--paths", type=int, default=100_000)
     parser.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 1))
+    parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--compare-python", action="store_true")
     args = parser.parse_args()
     print(
         json.dumps(
-            benchmark(args.periods, args.paths, args.workers, args.compare_python),
+            benchmark(
+                args.periods,
+                args.paths,
+                args.workers,
+                args.compare_python,
+                args.repeats,
+            ),
             indent=2,
         )
     )

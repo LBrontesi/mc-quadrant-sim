@@ -122,20 +122,59 @@ double zolotarev_a(double value, double alpha, double b_ratio) {
 // tilted unilateral stable law S_{alpha, lambda}. Its Laplace transform is
 // exp(lambda^alpha - (lambda + s)^alpha). The implementation follows the
 // full algorithm in ACM TOMACS 19(4), 2009, using sinc ratios near zero.
-double exponentially_tilted_stable(RandomStream &random, double alpha, double lambda) {
+struct TiltedStableParameters {
+    double alpha;
+    double lambda;
+    double complement;
+    double lambda_alpha;
+    double gamma_parameter;
+    double sqrt_gamma;
+    double xi;
+    double psi;
+    double w1;
+    double w2;
+    double w3;
+    double b;
+};
+
+TiltedStableParameters make_tilted_stable_parameters(double alpha, double lambda) {
     constexpr double pi = 3.141592653589793238462643383279502884;
     constexpr double sqrt_pi_over_two = 1.253314137315500251207882642406;
-    const double complement = 1.0 - alpha;
-    const double lambda_alpha = std::pow(lambda, alpha);
-    const double gamma_parameter = lambda_alpha * alpha * complement;
-    const double sqrt_gamma = std::sqrt(gamma_parameter);
-    const double xi = (2.0 + sqrt_pi_over_two) * std::sqrt(2.0 * gamma_parameter + 1.0) / pi;
-    const double psi = std::exp(-gamma_parameter * pi * pi / 8.0)
-        * (2.0 + sqrt_pi_over_two) * std::sqrt(gamma_parameter * pi) / pi;
-    const double w1 = xi * std::sqrt(pi / (2.0 * gamma_parameter));
-    const double w2 = 2.0 * psi * std::sqrt(pi);
-    const double w3 = xi * pi;
-    const double b = complement / alpha;
+    TiltedStableParameters parameters{};
+    parameters.alpha = alpha;
+    parameters.lambda = lambda;
+    parameters.complement = 1.0 - alpha;
+    parameters.lambda_alpha = std::pow(lambda, alpha);
+    parameters.gamma_parameter = parameters.lambda_alpha * alpha * parameters.complement;
+    parameters.sqrt_gamma = std::sqrt(parameters.gamma_parameter);
+    parameters.xi = (2.0 + sqrt_pi_over_two)
+        * std::sqrt(2.0 * parameters.gamma_parameter + 1.0) / pi;
+    parameters.psi = std::exp(-parameters.gamma_parameter * pi * pi / 8.0)
+        * (2.0 + sqrt_pi_over_two) * std::sqrt(parameters.gamma_parameter * pi) / pi;
+    parameters.w1 = parameters.xi * std::sqrt(pi / (2.0 * parameters.gamma_parameter));
+    parameters.w2 = 2.0 * parameters.psi * std::sqrt(pi);
+    parameters.w3 = parameters.xi * pi;
+    parameters.b = parameters.complement / alpha;
+    return parameters;
+}
+
+double exponentially_tilted_stable(
+    RandomStream &random,
+    const TiltedStableParameters &parameters
+) {
+    constexpr double pi = 3.141592653589793238462643383279502884;
+    constexpr double sqrt_pi_over_two = 1.253314137315500251207882642406;
+    const double alpha = parameters.alpha;
+    const double lambda = parameters.lambda;
+    const double lambda_alpha = parameters.lambda_alpha;
+    const double gamma_parameter = parameters.gamma_parameter;
+    const double sqrt_gamma = parameters.sqrt_gamma;
+    const double xi = parameters.xi;
+    const double psi = parameters.psi;
+    const double w1 = parameters.w1;
+    const double w2 = parameters.w2;
+    const double w3 = parameters.w3;
+    const double b = parameters.b;
 
     while (true) {
         double u = 0.0;
@@ -220,18 +259,62 @@ double exponentially_tilted_stable(RandomStream &random, double alpha, double la
     }
 }
 
-double nts_subordinator(RandomStream &random, double tail_index, double tempering) {
+double exponentially_tilted_stable_simple_rejection(
+    RandomStream &random,
+    const TiltedStableParameters &parameters
+) {
+    constexpr double pi = 3.141592653589793238462643383279502884;
+    const double alpha = parameters.alpha;
+    const double complement = parameters.complement;
+    const double stable_power = complement / alpha;
+    while (true) {
+        const double angle = pi * random.uniform();
+        if (!(angle > 0.0 && angle < pi)) continue;
+        const double b_ratio = zolotarev_b_ratio(angle, alpha);
+        const double a_value = zolotarev_a(angle, alpha, b_ratio);
+        const double exponential = random.exponential();
+        const double stable = std::pow(
+            a_value / std::max(exponential, std::numeric_limits<double>::min()),
+            stable_power
+        );
+        if (!std::isfinite(stable) || stable <= 0.0) continue;
+        const double log_uniform = std::log(
+            std::max(random.uniform(), std::numeric_limits<double>::min())
+        );
+        if (log_uniform <= -parameters.lambda * stable) return stable;
+    }
+}
+
+struct NTSSubordinatorParameters {
+    double scale;
+    TiltedStableParameters tilted;
+};
+
+// Kanter stable rejection wins comfortably in this range; Devroye's uniformly
+// bounded double-rejection sampler remains the fallback for stronger tilting.
+constexpr double kSimpleRejectionMaxLambdaAlpha = 1.5;
+
+NTSSubordinatorParameters make_nts_subordinator_parameters(
+    double tail_index,
+    double tempering
+) {
     const double alpha = tail_index / 2.0;
     const double log_scale = (
         (1.0 - alpha) * std::log(tempering) - std::log(alpha)
     ) / alpha;
     const double scale = std::exp(log_scale);
-    const double tilted = exponentially_tilted_stable(
-        random,
-        alpha,
-        tempering * scale
-    );
-    return scale * tilted;
+    return {scale, make_tilted_stable_parameters(alpha, tempering * scale)};
+}
+
+double nts_subordinator(
+    RandomStream &random,
+    const NTSSubordinatorParameters &parameters
+) {
+    const double tilted = parameters.tilted.lambda_alpha
+            <= kSimpleRejectionMaxLambdaAlpha
+        ? exponentially_tilted_stable_simple_rejection(random, parameters.tilted)
+        : exponentially_tilted_stable(random, parameters.tilted);
+    return parameters.scale * tilted;
 }
 
 template <typename Function>
@@ -263,8 +346,12 @@ extern "C" int mc_sample_mnts_subordinators(
     if (samples <= 0 || !(tail_index > 0.0 && tail_index < 2.0) ||
         !(tempering > 0.0) || !output) return 1;
     RandomStream random(seed, 0);
+    const NTSSubordinatorParameters parameters = make_nts_subordinator_parameters(
+        tail_index,
+        tempering
+    );
     for (int index = 0; index < samples; ++index) {
-        output[index] = nts_subordinator(random, tail_index, tempering);
+        output[index] = nts_subordinator(random, parameters);
         if (!std::isfinite(output[index]) || output[index] <= 0.0) return 2;
     }
     return 0;
@@ -281,8 +368,9 @@ extern "C" int mc_sample_exponentially_tilted_stable(
         return 1;
     }
     RandomStream random(seed, 0);
+    const TiltedStableParameters parameters = make_tilted_stable_parameters(alpha, lambda);
     for (int index = 0; index < samples; ++index) {
-        output[index] = exponentially_tilted_stable(random, alpha, lambda);
+        output[index] = exponentially_tilted_stable(random, parameters);
         if (!std::isfinite(output[index]) || output[index] <= 0.0) return 2;
     }
     return 0;
@@ -319,25 +407,58 @@ extern "C" int mc_simulate_parametric(
     if (periods <= 0 || paths <= 0 || assets <= 0 || states <= 0 || !regimes || !means ||
         !gaussian_correlation_cholesky || !gaussian_correlations || !volatilities ||
         !tail_indexes || !temperings || !skewness || !gaussian_scales || !output) return 1;
+    thread_local std::vector<NTSSubordinatorParameters> state_subordinators;
+    thread_local std::vector<double> cached_tail_indexes;
+    thread_local std::vector<double> cached_temperings;
+    bool refresh_subordinators = state_subordinators.size()
+        != static_cast<std::size_t>(states);
     for (int state = 0; state < states; ++state) {
         if (!(tail_indexes[state] > 0.0 && tail_indexes[state] < 2.0) ||
             !(temperings[state] > 0.0)) return 2;
+        refresh_subordinators = refresh_subordinators
+            || cached_tail_indexes[state] != tail_indexes[state]
+            || cached_temperings[state] != temperings[state];
         for (int asset = 0; asset < assets; ++asset) {
             const std::size_t index = static_cast<std::size_t>(state) * assets + asset;
             if (!std::isfinite(skewness[index]) || !(gaussian_scales[index] > 0.0)) return 3;
         }
     }
+    if (refresh_subordinators) {
+        state_subordinators.clear();
+        state_subordinators.reserve(static_cast<std::size_t>(states));
+        cached_tail_indexes.assign(tail_indexes, tail_indexes + states);
+        cached_temperings.assign(temperings, temperings + states);
+        for (int state = 0; state < states; ++state) {
+            state_subordinators.push_back(make_nts_subordinator_parameters(
+                tail_indexes[state],
+                temperings[state]
+            ));
+        }
+    }
+    // Capture the caller thread's read-only storage explicitly: referring to a
+    // thread_local vector from worker threads would select each worker's empty
+    // instance instead.
+    const NTSSubordinatorParameters *subordinator_parameters =
+        state_subordinators.data();
 
     parallel_paths(paths, requested_threads, [&](int begin, int end) {
-    for (int path = begin; path < end; ++path) {
-        RandomStream random(seed, static_cast<std::uint64_t>(path));
-        std::vector<double> q(assets * assets, 0.0);
-        std::vector<double> factor(assets * assets, 0.0);
-        std::vector<double> previous(assets, 0.0);
-        std::vector<double> independent(assets, 0.0);
-        std::vector<double> standardized(assets, 0.0);
-        std::vector<double> conditional_variance(assets, 0.0);
-        int previous_state = -1;
+        thread_local std::vector<double> q;
+        thread_local std::vector<double> factor;
+        thread_local std::vector<double> previous;
+        thread_local std::vector<double> independent;
+        thread_local std::vector<double> standardized;
+        thread_local std::vector<double> conditional_variance;
+        q.resize(static_cast<std::size_t>(assets) * assets);
+        factor.resize(static_cast<std::size_t>(assets) * assets);
+        previous.resize(static_cast<std::size_t>(assets));
+        independent.resize(static_cast<std::size_t>(assets));
+        standardized.resize(static_cast<std::size_t>(assets));
+        conditional_variance.resize(static_cast<std::size_t>(assets));
+        for (int path = begin; path < end; ++path) {
+            RandomStream random(seed, static_cast<std::uint64_t>(path));
+            std::fill(previous.begin(), previous.end(), 0.0);
+            std::fill(conditional_variance.begin(), conditional_variance.end(), 0.0);
+            int previous_state = -1;
 
         for (int period = 0; period < periods; ++period) {
             const std::size_t path_offset = static_cast<std::size_t>(period) * paths + path;
@@ -393,8 +514,7 @@ extern "C" int mc_simulate_parametric(
 
             const double subordinator = nts_subordinator(
                 random,
-                tail_indexes[state],
-                temperings[state]
+                subordinator_parameters[state]
             );
             const double root_subordinator = std::sqrt(subordinator);
             for (int asset = 0; asset < assets; ++asset) {
@@ -430,7 +550,7 @@ extern "C" int mc_simulate_parametric(
             previous = standardized;
             previous_state = state;
         }
-    }
+        }
     });
     return 0;
 }
@@ -503,20 +623,21 @@ double advance_year(std::vector<double> &losses) {
     return expired;
 }
 
-std::vector<double> allocate_contribution(
+void allocate_contribution(
     const std::vector<double> &holdings,
     const double *weights,
     double contribution,
-    int mode
+    int mode,
+    std::vector<double> &allocation
 ) {
     const int assets = static_cast<int>(holdings.size());
-    std::vector<double> allocation(static_cast<std::size_t>(assets), 0.0);
-    if (contribution <= 0.0) return allocation;
+    std::fill(allocation.begin(), allocation.end(), 0.0);
+    if (contribution <= 0.0) return;
     if (mode == 0) {
         for (int asset = 0; asset < assets; ++asset) {
             allocation[asset] = contribution * weights[asset];
         }
-        return allocation;
+        return;
     }
     const double target_value = sum_values(holdings) + contribution;
     double deficit_total = 0.0;
@@ -532,7 +653,6 @@ std::vector<double> allocate_contribution(
     for (int asset = 0; asset < assets; ++asset) {
         allocation[asset] += residual * weights[asset];
     }
-    return allocation;
 }
 
 void deduct_charge(
@@ -608,13 +728,12 @@ SaleResult settle_sales(
     double non_offsettable = 0.0;
     double offsettable_gains = 0.0;
     double new_losses = 0.0;
-    std::vector<double> basis_sold(holdings.size(), 0.0);
     for (std::size_t asset = 0; asset < holdings.size(); ++asset) {
-        basis_sold[asset] = holdings[asset] > 0.0
+        const double basis_sold = holdings[asset] > 0.0
             ? basis[asset] * sales[asset] / holdings[asset]
             : 0.0;
         const double realized = sales[asset] * (1.0 - transaction_cost_rate)
-            - basis_sold[asset];
+            - basis_sold;
         const double taxable = realized * taxable_fraction[asset];
         result.gains += std::max(realized, 0.0);
         result.losses += std::max(-realized, 0.0);
@@ -632,7 +751,10 @@ SaleResult settle_sales(
     ) * kItalianTaxRate;
     if (apply_sales) {
         for (std::size_t asset = 0; asset < holdings.size(); ++asset) {
-            basis[asset] = std::max(basis[asset] - basis_sold[asset], 0.0);
+            const double basis_sold = holdings[asset] > 0.0
+                ? basis[asset] * sales[asset] / holdings[asset]
+                : 0.0;
+            basis[asset] = std::max(basis[asset] - basis_sold, 0.0);
             holdings[asset] = std::max(holdings[asset] - sales[asset], 0.0);
         }
     }
@@ -646,7 +768,8 @@ SaleResult raise_cash(
     std::vector<double> &basis,
     const double *taxable_fraction,
     const std::uint8_t *offsettable,
-    std::vector<double> &loss_buckets
+    std::vector<double> &loss_buckets,
+    std::vector<double> &sales
 ) {
     SaleResult total;
     double cash_required = std::max(requested, 0.0);
@@ -655,7 +778,6 @@ SaleResult raise_cash(
         const double value = sum_values(holdings);
         const double gross_sale = std::min(cash_required, value);
         if (gross_sale <= 1e-10 || value <= 0.0) break;
-        std::vector<double> sales(holdings.size(), 0.0);
         for (std::size_t asset = 0; asset < holdings.size(); ++asset) {
             sales[asset] = holdings[asset] * gross_sale / value;
         }
@@ -692,13 +814,15 @@ RebalanceResult rebalance_taxed(
     const std::uint8_t *offsettable,
     const double *ftt_rates,
     std::vector<double> &loss_buckets,
-    bool immediate
+    bool immediate,
+    std::vector<double> &sales,
+    std::vector<double> &purchases
 ) {
     const int assets = static_cast<int>(holdings.size());
     const double value = sum_values(holdings);
     double post_cost_value = value;
-    std::vector<double> sales(static_cast<std::size_t>(assets), 0.0);
-    std::vector<double> purchases(static_cast<std::size_t>(assets), 0.0);
+    std::fill(sales.begin(), sales.end(), 0.0);
+    std::fill(purchases.begin(), purchases.end(), 0.0);
     for (int iteration = 0; iteration < 8; ++iteration) {
         double turnover = 0.0;
         double ftt = 0.0;
@@ -882,16 +1006,33 @@ extern "C" int mc_simulate_italian_portfolios(
     std::fill(year_stats, year_stats + static_cast<std::size_t>(year_count) * kYearStatCount, 0.0);
     std::mutex year_mutex;
     parallel_paths(paths, requested_threads, [&](int begin, int end) {
-        std::vector<double> local_year_stats(
+        thread_local std::vector<double> local_year_stats;
+        thread_local std::vector<double> gross;
+        thread_local std::vector<double> holdings;
+        thread_local std::vector<double> basis;
+        thread_local std::vector<double> wrapper;
+        thread_local std::vector<double> losses;
+        thread_local std::vector<double> rebalance_sales;
+        thread_local std::vector<double> rebalance_purchases;
+        thread_local std::vector<double> contribution_allocation;
+        local_year_stats.assign(
             static_cast<std::size_t>(year_count) * kYearStatCount,
             0.0
         );
+        gross.resize(static_cast<std::size_t>(assets));
+        holdings.resize(static_cast<std::size_t>(assets));
+        basis.resize(static_cast<std::size_t>(assets));
+        wrapper.resize(static_cast<std::size_t>(assets));
+        losses.resize(kLossBuckets);
+        rebalance_sales.resize(static_cast<std::size_t>(assets));
+        rebalance_purchases.resize(static_cast<std::size_t>(assets));
+        contribution_allocation.resize(static_cast<std::size_t>(assets));
         for (int path = begin; path < end; ++path) {
-            std::vector<double> gross(static_cast<std::size_t>(assets), 0.0);
-            std::vector<double> holdings(static_cast<std::size_t>(assets), 0.0);
-            std::vector<double> basis(static_cast<std::size_t>(assets), 0.0);
-            std::vector<double> wrapper(static_cast<std::size_t>(assets), 0.0);
-            std::vector<double> losses(kLossBuckets, 0.0);
+            std::fill(gross.begin(), gross.end(), 0.0);
+            std::fill(holdings.begin(), holdings.end(), 0.0);
+            std::fill(basis.begin(), basis.end(), 0.0);
+            std::fill(wrapper.begin(), wrapper.end(), 0.0);
+            std::fill(losses.begin(), losses.end(), 0.0);
             for (int asset = 0; asset < assets; ++asset) {
                 gross[asset] = initial_value * weights[asset];
                 holdings[asset] = gross[asset];
@@ -917,8 +1058,8 @@ extern "C" int mc_simulate_italian_portfolios(
             double wrapper_basis = initial_value;
             double wrapper_pending_tax = 0.0;
             double wrapper_previous_value = initial_value;
-            double wrapper_log_sum = 0.0;
-            int wrapper_log_count = 0;
+            double wrapper_return_product = 1.0;
+            int wrapper_return_count = 0;
             const bool managed = tax_regime == 2;
             const bool declarative = tax_regime == 1;
             const double wealth_tax_rate = annual_wealth_tax / 12.0;
@@ -1059,24 +1200,29 @@ extern "C" int mc_simulate_italian_portfolios(
                 }
 
                 if (contribution > 0.0) {
-                    const std::vector<double> gross_allocation = allocate_contribution(
+                    allocate_contribution(
                         gross,
                         weights,
                         contribution,
-                        contribution_mode
+                        contribution_mode,
+                        contribution_allocation
                     );
-                    const std::vector<double> allocation = allocate_contribution(
+                    for (int asset = 0; asset < assets; ++asset) {
+                        gross[asset] += contribution_allocation[asset];
+                    }
+                    allocate_contribution(
                         holdings,
                         weights,
                         contribution,
-                        contribution_mode
+                        contribution_mode,
+                        contribution_allocation
                     );
                     for (int asset = 0; asset < assets; ++asset) {
-                        gross[asset] += gross_allocation[asset];
-                        const double purchase = allocation[asset] / (1.0 + ftt_rates[asset]);
+                        const double purchase = contribution_allocation[asset]
+                            / (1.0 + ftt_rates[asset]);
                         holdings[asset] += purchase;
-                        basis[asset] += allocation[asset];
-                        const double ftt = allocation[asset] - purchase;
+                        basis[asset] += contribution_allocation[asset];
+                        const double ftt = contribution_allocation[asset] - purchase;
                         ftt_total += ftt;
                         add_year_stat(
                             local_year_stats,
@@ -1088,14 +1234,16 @@ extern "C" int mc_simulate_italian_portfolios(
                     year_contributions += contribution;
 
                     if (wrapper_benchmark) {
-                        const std::vector<double> wrapper_allocation = allocate_contribution(
+                        allocate_contribution(
                             wrapper,
                             weights,
                             contribution,
-                            contribution_mode
+                            contribution_mode,
+                            contribution_allocation
                         );
                         for (int asset = 0; asset < assets; ++asset) {
-                            wrapper[asset] += wrapper_allocation[asset] / (1.0 + ftt_rates[asset]);
+                            wrapper[asset] += contribution_allocation[asset]
+                                / (1.0 + ftt_rates[asset]);
                         }
                         wrapper_basis += contribution;
                     }
@@ -1154,7 +1302,8 @@ extern "C" int mc_simulate_italian_portfolios(
                             basis,
                             taxable_fraction,
                             offsettable,
-                            losses
+                            losses,
+                            rebalance_sales
                         );
                         immediate_withdrawal_tax = declarative ? 0.0 : sale.tax;
                         capital_tax += sale.tax;
@@ -1285,7 +1434,9 @@ extern "C" int mc_simulate_italian_portfolios(
                             offsettable,
                             ftt_rates,
                             losses,
-                            !declarative
+                            !declarative,
+                            rebalance_sales,
+                            rebalance_purchases
                         );
                         capital_tax += rebalanced.sale.tax;
                         if (declarative) pending_tax += rebalanced.sale.tax;
@@ -1351,8 +1502,8 @@ extern "C" int mc_simulate_italian_portfolios(
                     const double denominator = wrapper_previous_value + contribution;
                     const double numerator = wrapper_value + wrapper_funded_withdrawal;
                     if (denominator > 0.0 && numerator > 0.0) {
-                        wrapper_log_sum += std::log(numerator / denominator);
-                        ++wrapper_log_count;
+                        wrapper_return_product *= numerator / denominator;
+                        ++wrapper_return_count;
                     }
                     wrapper_previous_value = wrapper_value;
                 }
@@ -1363,9 +1514,9 @@ extern "C" int mc_simulate_italian_portfolios(
                 settle_managed_year(final_slot);
                 diy_wealth[static_cast<std::size_t>(periods - 1) * paths + path] = sum_values(holdings);
             } else if (terminal_liquidation) {
-                const std::vector<double> sales = holdings;
+                rebalance_sales = holdings;
                 const SaleResult event = settle_sales(
-                    sales,
+                    rebalance_sales,
                     holdings,
                     basis,
                     taxable_fraction,
@@ -1406,11 +1557,14 @@ extern "C" int mc_simulate_italian_portfolios(
                     0.0
                 );
                 if (before_tax > 0.0 && terminal > 0.0) {
-                    wrapper_log_sum += std::log(terminal / before_tax);
+                    wrapper_return_product *= terminal / before_tax;
                 }
                 wrapper_terminal[path] = terminal;
-                wrapper_annualized[path] = wrapper_log_count > 0
-                    ? std::exp(wrapper_log_sum / wrapper_log_count * 12.0) - 1.0
+                wrapper_annualized[path] = wrapper_return_count > 0
+                    ? std::pow(
+                        wrapper_return_product,
+                        12.0 / wrapper_return_count
+                    ) - 1.0
                     : 0.0;
             }
 
@@ -1432,9 +1586,13 @@ extern "C" int mc_simulate_italian_portfolios(
             tax_stats[static_cast<std::size_t>(kTransactionCosts) * paths + path] = transaction_cost_total;
             gross_transaction_costs[path] = gross_cost_total;
         }
-        std::lock_guard<std::mutex> lock(year_mutex);
-        for (std::size_t index = 0; index < local_year_stats.size(); ++index) {
-            year_stats[index] += local_year_stats[index];
+        if (paths == 1) {
+            std::copy(local_year_stats.begin(), local_year_stats.end(), year_stats);
+        } else {
+            std::lock_guard<std::mutex> lock(year_mutex);
+            for (std::size_t index = 0; index < local_year_stats.size(); ++index) {
+                year_stats[index] += local_year_stats[index];
+            }
         }
     });
     return 0;
@@ -1530,15 +1688,29 @@ extern "C" int mc_simulate_parametric_italian_portfolios(
             static_cast<std::size_t>(tax->year_count) * kYearStatCount,
             0.0
         );
+        std::vector<std::uint8_t> path_regimes(static_cast<std::size_t>(periods));
+        std::vector<double> path_macro(
+            static_cast<std::size_t>(periods) * parametric->macro_dimensions
+        );
+        std::vector<double> path_returns(
+            static_cast<std::size_t>(periods) * assets,
+            0.0
+        );
+        std::vector<double> path_growth(path_returns.size(), 0.0);
+        std::vector<double> path_cost_rates(
+            tax->transaction_cost_rate_paths ? static_cast<std::size_t>(periods) : 0U
+        );
+        std::vector<double> path_gross(static_cast<std::size_t>(periods), 0.0);
+        std::vector<double> path_diy(static_cast<std::size_t>(periods), 0.0);
+        std::vector<double> path_wrapper_terminal(tax->wrapper_benchmark ? 1U : 0U);
+        std::vector<double> path_wrapper_annualized(tax->wrapper_benchmark ? 1U : 0U);
+        std::vector<double> path_tax_stats(kTaxStatCount, 0.0);
+        std::vector<double> path_year_stats(
+            static_cast<std::size_t>(tax->year_count) * kYearStatCount,
+            0.0
+        );
         for (int path = begin; path < end; ++path) {
             if (failure.load(std::memory_order_relaxed) != 0) continue;
-            std::vector<std::uint8_t> path_regimes(static_cast<std::size_t>(periods));
-            std::vector<double> path_macro;
-            if (parametric->macro_dimensions > 0) {
-                path_macro.resize(
-                    static_cast<std::size_t>(periods) * parametric->macro_dimensions
-                );
-            }
             for (int period = 0; period < periods; ++period) {
                 const std::size_t source = static_cast<std::size_t>(period) * paths + path;
                 path_regimes[period] = parametric->regimes[source];
@@ -1551,10 +1723,6 @@ extern "C" int mc_simulate_parametric_italian_portfolios(
                 }
             }
 
-            std::vector<double> path_returns(
-                static_cast<std::size_t>(periods) * assets,
-                0.0
-            );
             constexpr std::uint64_t stream_constant = 0x9e3779b97f4a7c15ULL;
             const std::uint64_t adjusted_seed = parametric->seed
                 ^ (stream_constant * (static_cast<std::uint64_t>(path) + 1ULL))
@@ -1592,7 +1760,6 @@ extern "C" int mc_simulate_parametric_italian_portfolios(
                 continue;
             }
 
-            std::vector<double> path_growth(path_returns.size(), 0.0);
             bool valid_growth = true;
             for (int period = 0; period < periods; ++period) {
                 for (int asset = 0; asset < assets; ++asset) {
@@ -1610,25 +1777,14 @@ extern "C" int mc_simulate_parametric_italian_portfolios(
                 continue;
             }
 
-            std::vector<double> path_cost_rates;
             if (tax->transaction_cost_rate_paths) {
-                path_cost_rates.resize(static_cast<std::size_t>(periods));
                 for (int period = 0; period < periods; ++period) {
                     path_cost_rates[period] = tax->transaction_cost_rate_paths[
                         static_cast<std::size_t>(period) * paths + path
                     ];
                 }
             }
-            std::vector<double> path_gross(static_cast<std::size_t>(periods), 0.0);
-            std::vector<double> path_diy(static_cast<std::size_t>(periods), 0.0);
-            std::vector<double> path_wrapper_terminal(tax->wrapper_benchmark ? 1U : 0U);
-            std::vector<double> path_wrapper_annualized(tax->wrapper_benchmark ? 1U : 0U);
-            std::vector<double> path_tax_stats(kTaxStatCount, 0.0);
             double path_gross_cost = 0.0;
-            std::vector<double> path_year_stats(
-                static_cast<std::size_t>(tax->year_count) * kYearStatCount,
-                0.0
-            );
             const int ledger_status = mc_simulate_italian_portfolios(
                 periods,
                 1,

@@ -11,6 +11,7 @@ import io
 import os
 import re
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import date
 from typing import Any
@@ -1027,6 +1028,21 @@ def _wealth_percentiles(wealth: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(quantiles.T, columns=[0.05, 0.50, 0.95])
 
 
+def _wealth_percentile_pair(
+    wealth: pd.DataFrame,
+    gross_wealth: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Compute independent net and gross bands concurrently."""
+
+    if gross_wealth is wealth:
+        percentiles = _wealth_percentiles(wealth)
+        return percentiles, percentiles
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        net_future = executor.submit(_wealth_percentiles, wealth)
+        gross_future = executor.submit(_wealth_percentiles, gross_wealth)
+        return net_future.result(), gross_future.result()
+
+
 def _median_period_returns(wealth: pd.DataFrame, payload: Mapping[str, Any]) -> list[float]:
     """Calculate cross-sectional median time-weighted return for each period."""
 
@@ -1597,8 +1613,11 @@ def _regime_counts(result: Any) -> dict[str, int]:
     return {str(state): int(count) for state, count in zip(values, counts)}
 
 
-def _simulated_regime_summary(result: Any) -> pd.DataFrame:
-    counts = _regime_counts(result)
+def _simulated_regime_summary(
+    result: Any,
+    counts: Mapping[str, int] | None = None,
+) -> pd.DataFrame:
+    counts = dict(counts) if counts is not None else _regime_counts(result)
     total = max(sum(counts.values()), 1)
     return pd.DataFrame(
         {
@@ -1609,12 +1628,16 @@ def _simulated_regime_summary(result: Any) -> pd.DataFrame:
     )
 
 
-def _persistence_response(model: Any, result: Any) -> dict[str, Any]:
+def _persistence_response(
+    model: Any,
+    result: Any,
+    counts: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
     """Summarize calibrated duration hazards and simulated switching."""
 
     durations = model.metadata.get("sojourn_durations", {})
     expected = model.metadata.get("expected_duration_months", {})
-    counts = _regime_counts(result)
+    counts = dict(counts) if counts is not None else _regime_counts(result)
     total = max(sum(counts.values()), 1)
     states: list[dict[str, Any]] = []
     expected_switch_rate = 0.0
@@ -1968,10 +1991,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     summary = scenario.summary
     growth_col = scenario.model.metadata.get("growth_col", "growth")
     inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
-    percentiles = _wealth_percentiles(wealth)
-    gross_percentiles = (
-        percentiles if gross_wealth is wealth else _wealth_percentiles(gross_wealth)
-    )
+    percentiles, gross_percentiles = _wealth_percentile_pair(wealth, gross_wealth)
     terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
     drawdown_values = _max_drawdown_paths(
         wealth,
@@ -1979,8 +1999,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     )
     reporting_indices = _reporting_indices(len(terminal_values))
     regime_timelines: dict[str, list[str]] = {}
-    for label, target in (("p05", 0.05), ("median", 0.50), ("p95", 0.95)):
-        target_value = float(np.quantile(terminal_values, target))
+    timeline_quantiles = np.quantile(terminal_values, (0.05, 0.50, 0.95))
+    for label, target_value in zip(
+        ("p05", "median", "p95"),
+        timeline_quantiles,
+        strict=True,
+    ):
         path_index = int(np.argmin(np.abs(terminal_values - target_value)))
         column = result.regimes[:, path_index]
         if result.regimes.dtype.kind in "iu":
@@ -2012,10 +2036,8 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     observations = {
         _state_label(state): int(moments.observations) for state, moments in model.moments.items()
     }
-
-
     diagnostics = scenario.diagnostics.regime_summary.copy()
-    simulated_diagnostics = _simulated_regime_summary(result)
+    simulated_diagnostics = _simulated_regime_summary(result, regime_counts)
     diagnostics = diagnostics.merge(simulated_diagnostics, on="regime", how="left")
     diagnostics["regime"] = diagnostics["regime"].map(_state_label)
 
@@ -2115,7 +2137,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         or analytics_sample["sampled"]
     )
     summary_values.update(path_analytics["decision_metrics"])
-    persistence = _persistence_response(model, result)
+    persistence = _persistence_response(model, result, regime_counts)
     warnings = list(scenario.diagnostics.warnings)
     if analytics_sample["sampled"]:
         warnings.append(
