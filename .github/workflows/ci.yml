@@ -36,6 +36,7 @@ jobs:
       - name: Start web server
         run: |
           uv run python web_app.py > /tmp/mc-quadrant-web.log 2>&1 &
+          echo "$!" > /tmp/mc-quadrant-web.pid
           for attempt in {1..30}; do
             curl -fsS http://127.0.0.1:7860/api/health && exit 0
             sleep 1
@@ -47,6 +48,12 @@ jobs:
       - name: Show server log on failure
         if: failure()
         run: cat /tmp/mc-quadrant-web.log
+      - name: Stop web server
+        if: always()
+        run: |
+          if [ -f /tmp/mc-quadrant-web.pid ]; then
+            kill "$(cat /tmp/mc-quadrant-web.pid)" || true
+          fi
 
   container-smoke:
     runs-on: ubuntu-latest
