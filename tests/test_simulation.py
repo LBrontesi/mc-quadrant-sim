@@ -2,10 +2,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import mc_quadrants.simulation as simulation_module
 from mc_quadrants.calibration import calibrate_quadrant_model
-from mc_quadrants.regimes import Regime
+from mc_quadrants.regimes import REGIME_ORDER, Regime
 from mc_quadrants.simulation import (
     _batched_cholesky,
+    _macro_quadrant_probabilities,
     simulate_portfolio_paths,
     simulate_regime_paths,
     simulate_returns,
@@ -15,7 +17,7 @@ from mc_quadrants.simulation import (
 from mc_quadrants.types import ScenarioModel, SimulationResult
 
 
-def _calibrated_model():
+def _calibrated_model(*, joint_macro: bool = False):
     dates = pd.date_range("2020-01-31", periods=48, freq="ME")
     macro = pd.DataFrame(
         {
@@ -42,6 +44,7 @@ def _calibrated_model():
             Regime.LOW_GROWTH_LOW_INFLATION.value: {("Stocks", "Bonds"): -0.30},
         },
         override_weight=0.50,
+        joint_macro=joint_macro,
     )
 
 
@@ -977,6 +980,103 @@ def test_semi_markov_honors_exact_initial_and_following_sojourn_lengths():
         "state_a",
         "state_a",
     ]
+
+
+def test_default_start_uses_latest_filtered_state_and_age_posterior():
+    model = _persistent_model()
+    model.metadata["duration_hazards"] = {
+        "state_a": np.array([0.0, 0.0, 0.0, 0.0, 1.0]),
+        "state_b": np.array([0.0, 0.0, 0.0, 0.0, 1.0]),
+    }
+    model.metadata["hsmm_latest_state_age_probabilities"] = {
+        "state_a": [0.0, 0.0, 0.0, 0.0, 0.0],
+        "state_b": [0.0, 0.0, 0.0, 1.0, 0.0],
+    }
+
+    markov = simulate_regime_paths(model, periods=1, paths=100, random_seed=3)
+    semi = simulate_regime_paths(
+        model,
+        periods=4,
+        paths=20,
+        random_seed=3,
+        duration_model="semi_markov",
+        min_regime_duration=5,
+    )
+
+    assert np.all(markov[0] == "state_b")
+    assert np.all(semi[:2] == "state_b")
+    assert np.all(semi[2] == "state_a")
+
+
+def test_macro_probabilities_use_joint_hsmm_emission_likelihoods():
+    dynamics = {"thresholds": [0.0, 0.0], "probability_scales": [1.0, 1.0]}
+    means = {
+        REGIME_ORDER[0]: [1.0, -1.0],
+        REGIME_ORDER[1]: [1.0, 1.0],
+        REGIME_ORDER[2]: [-1.0, 1.0],
+        REGIME_ORDER[3]: [-1.0, -1.0],
+    }
+    covariances = {state: np.eye(2) * 0.1 for state in REGIME_ORDER}
+    values = np.array([[1.0, 1.0], [-1.0, -1.0]])
+
+    threshold = _macro_quadrant_probabilities(values, dynamics)
+    joint = _macro_quadrant_probabilities(
+        values,
+        dynamics,
+        states=REGIME_ORDER,
+        emission_means=means,
+        emission_covariances=covariances,
+    )
+
+    assert np.allclose(joint.sum(axis=1), 1.0)
+    assert joint[0, 1] > 0.99
+    assert joint[1, 3] > 0.99
+    assert not np.allclose(joint, threshold)
+
+    manual_log_densities = np.empty_like(joint)
+    for state_index, state in enumerate(REGIME_ORDER):
+        mean = np.asarray(means[state])
+        covariance = np.asarray(covariances[state])
+        centered = values - mean
+        manual_log_densities[:, state_index] = -0.5 * (
+            2 * np.log(2 * np.pi)
+            + np.linalg.slogdet(covariance)[1]
+            + np.einsum(
+                "ni,ij,nj->n",
+                centered,
+                np.linalg.inv(covariance),
+                centered,
+            )
+        )
+    manual = np.exp(manual_log_densities - manual_log_densities.max(axis=1, keepdims=True))
+    manual /= manual.sum(axis=1, keepdims=True)
+    assert np.allclose(joint, manual)
+
+
+def test_joint_macro_scores_only_paths_eligible_to_exit(monkeypatch):
+    model = _calibrated_model(joint_macro=True)
+    model.metadata["duration_hazards"] = {
+        state: np.array([0.0, 0.0, 0.0, 0.0, 1.0]) for state in model.states
+    }
+    scored_path_counts = []
+    original = simulation_module._macro_quadrant_probabilities
+
+    def counted(values, *args, **kwargs):
+        scored_path_counts.append(len(values))
+        return original(values, *args, **kwargs)
+
+    monkeypatch.setattr(simulation_module, "_macro_quadrant_probabilities", counted)
+    simulation_module.simulate_joint_regime_macro_paths(
+        model,
+        periods=6,
+        paths=50,
+        start_state=REGIME_ORDER[0],
+        random_seed=8,
+        duration_model="semi_markov",
+        min_regime_duration=5,
+    )
+
+    assert scored_path_counts == [0, 0, 0, 0, 50, 0]
 
 
 def test_semi_markov_requires_duration_hazard_metadata():

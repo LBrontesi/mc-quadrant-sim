@@ -81,3 +81,48 @@ def test_hsmm_does_not_bridge_disconnected_macro_sequences():
 
     assert result.filtered_probabilities.notna().all().all()
     assert result.viterbi_path.notna().all()
+
+
+def test_hsmm_updates_emissions_without_losing_quadrant_semantics():
+    rng = np.random.default_rng(9)
+    centers = {
+        REGIME_ORDER[0]: np.array([1.5, 1.5]),
+        REGIME_ORDER[1]: np.array([1.5, 3.5]),
+        REGIME_ORDER[2]: np.array([-0.5, 3.5]),
+        REGIME_ORDER[3]: np.array([-0.5, 1.5]),
+    }
+    labels = [state for _ in range(2) for state in REGIME_ORDER for _ in range(18)]
+    values = np.vstack(
+        [centers[state] + rng.multivariate_normal([0.0, 0.0], [[0.5, 0.2], [0.2, 0.5]]) for state in labels]
+    )
+    index = pd.date_range("2000-01-31", periods=len(labels), freq="ME")
+    macro = pd.DataFrame(values, index=index, columns=["growth", "inflation"])
+    truth = pd.Series(labels, index=index, dtype="string")
+    noisy = truth.copy()
+    noisy.iloc[8::11] = noisy.shift(18).iloc[8::11].fillna(REGIME_ORDER[3])
+
+    fixed = fit_quadrant_hsmm(
+        macro,
+        noisy,
+        min_duration=5,
+        max_duration=36,
+        max_iterations=20,
+        update_emissions=False,
+    )
+    updated = fit_quadrant_hsmm(
+        macro,
+        noisy,
+        min_duration=5,
+        max_duration=36,
+        max_iterations=20,
+        update_emissions=True,
+    )
+
+    fixed_accuracy = float((fixed.viterbi_path == truth).mean())
+    updated_accuracy = float((updated.viterbi_path == truth).mean())
+    assert updated_accuracy >= fixed_accuracy
+    means = updated.emission_means
+    assert means[REGIME_ORDER[0]][0] > means[REGIME_ORDER[3]][0]
+    assert means[REGIME_ORDER[1]][0] > means[REGIME_ORDER[2]][0]
+    assert means[REGIME_ORDER[1]][1] > means[REGIME_ORDER[0]][1]
+    assert means[REGIME_ORDER[2]][1] > means[REGIME_ORDER[3]][1]

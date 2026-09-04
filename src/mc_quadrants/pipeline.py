@@ -491,6 +491,7 @@ def _simulate_chunked(
     rate_col: str | None,
     inflation_col: str,
     workers: int = 1,
+    compact_reporting: bool = False,
 ) -> tuple[SimulationResult, pd.DataFrame, pd.DataFrame]:
     """Simulate returns and portfolio wealth, chunking the path dimension.
 
@@ -544,6 +545,9 @@ def _simulate_chunked(
                 "state_transaction_cost_multipliers": dict(
                     state_transaction_cost_multipliers or {}
                 ),
+                "compact_reporting": bool(compact_reporting),
+                "compact_reporting_paths": min(int(paths), 25_000),
+                "annual_reporting_inflation": float(annual_inflation),
             }
         )
 
@@ -599,6 +603,18 @@ def _simulate_chunked(
                     ),
                     "native_backend": True,
                     "native_fused_backend": True,
+                    "compact_reporting": bool(
+                        chunk_wealth.attrs.get("compact_reporting", False)
+                    ),
+                    "total_simulated_paths": int(
+                        chunk_wealth.attrs.get(
+                            "total_simulated_paths",
+                            paths_now,
+                        )
+                    ),
+                    "terminal_values": chunk_wealth.attrs.get(
+                        "gross_terminal_values"
+                    ),
                 }
             )
             return chunk_result, chunk_wealth, gross_wealth
@@ -1373,6 +1389,11 @@ def run_scenario(
                 rate_col=rate_col,
                 inflation_col=inflation_col,
                 workers=workers,
+                compact_reporting=bool(
+                    not parameter_models
+                    and chunk_size is None
+                    and draw_paths > 25_000
+                ),
             )
         if parameter_models and draw_result.returns.shape[1]:
             draw_result = SimulationResult(
@@ -1516,7 +1537,17 @@ def run_scenario(
                 [parameter_summary.reset_index(drop=True), pd.DataFrame(terminal_metrics)],
                 axis=1,
             )
-    terminal_groups = [run_wealth.iloc[-1].to_numpy(dtype=float) for _, run_wealth, _ in simulation_runs]
+    terminal_groups: list[np.ndarray] = []
+    for _, run_wealth, _ in simulation_runs:
+        terminal_values = run_wealth.attrs.get("terminal_values")
+        terminal_groups.append(
+            np.asarray(
+                terminal_values
+                if terminal_values is not None
+                else run_wealth.iloc[-1].to_numpy(dtype=float),
+                dtype=float,
+            )
+        )
     total_terminal_count = max(sum(len(values) for values in terminal_groups), 1)
     group_weights = np.array([len(values) / total_terminal_count for values in terminal_groups], dtype=float)
     group_means = np.array([float(np.mean(values)) for values in terminal_groups], dtype=float)
@@ -1612,6 +1643,27 @@ def run_scenario(
                 inflation_paths=inflation_paths,
             )
         )
+    compact_reporting = bool(wealth.attrs.get("compact_reporting", False))
+    compact_terminal = wealth.attrs.get("terminal_values")
+    compact_gross_terminal = wealth.attrs.get("gross_terminal_values")
+    terminal_deflator = (
+        float((1.0 + annual_inflation) ** (-float(periods) / 12.0))
+        if inflation_paths is None
+        else 1.0
+    )
+    full_active_terminal = (
+        np.asarray(compact_terminal, dtype=float) * terminal_deflator
+        if compact_reporting and compact_terminal is not None
+        else reporting_wealth.iloc[-1].to_numpy(dtype=float)
+    )
+    full_gross_terminal = (
+        np.asarray(compact_gross_terminal, dtype=float) * terminal_deflator
+        if compact_reporting and compact_gross_terminal is not None
+        else gross_reporting_wealth.iloc[-1].to_numpy(dtype=float)
+    )
+    if compact_reporting:
+        reporting_wealth.attrs["full_terminal_values"] = full_active_terminal
+        gross_reporting_wealth.attrs["full_terminal_values"] = full_gross_terminal
     funded_withdrawal_paths = wealth.attrs.get("withdrawal_funded")
     summary = summarize_wealth_risk(
         wealth,
@@ -1630,6 +1682,38 @@ def run_scenario(
         risk_free_paths=risk_free_paths,
     )
     summary = summary.copy()
+    if compact_reporting:
+        tail_probability = 0.05
+        lower_tail = float(np.quantile(full_active_terminal, tail_probability))
+        tail_values = full_active_terminal[full_active_terminal <= lower_tail]
+        terminal_series = pd.Series(full_active_terminal)
+        summary.update(
+            {
+                "mean": float(full_active_terminal.mean()),
+                "std": float(full_active_terminal.std(ddof=0)),
+                "p05": lower_tail,
+                "p50": float(np.quantile(full_active_terminal, 0.50)),
+                "p95": float(np.quantile(full_active_terminal, 0.95)),
+                "probability_of_loss": float(
+                    np.mean(full_active_terminal < float(initial_value))
+                ),
+                "var_95": float(initial_value) - lower_tail,
+                "expected_shortfall_95": float(initial_value)
+                - float(tail_values.mean()),
+                "terminal_skewness": float(terminal_series.skew()),
+                "terminal_kurtosis": float(terminal_series.kurt()),
+            }
+        )
+        native_max_drawdowns = wealth.attrs.get("native_max_drawdowns")
+        if native_max_drawdowns is not None:
+            exact_drawdowns = np.asarray(native_max_drawdowns, dtype=float)
+            summary.update(
+                {
+                    "max_drawdown_mean": float(exact_drawdowns.mean()),
+                    "max_drawdown_p95": float(np.quantile(exact_drawdowns, 0.95)),
+                    "max_drawdown_worst": float(exact_drawdowns.max()),
+                }
+            )
     state_inflation = model.metadata.get("state_inflation", {})
     effective_financing = float(financing_rate)
     if risk_free_paths is not None:
@@ -1638,8 +1722,17 @@ def run_scenario(
             financing_paths += float(financing_inflation_sensitivity) * inflation_paths
         effective_financing = float(np.clip(financing_paths, 0.0, 1.0).mean())
     elif float(financing_inflation_sensitivity) > 0 and state_inflation and len(result.states):
+        native_regime_counts = wealth.attrs.get("native_regime_counts")
         simulated_regimes = result.regimes
-        if simulated_regimes.dtype.kind in "iu":
+        if compact_reporting and native_regime_counts is not None:
+            regime_counts = {
+                state: int(count)
+                for state, count in zip(
+                    result.states,
+                    np.asarray(native_regime_counts, dtype=np.uint64),
+                )
+            }
+        elif simulated_regimes.dtype.kind in "iu":
             hist = np.bincount(simulated_regimes.ravel(), minlength=len(result.states))
             regime_counts = {state: int(count) for state, count in zip(result.states, hist)}
         else:
@@ -1691,8 +1784,8 @@ def run_scenario(
         ),
     }.items():
         summary[key] = value
-    gross_terminal = gross_reporting_wealth.iloc[-1].to_numpy(dtype=float)
-    active_terminal = reporting_wealth.iloc[-1].to_numpy(dtype=float)
+    gross_terminal = full_gross_terminal
+    active_terminal = full_active_terminal
     terminal_tax_drag = gross_terminal - active_terminal
     gross_terminal_median = float(np.median(gross_terminal))
     summary["gross_terminal_wealth_median"] = gross_terminal_median
@@ -1743,8 +1836,16 @@ def run_scenario(
             if not np.isclose(active_median, 0.0)
             else 0.0
         )
+        wrapper_returns_for_drag = wrapper_real_annualized
+        if compact_reporting and len(wrapper_returns_for_drag) != len(diy_annualized):
+            sample_indices = np.asarray(
+                wealth.attrs.get("sample_indices", np.empty(0)),
+                dtype=int,
+            )
+            if sample_indices.shape == (len(diy_annualized),):
+                wrapper_returns_for_drag = wrapper_returns_for_drag[sample_indices]
         summary["wrapper_annual_drag_bps"] = float(
-            np.median(wrapper_real_annualized - diy_annualized) * 10_000.0
+            np.median(wrapper_returns_for_drag - diy_annualized) * 10_000.0
         )
     else:
         for key in (

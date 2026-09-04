@@ -16,6 +16,7 @@ from mc_quadrants.decumulation import (
 from mc_quadrants.matrix import nearest_correlation, nearest_psd
 from mc_quadrants.mnts import resolved_mnts_parameters, sample_mnts_subordinators
 from mc_quadrants.native import (
+    simulate_parametric_italian_portfolios_compact_native,
     simulate_parametric_italian_portfolios_native,
     simulate_parametric_native,
 )
@@ -110,6 +111,103 @@ def _sample_sojourns(
             sampled,
         )
     return durations
+
+
+def _latest_state_age_posterior(model: ScenarioModel) -> np.ndarray | None:
+    """Return the normalized latest HSMM posterior over ``(state, age)``."""
+
+    raw = model.metadata.get("hsmm_latest_state_age_probabilities")
+    if not isinstance(raw, Mapping):
+        return None
+    rows = [np.asarray(raw.get(state, []), dtype=float) for state in model.states]
+    width = max((len(row) for row in rows), default=0)
+    if width == 0:
+        return None
+    posterior = np.zeros((len(model.states), width), dtype=float)
+    for state_index, row in enumerate(rows):
+        posterior[state_index, : len(row)] = row
+    if not np.isfinite(posterior).all() or (posterior < 0.0).any():
+        raise ValueError("Latest state-age probabilities must be finite and non-negative.")
+    total = float(posterior.sum())
+    if total <= 0.0:
+        return None
+    return posterior / total
+
+
+def _sample_initial_states_and_ages(
+    rng: np.random.Generator,
+    model: ScenarioModel,
+    transition: np.ndarray,
+    paths: int,
+    start_state: str | None,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Sample initial regimes, preferring the latest filtered HSMM posterior."""
+
+    states = model.states
+    if start_state is not None:
+        if start_state not in states:
+            raise ValueError(f"Unknown start_state: {start_state}")
+        return (
+            np.full(paths, states.index(start_state), dtype=int),
+            np.zeros(paths, dtype=int),
+            False,
+        )
+
+    posterior = _latest_state_age_posterior(model)
+    if posterior is not None:
+        sampled = rng.choice(posterior.size, size=paths, p=posterior.ravel())
+        return sampled // posterior.shape[1], sampled % posterior.shape[1], True
+
+    sampled_transition = pd.DataFrame(transition, index=states, columns=states)
+    start_probabilities = stationary_distribution(sampled_transition).to_numpy()
+    return (
+        rng.choice(len(states), size=paths, p=start_probabilities),
+        np.zeros(paths, dtype=int),
+        False,
+    )
+
+
+def _sample_remaining_sojourns(
+    rng: np.random.Generator,
+    state_indices: np.ndarray,
+    state_ages: np.ndarray,
+    hazard_map: dict[str, np.ndarray],
+    states: list[str],
+    min_duration: int = 5,
+) -> np.ndarray:
+    """Sample residual durations conditional on the current HSMM state age."""
+
+    state_indices = np.asarray(state_indices, dtype=int)
+    state_ages = np.asarray(state_ages, dtype=int)
+    if state_indices.shape != state_ages.shape:
+        raise ValueError("Initial state indexes and ages must have the same shape.")
+    remaining = np.empty(len(state_indices), dtype=np.int32)
+    for state_index, state in enumerate(states):
+        state_positions = np.flatnonzero(state_indices == state_index)
+        if not len(state_positions):
+            continue
+        hazards = np.asarray(hazard_map.get(state, []), dtype=float)
+        if not len(hazards):
+            raise ValueError(f"No duration hazards are available for state {state!r}.")
+        for raw_age in np.unique(state_ages[state_positions]):
+            positions = state_positions[state_ages[state_positions] == raw_age]
+            age = int(np.clip(raw_age, 0, len(hazards) - 1))
+            eligible = hazards[age:].copy()
+            absolute_ages = np.arange(age, len(hazards))
+            eligible[absolute_ages < max(min_duration - 1, 0)] = 0.0
+            cumulative_exit = 1.0 - np.cumprod(1.0 - np.clip(eligible, 0.0, 1.0))
+            sampled = np.searchsorted(
+                cumulative_exit,
+                rng.random(len(positions)),
+                side="right",
+            ) + 1
+            maximum = max(len(hazards) - age, min_duration - age, 1)
+            remaining[positions] = np.where(
+                sampled > len(eligible),
+                maximum,
+                sampled,
+            )
+    return remaining
 
 
 def _decode_regime_codes(codes: np.ndarray, states: list[str]) -> np.ndarray:
@@ -216,14 +314,13 @@ def simulate_regime_paths(
                 "in its metadata; recalibrate the model with duration support."
             )
 
-    if start_state is None:
-        sampled_transition = pd.DataFrame(transition, index=states, columns=states)
-        start_probabilities = stationary_distribution(sampled_transition).to_numpy()
-        current = rng.choice(len(states), size=paths, p=start_probabilities)
-    else:
-        if start_state not in states:
-            raise ValueError(f"Unknown start_state: {start_state}")
-        current = np.full(paths, states.index(start_state), dtype=int)
+    current, current_ages, _ = _sample_initial_states_and_ages(
+        rng,
+        model,
+        transition,
+        paths,
+        start_state,
+    )
 
     code_dtype = np.min_scalar_type(max(len(states) - 1, 0))
     if duration_model == "markov":
@@ -240,9 +337,10 @@ def simulate_regime_paths(
 
     simulated = np.empty((periods, paths), dtype=code_dtype)
     remaining = np.empty(paths, dtype=int)
-    remaining[:] = _sample_sojourns(
+    remaining[:] = _sample_remaining_sojourns(
         rng,
         current,
+        current_ages,
         duration_hazards,
         states,
         min_regime_duration,
@@ -270,7 +368,85 @@ def simulate_regime_paths(
     return simulated if return_codes else _decode_regime_codes(simulated, states)
 
 
-def _macro_quadrant_probabilities(values: np.ndarray, dynamics: Mapping[str, object]) -> np.ndarray:
+def _prepare_macro_emissions(
+    states: list[str],
+    emission_means: Mapping[str, object] | None,
+    emission_covariances: Mapping[str, object] | None,
+) -> np.ndarray | None:
+    """Prepare quadratic bivariate-Gaussian scores for repeated path scoring."""
+
+    if not isinstance(emission_means, Mapping) or not isinstance(
+        emission_covariances,
+        Mapping,
+    ):
+        return None
+    dimensions = 2
+    coefficients = np.empty((len(states), 6), dtype=float)
+    for state_index, state in enumerate(states):
+        mean = np.asarray(emission_means.get(state, []), dtype=float)[:dimensions]
+        covariance = np.asarray(emission_covariances.get(state, []), dtype=float)
+        if mean.shape != (dimensions,) or covariance.shape[:2] != (dimensions, dimensions):
+            return None
+        covariance = nearest_psd(covariance[:dimensions, :dimensions])
+        sign, log_determinant = np.linalg.slogdet(covariance)
+        if sign <= 0 or not np.isfinite(log_determinant):
+            return None
+        precision = np.linalg.pinv(covariance)
+        precision_mean = precision @ mean
+        coefficients[state_index] = (
+            -0.5 * precision[0, 0],
+            -precision[0, 1],
+            -0.5 * precision[1, 1],
+            precision_mean[0],
+            precision_mean[1],
+            -0.5
+            * (
+                float(mean @ precision_mean)
+                + dimensions * np.log(2.0 * np.pi)
+                + log_determinant
+            ),
+        )
+    if not np.isfinite(coefficients).all():
+        return None
+    return coefficients
+
+
+def _macro_quadrant_probabilities(
+    values: np.ndarray,
+    dynamics: Mapping[str, object],
+    states: list[str] | None = None,
+    emission_means: Mapping[str, object] | None = None,
+    emission_covariances: Mapping[str, object] | None = None,
+    prepared_emissions: np.ndarray | None = None,
+) -> np.ndarray:
+    """Return joint emission probabilities, with threshold logistics as fallback."""
+
+    if prepared_emissions is None and states:
+        prepared_emissions = _prepare_macro_emissions(
+            states,
+            emission_means,
+            emission_covariances,
+        )
+    if prepared_emissions is not None:
+        observations = np.asarray(values, dtype=float)[:, :2]
+        growth = observations[:, 0]
+        inflation = observations[:, 1]
+        features = np.column_stack(
+            (
+                np.square(growth),
+                growth * inflation,
+                np.square(inflation),
+                growth,
+                inflation,
+                np.ones(len(observations)),
+            )
+        )
+        log_densities = features @ prepared_emissions.T
+        if np.isfinite(log_densities).all():
+            normalized = log_densities - log_densities.max(axis=1, keepdims=True)
+            probabilities = np.exp(np.clip(normalized, -700.0, 0.0))
+            return probabilities / np.maximum(probabilities.sum(axis=1, keepdims=True), 1e-300)
+
     thresholds = np.asarray(dynamics["thresholds"], dtype=float)
     scales = np.maximum(np.asarray(dynamics["probability_scales"], dtype=float), 1e-9)
     # Only growth and inflation define quadrant membership. Additional macro
@@ -322,18 +498,13 @@ def simulate_joint_regime_macro_paths(
     transition = model.transition_matrix.loc[states, states].to_numpy(dtype=float)
     if transition_concentration is not None:
         transition = _sample_transition_matrix(rng, transition, transition_concentration)
-    if start_state is None:
-        current = rng.choice(
-            len(states),
-            size=paths,
-            p=stationary_distribution(
-                pd.DataFrame(transition, index=states, columns=states)
-            ).to_numpy(dtype=float),
-        )
-    else:
-        if start_state not in states:
-            raise ValueError(f"Unknown start_state: {start_state}")
-        current = np.full(paths, states.index(start_state), dtype=int)
+    current, current_ages, _ = _sample_initial_states_and_ages(
+        rng,
+        model,
+        transition,
+        paths,
+        start_state,
+    )
 
     coefficient = np.asarray(dynamics["var_coefficient"], dtype=float)
     coefficient_paths: np.ndarray | None = None
@@ -380,9 +551,10 @@ def simulate_joint_regime_macro_paths(
     if duration_model == "semi_markov":
         if not isinstance(duration_hazards, dict):
             raise ValueError("semi_markov requires calibrated duration hazards.")
-        remaining[:] = _sample_sojourns(
+        remaining[:] = _sample_remaining_sojourns(
             rng,
             current,
+            current_ages,
             duration_hazards,
             states,
             min_regime_duration,
@@ -391,6 +563,19 @@ def simulate_joint_regime_macro_paths(
     powered_transition = np.power(
         np.maximum(transition, 1e-12),
         1.0 - macro_transition_weight,
+    )
+    use_joint_emissions = (
+        model.metadata.get("macro_membership_model", "joint_emission")
+        == "joint_emission"
+    )
+    prepared_emissions = (
+        _prepare_macro_emissions(
+            states,
+            model.metadata.get("hsmm_emission_means"),
+            model.metadata.get("hsmm_emission_covariances"),
+        )
+        if use_joint_emissions
+        else None
     )
 
     for period in range(periods):
@@ -425,18 +610,24 @@ def simulate_joint_regime_macro_paths(
         current_macro = next_macro
         macro_paths[period] = current_macro
 
-        macro_probabilities = _macro_quadrant_probabilities(current_macro, dynamics)
         if duration_model == "semi_markov":
             remaining -= 1
+            eligible_paths = np.flatnonzero(remaining <= 0)
+        else:
+            eligible_paths = np.arange(paths)
+        macro_probabilities = _macro_quadrant_probabilities(
+            current_macro[eligible_paths],
+            dynamics,
+            prepared_emissions=prepared_emissions,
+        )
+        eligible_states = current[eligible_paths]
         following = current.copy()
         for state_index in range(len(states)):
-            mask = current == state_index
-            if duration_model == "semi_markov":
-                mask &= remaining <= 0
-            if not mask.any():
+            local_mask = eligible_states == state_index
+            if not local_mask.any():
                 continue
-            path_indexes = np.flatnonzero(mask)
-            macro_probability = macro_probabilities[path_indexes]
+            path_indexes = eligible_paths[local_mask]
+            macro_probability = macro_probabilities[local_mask]
             combined = powered_transition[state_index] * np.power(
                 np.maximum(macro_probability, 1e-12), macro_transition_weight
             )
@@ -515,35 +706,6 @@ def simulate_returns(
     if dcc_alpha + dcc_beta + dcc_asymmetry >= 1:
         raise ValueError("dcc_alpha + dcc_beta + dcc_asymmetry must be less than 1.")
 
-    macro_paths: np.ndarray | None = None
-    macro_shocks: np.ndarray | None = None
-    if joint_macro:
-        regime_paths, macro_paths, macro_shocks = simulate_joint_regime_macro_paths(
-            model,
-            periods=periods,
-            paths=paths,
-            start_state=start_state,
-            random_seed=random_seed,
-            transition_concentration=transition_concentration,
-            duration_model=duration_model,
-            min_regime_duration=min_regime_duration,
-            macro_transition_weight=macro_transition_weight,
-            macro_parameter_uncertainty=macro_parameter_uncertainty,
-            return_codes=True,
-        )
-    else:
-        regime_paths = simulate_regime_paths(
-            model,
-            periods=periods,
-            paths=paths,
-            start_state=start_state,
-            random_seed=random_seed,
-            transition_concentration=transition_concentration,
-            duration_model=duration_model,
-            min_regime_duration=min_regime_duration,
-            return_codes=True,
-        )
-    rng = _rng(None if random_seed is None else random_seed + 1)
     assets = model.assets
 
     macro_dynamics = model.metadata.get("macro_dynamics") if joint_macro else None
@@ -625,6 +787,10 @@ def simulate_returns(
         if random_seed is None
         else int(random_seed) + 1
     )
+    native_kwargs: dict[str, Any] | None = None
+    normalized_multipliers: dict[str, float] = {}
+    state_cost_values: np.ndarray | None = None
+    monthly_fee_log: np.ndarray | None = None
     if native_portfolio_config is not None:
         native_kwargs = dict(native_portfolio_config["native_kwargs"])
         transaction_multipliers = native_portfolio_config.get(
@@ -639,13 +805,261 @@ def simulate_returns(
                 [normalized_multipliers.get(state, 1.0) for state in model.states],
                 dtype=float,
             )
+        expense_ratios = np.asarray(native_portfolio_config["expense_ratios"], dtype=float)
+        monthly_fee_log = np.log1p(-expense_ratios) / 12.0
+
+        compact_requested = bool(native_portfolio_config.get("compact_reporting", False))
+        if compact_requested:
+            transition_rng = _rng(random_seed)
+            transition = model.transition_matrix.loc[
+                model.states, model.states
+            ].to_numpy(dtype=float)
+            if transition_concentration is not None:
+                transition = _sample_transition_matrix(
+                    transition_rng,
+                    transition,
+                    transition_concentration,
+                )
+            latest_state_age = (
+                _latest_state_age_posterior(model)
+                if start_state is None
+                else None
+            )
+            start_probabilities = (
+                latest_state_age.sum(axis=1)
+                if latest_state_age is not None
+                else stationary_distribution(
+                    pd.DataFrame(
+                        transition,
+                        index=model.states,
+                        columns=model.states,
+                    )
+                ).to_numpy(dtype=float)
+            )
+            start_state_index = (
+                None
+                if start_state is None
+                else model.states.index(start_state)
+                if start_state in model.states
+                else -2
+            )
+            duration_hazard_values = None
+            duration_hazard_lengths = None
+            start_state_age_probabilities = None
+            if str(duration_model).strip().lower() == "semi_markov":
+                duration_hazard_map = model.metadata.get("duration_hazards")
+                if not isinstance(duration_hazard_map, Mapping):
+                    raise ValueError(
+                        "semi_markov requires the model to expose 'duration_hazards' "
+                        "in its metadata; recalibrate the model with duration support."
+                    )
+                state_hazards = [
+                    np.asarray(duration_hazard_map.get(state, []), dtype=float)
+                    for state in model.states
+                ]
+                if any(not len(values) for values in state_hazards):
+                    raise ValueError("Every state must expose at least one duration hazard.")
+                duration_hazard_lengths = np.asarray(
+                    [len(values) for values in state_hazards],
+                    dtype=np.int32,
+                )
+                duration_hazard_values = np.zeros(
+                    (len(model.states), int(duration_hazard_lengths.max())),
+                    dtype=float,
+                )
+                for state_index, values in enumerate(state_hazards):
+                    duration_hazard_values[state_index, : len(values)] = values
+                if latest_state_age is not None:
+                    if latest_state_age.shape[1] > duration_hazard_values.shape[1]:
+                        raise ValueError(
+                            "Latest state-age posterior exceeds the duration hazard width."
+                        )
+                    start_state_age_probabilities = np.zeros_like(duration_hazard_values)
+                    start_state_age_probabilities[:, : latest_state_age.shape[1]] = (
+                        latest_state_age
+                    )
+
+            compact_kwargs = dict(native_kwargs)
+            if compact_kwargs.pop("transaction_cost_rate_paths", None) is not None:
+                compact_requested = False
+            macro_process = None
+            if compact_requested and joint_macro:
+                if not isinstance(macro_dynamics, Mapping) or macro_betas is None:
+                    raise ValueError("joint_macro requires calibrated macro dynamics.")
+                emission_coefficients = (
+                    _prepare_macro_emissions(
+                        model.states,
+                        model.metadata.get("hsmm_emission_means"),
+                        model.metadata.get("hsmm_emission_covariances"),
+                    )
+                    if model.metadata.get("macro_membership_model", "joint_emission")
+                    == "joint_emission"
+                    else None
+                )
+                if emission_coefficients is None:
+                    compact_requested = False
+                else:
+                    macro_columns = list(macro_dynamics["columns"])
+                    rate_col = macro_dynamics.get("rate_col")
+                    rate_index = (
+                        macro_columns.index(rate_col)
+                        if rate_col in macro_columns
+                        else -1
+                    )
+                    macro_process = {
+                        "latest": np.asarray(macro_dynamics["latest"], dtype=float),
+                        "var_coefficient": np.asarray(
+                            macro_dynamics["var_coefficient"],
+                            dtype=float,
+                        ),
+                        "var_coefficient_std": np.asarray(
+                            macro_dynamics.get(
+                                "var_coefficient_std",
+                                np.zeros_like(macro_dynamics["var_coefficient"]),
+                            ),
+                            dtype=float,
+                        ),
+                        "parameter_uncertainty": macro_parameter_uncertainty,
+                        "state_centers": np.stack(
+                            [
+                                np.asarray(
+                                    macro_dynamics["state_centers"][state],
+                                    dtype=float,
+                                )
+                                for state in model.states
+                            ]
+                        ),
+                        "state_innovation_covariances": np.stack(
+                            [
+                                nearest_psd(
+                                    np.asarray(
+                                        macro_dynamics["state_innovation_covariances"][state],
+                                        dtype=float,
+                                    )
+                                )
+                                for state in model.states
+                            ]
+                        ),
+                        "emission_coefficients": emission_coefficients,
+                        "transition_weight": macro_transition_weight,
+                        "return_betas": macro_betas,
+                        "rate_index": rate_index,
+                        "rate_bounds": macro_dynamics.get("rate_bounds"),
+                    }
+            if compact_requested:
+                compact_portfolio = simulate_parametric_italian_portfolios_compact_native(
+                    periods=periods,
+                    paths=paths,
+                    transition_matrix=transition,
+                    start_probabilities=start_probabilities,
+                    start_state_index=start_state_index,
+                    duration_model=duration_model,
+                    duration_hazards=duration_hazard_values,
+                    duration_hazard_lengths=duration_hazard_lengths,
+                    min_regime_duration=min_regime_duration,
+                    start_state_age_probabilities=start_state_age_probabilities,
+                    macro_process=macro_process,
+                    state_transaction_cost_multipliers=state_cost_values,
+                    means=state_means,
+                    gaussian_correlation_cholesky=state_gaussian_correlation_cholesky,
+                    gaussian_correlations=state_gaussian_correlations,
+                    volatilities=state_volatilities,
+                    tail_indexes=state_tail_indexes,
+                    temperings=state_temperings,
+                    skewness=state_skewness,
+                    gaussian_scales=state_gaussian_scales,
+                    random_seed=native_seed,
+                    regime_random_seed=(
+                        int(np.random.SeedSequence().generate_state(1, dtype=np.uint64)[0])
+                        if random_seed is None
+                        else int(random_seed)
+                    ),
+                    garch=garch,
+                    garch_alpha=garch_alpha,
+                    garch_beta=garch_beta,
+                    dynamic_correlation=dynamic_correlation,
+                    dcc_alpha=dcc_alpha,
+                    dcc_beta=dcc_beta,
+                    dcc_asymmetry=dcc_asymmetry,
+                    monthly_fee_log=monthly_fee_log,
+                    return_kind=str(native_portfolio_config["return_kind"]),
+                    reporting_paths=int(
+                        native_portfolio_config.get("compact_reporting_paths", 25_000)
+                    ),
+                    annual_reporting_inflation=float(
+                        native_portfolio_config.get("annual_reporting_inflation", 0.0)
+                    ),
+                    workers=native_threads,
+                    **compact_kwargs,
+                )
+                if compact_portfolio is not None:
+                    compact_portfolio["frame_metadata"] = dict(
+                        native_portfolio_config["frame_metadata"]
+                    )
+                    compact_regimes = np.asarray(compact_portfolio["regimes"], dtype=np.uint8)
+                    compact_macro_paths = compact_portfolio.get("macro_paths")
+                    return SimulationResult(
+                        returns=np.empty((periods, 0, len(assets)), dtype=float),
+                        regimes=(
+                            compact_regimes
+                            if return_regime_codes
+                            else _decode_regime_codes(compact_regimes, model.states)
+                        ),
+                        assets=assets,
+                        states=model.states.copy(),
+                        frequency=model.frequency,
+                        distribution="mnts",
+                        transition_concentration=transition_concentration,
+                        macro_paths=(
+                            np.asarray(compact_macro_paths, dtype=float)
+                            if compact_macro_paths is not None
+                            else None
+                        ),
+                        macro_columns=(
+                            list(macro_dynamics["columns"])
+                            if isinstance(macro_dynamics, Mapping)
+                            else []
+                        ),
+                        native_portfolio=compact_portfolio,
+                    )
+
+    macro_paths: np.ndarray | None = None
+    macro_shocks: np.ndarray | None = None
+    if joint_macro:
+        regime_paths, macro_paths, macro_shocks = simulate_joint_regime_macro_paths(
+            model,
+            periods=periods,
+            paths=paths,
+            start_state=start_state,
+            random_seed=random_seed,
+            transition_concentration=transition_concentration,
+            duration_model=duration_model,
+            min_regime_duration=min_regime_duration,
+            macro_transition_weight=macro_transition_weight,
+            macro_parameter_uncertainty=macro_parameter_uncertainty,
+            return_codes=True,
+        )
+    else:
+        regime_paths = simulate_regime_paths(
+            model,
+            periods=periods,
+            paths=paths,
+            start_state=start_state,
+            random_seed=random_seed,
+            transition_concentration=transition_concentration,
+            duration_model=duration_model,
+            min_regime_duration=min_regime_duration,
+            return_codes=True,
+        )
+    rng = _rng(None if random_seed is None else random_seed + 1)
+
+    if native_portfolio_config is not None and native_kwargs is not None:
+        if state_cost_values is not None:
             native_kwargs["transaction_cost_rate_paths"] = (
                 state_cost_values[np.asarray(regime_paths, dtype=int)]
                 * float(native_kwargs["transaction_cost_bps"])
                 / 10_000.0
             )
-        expense_ratios = np.asarray(native_portfolio_config["expense_ratios"], dtype=float)
-        monthly_fee_log = np.log1p(-expense_ratios) / 12.0
         fused_portfolio = simulate_parametric_italian_portfolios_native(
             regime_codes=regime_paths,
             means=state_means,
@@ -664,7 +1078,7 @@ def simulate_returns(
             dcc_alpha=dcc_alpha,
             dcc_beta=dcc_beta,
             dcc_asymmetry=dcc_asymmetry,
-            monthly_fee_log=monthly_fee_log,
+            monthly_fee_log=np.asarray(monthly_fee_log, dtype=float),
             return_kind=str(native_portfolio_config["return_kind"]),
             macro_shocks=macro_shocks,
             macro_betas=macro_betas,

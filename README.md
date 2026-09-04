@@ -18,7 +18,7 @@ The four macro quadrants are:
 The model is designed to be calibrated from real historical data:
 
 1. Release-aware macro data initializes semantically identified growth/inflation quadrants.
-2. An explicit-duration hidden semi-Markov model jointly estimates latent states, state-age hazards, and exit destinations.
+2. An explicit-duration hidden semi-Markov model jointly estimates constrained macro emissions, latent states, state-age hazards, and exit destinations.
 3. Parametric return means are shrunk and covariance matrices use Ledoit-Wolf shrinkage.
 4. Optional stationary-bootstrap recalibrations measure parameter uncertainty.
 5. Growth, inflation, the short rate, regimes, returns, dynamic correlations, and portfolio accounting are simulated together.
@@ -141,9 +141,10 @@ uses a causal 12-period window when none is supplied.
 HSMM initialization uses a persistence-aware hard path: a causal three-month
 trailing macro average, threshold hysteresis (default `0.15` historical standard
 deviations), and two-month confirmation before accepting a new quadrant. Soft
-logistic quadrant probabilities remain part of the joint macro simulator, with
-width controlled by `regime_temperature`. They are deliberately not multiplied
-as independent adjacent memberships to estimate historical transitions.
+logistic probabilities remain a compatibility fallback for models without
+fitted HSMM emissions. The calibrated joint macro simulator uses the fitted
+bivariate emission likelihood instead. Neither form is multiplied as
+independent adjacent membership to estimate historical transitions.
 
 ### 3. Explicit-Duration Hidden Semi-Markov Model
 
@@ -154,8 +155,11 @@ the economic identity of the four emission distributions, but it does not
 provide the final transition counts.
 
 A scaled forward-backward pass returns filtered state probabilities, smoothed
-state-age posteriors, and joint expected transitions. EM updates two distinct
+state-age posteriors, and joint expected transitions. EM updates three distinct
 objects from those joint posteriors:
+
+- the state-specific joint growth/inflation means and covariances, shrunk toward
+  the full sample while preserving each quadrant's high/low economic identity;
 
 - a zero-diagonal exit-destination matrix describing where the economy moves
   after leaving each quadrant;
@@ -196,9 +200,19 @@ motivation in the Federal Reserve Bank of Minneapolis discussion paper
 [A Markov-Switching Model of GNP Growth with Duration Dependence](https://www.minneapolisfed.org/research/discussion-papers/a-markov-switching-model-of-gnp-growth-with-duration-dependence).
 
 With joint macro paths enabled, simulated growth and inflation update the
-destination probabilities at each eligible exit. Consequently, simulated
-transitions depend on both regime age and current macro conditions rather than
-on age alone.
+destination probabilities at each eligible exit through the fitted bivariate
+Gaussian emission likelihood. This retains growth/inflation dependence instead
+of multiplying two independent threshold probabilities. Consequently,
+simulated transitions depend on both regime age and current macro conditions
+rather than on age alone. The Gaussian likelihood is stored as six quadratic
+coefficients per state, and semi-Markov simulations evaluate it only for paths
+whose duration clock permits an exit.
+
+Unless a state is selected explicitly, simulations begin from the latest
+filtered HSMM posterior over both quadrant and current quadrant age. Semi-Markov
+paths therefore sample the remaining duration of the current episode rather
+than restarting its duration clock. Models without that posterior retain the
+stationary-distribution fallback.
 
 An alternative **HMM regime model** fits a Gaussian-emission hidden Markov
 model directly on asset returns with expectation-maximization (states learned
@@ -245,13 +259,15 @@ latent factor preserves cross-asset dependence. Parameters are standardized so
 the fitted state means, volatilities, and correlations remain the target first
 two moments.
 
-The tempered-stable subordinator is sampled exactly with a hybrid rejection
-scheme. For the moderate exponential tilts produced by the calibrated model,
-the native engine draws a positive stable proposal and accepts it with the
-exponential tilt; for stronger tilts it uses Devroye's uniformly bounded
-double-rejection algorithm. This changes execution speed, not the target MNTS
-law. The product exposes no alternative return-path sampler; MNTS-GARCH is the
-single production law.
+The native engine samples the tempered-stable subordinator exactly with the
+two-dimensional single-rejection algorithm of Qu, Dassios, and Zhao (2021).
+For every state parameter pair it selects the lowest-cost of four gamma-based
+proposal envelopes, using either a uniform or truncated-normal auxiliary angle.
+Acceptance tests are evaluated in log space for stability. Devroye's exact
+double-rejection algorithm and the former hybrid are retained as validation and
+benchmark references; they generate the same target law. The product exposes
+no alternative return-path distribution: MNTS-GARCH remains the single
+production law.
 
 **GARCH(1,1) volatility clustering** adds conditional-variance dynamics within
 each regime: every asset's variance follows
@@ -642,34 +658,54 @@ Build the C++17 production backend on macOS (including Apple Silicon) or Linux:
 The native backend uses `std::thread`; the scenario `workers` setting controls
 that thread pool. A fused MNTS-GARCH kernel generates one path at a time and
 immediately updates gross, DIY, and optional wrapper ledgers, so no full asset-
-return cube is retained. If the shared
+return cube is retained. Large eligible tax simulations also generate the
+four-state Markov or explicit-duration semi-Markov process inside the same C++
+kernel. Joint macro simulations use that compact path as well: native workers
+generate macro innovations, likelihood-conditioned regime transitions,
+MNTS-GARCH returns, and portfolio ledgers one path at a time. Macro shocks are
+streamed into returns instead of retained for every path. The kernel keeps every
+terminal outcome, tax aggregate, regime count, and maximum drawdown, but keeps
+complete monthly histories for only a deterministic 25,000-path reporting
+sample. Detailed mode remains available when every path history is required. If the shared
 library is missing or its ABI version does not match, execution automatically
 falls back to the Python reference implementation. Set
 `MC_DISABLE_NATIVE_SIM=1` to force that reference path for verification.
 
-The MNTS subordinator uses an exact hybrid rejection sampler. For the moderate
-exponential tilts produced by the calibrated model it samples a positive stable
-proposal directly and applies the exponential tilt; stronger tilts retain
-Devroye's uniformly bounded double-rejection algorithm. The cutoff was checked
-against theoretical moments, two-sample distribution tests, and runtime grids.
-This parameter-specific choice follows the efficiency direction studied by
-[Qu, Dassios, and Zhao (2021)](https://doi.org/10.1145/3449357), while preserving
-the exact [Devroye (2009)](https://doi.org/10.1145/1596519.1596523) fallback.
+The production MNTS subordinator uses the exact two-dimensional
+single-rejection Algorithm 3.1 of
+[Qu, Dassios, and Zhao (2021)](https://doi.org/10.1145/3449357). The C++ engine
+precomputes the four envelope constants for each quadrant and chooses the
+smallest one. The exact [Devroye (2009)](https://doi.org/10.1145/1596519.1596523)
+sampler and the former simple-rejection/Devroye hybrid remain callable for
+distributional regression tests and reproducible performance comparisons.
+The Python fallback continues to use Devroye's exact reference algorithm.
 
 Automatic Italian-tax runs without active decumulation use one fused native
 batch and up to eight threads by default. Tax totals, terminal statistics,
-wealth percentiles, goal success, shortfall, and ruin remain exact across every
-requested path; advanced path diagnostics and charts are deterministically
-bounded to 25,000 representative paths to prevent reporting memory from
-dominating the simulation.
+final-horizon wealth percentiles, goal success, shortfall, maximum drawdowns,
+and ruin remain exact across every requested path. Intermediate chart bands
+and advanced path diagnostics use the retained 25,000-path sample, preventing
+reporting memory from dominating the simulation.
 
-On the development machine, the fused kernel completed 360 months x 100,000
-paths x four assets x four quadrants in about 3.2 seconds with eight native
-threads. A single 500,000-path run completed in about 16.0 seconds. These are
-hardware-specific engineering benchmarks rather than runtime guarantees; use
-`scripts/benchmark_native.py` to measure the active build and machine. Pass
-`--repeats 1` for a single large-scale measurement instead of the default
-three-run median.
+On the development machine, Qu's sampler won all 45 points in the calibrated
+grid (`alpha=0.55..0.95`, `tempering=0.04..20`, 100,000 draws and three repeats
+per point). Its median speedup was 5.86x versus Devroye and 3.13x versus the
+former hybrid; the respective ranges were 3.13x-7.68x and 1.13x-7.68x. The
+fused 360-month x 100,000-path x four-asset x four-quadrant benchmark fell from
+3.14 seconds with the former hybrid to 2.62 seconds with Qu, a 16.7% end-to-end
+reduction using eight native threads. After adding native regime generation and
+compact reporting, the equivalent 500,000-path benchmark takes 10.89 seconds,
+versus 13.97 seconds in detailed native mode: 22.0% less time. Estimated retained
+history memory falls from 3.06 GB to 165 MB, a 94.6% reduction, while all-path
+terminal estimates remain exact. These are hardware-specific engineering
+benchmarks rather than runtime guarantees. Run
+`scripts/benchmark_nts_samplers.py` for the sampler grid and
+`scripts/benchmark_native.py` for the complete scenario. The constrained HSMM,
+joint macro-membership, and latest-posterior comparison is reproducible with
+`scripts/benchmark_regime_estimation.py`; use
+`scripts/benchmark_joint_macro.py` for the Python optimizer, streamed native
+path, distribution check, and retained-memory comparison. Pass `--repeats 1`
+for a single large-scale measurement instead of the default median.
 
 Then you can adapt:
 

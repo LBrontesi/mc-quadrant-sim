@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import mc_quadrants.api as api
+from mc_quadrants.native import native_available
 from mc_quadrants.types import SimulationResult
 
 ASSET_TICKERS = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
@@ -566,6 +567,34 @@ def test_simulate_reports_italian_tax_assumptions():
     assert response["gross_wealth"]["median"] != response["wealth"]["median"]
     assert any("planning approximation" in warning for warning in response["warnings"])
     assert any("IT-2026" in warning for warning in response["warnings"])
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend unavailable")
+def test_large_simulate_response_uses_compact_native_histories_and_exact_terminal():
+    response = api.build_simulate_response(
+        _csv_payload(
+            periods=6,
+            paths=30_000,
+            workers=4,
+            walk_forward=False,
+            tax_country="IT",
+            tax_regime="italy_administered",
+            rebalance="quarterly",
+            annual_inflation=2.0,
+        )
+    )
+
+    assert response["execution"] == {
+        "native_backend": True,
+        "compact_reporting": True,
+        "simulated_paths": 30_000,
+        "retained_history_paths": 25_000,
+    }
+    assert response["reporting_sample"]["total_paths"] == 30_000
+    assert len(response["terminal"]) == api.MAX_REPORTING_PATHS
+    assert response["wealth"]["median"][-1] == pytest.approx(response["summary"]["p50"])
+    assert response["analytics_sample"]["sampled"] is True
+    assert any("intermediate chart bands" in warning for warning in response["warnings"])
 
 
 def test_simulate_reports_inflation_linked_financing():

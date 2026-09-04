@@ -68,6 +68,66 @@ class RandomStream {
 
 };
 
+double gamma_shape(RandomStream &random, double shape) {
+    // Marsaglia and Tsang's gamma generator, with the standard shape-boost
+    // transformation for 0 < shape < 1. Qu's Algorithm 3.1 uses both ranges.
+    if (shape < 1.0) {
+        while (true) {
+            const double boosted = gamma_shape(random, shape + 1.0);
+            const double log_scale = std::log(
+                std::max(random.uniform(), std::numeric_limits<double>::min())
+            ) / shape;
+            const double value = boosted * std::exp(log_scale);
+            if (value > 0.0 && std::isfinite(value)) return value;
+        }
+    }
+
+    const double d = shape - 1.0 / 3.0;
+    const double c = 1.0 / std::sqrt(9.0 * d);
+    while (true) {
+        const double normal = random.normal();
+        const double base = 1.0 + c * normal;
+        if (base <= 0.0) continue;
+        const double proposal = base * base * base;
+        const double uniform = random.uniform();
+        const double normal_square = normal * normal;
+        if (uniform < 1.0 - 0.0331 * normal_square * normal_square) {
+            return d * proposal;
+        }
+        if (std::log(std::max(uniform, std::numeric_limits<double>::min()))
+                < 0.5 * normal_square + d * (1.0 - proposal + std::log(proposal))) {
+            return d * proposal;
+        }
+    }
+}
+
+double truncated_zero_mean_normal(
+    RandomStream &random,
+    double precision,
+    double upper
+) {
+    // Exact N(0, 1 / precision) draw conditional on [0, upper]. A uniform
+    // envelope avoids the poor half-normal acceptance rate when the interval
+    // is narrow; otherwise an absolute-normal proposal has bounded cost.
+    const double sqrt_precision = std::sqrt(precision);
+    const double standardized_upper = upper * sqrt_precision;
+    if (standardized_upper <= 1.5) {
+        while (true) {
+            const double proposal = standardized_upper * random.uniform();
+            const double log_uniform = std::log(
+                std::max(random.uniform(), std::numeric_limits<double>::min())
+            );
+            if (log_uniform <= -0.5 * proposal * proposal) {
+                return proposal / sqrt_precision;
+            }
+        }
+    }
+    while (true) {
+        const double proposal = std::abs(random.normal());
+        if (proposal <= standardized_upper) return proposal / sqrt_precision;
+    }
+}
+
 inline const double *state_matrix(const double *values, int state, int assets) {
     return values + static_cast<std::size_t>(state) * assets * assets;
 }
@@ -103,15 +163,18 @@ double sinc(double value) {
     return std::sin(value) / value;
 }
 
-double zolotarev_b_ratio(double value, double alpha) {
+double log_zolotarev_b_ratio(double value, double alpha) {
     const double complement = 1.0 - alpha;
-    const double log_ratio = std::log(std::max(sinc(value), 1e-300))
+    return std::log(std::max(sinc(value), 1e-300))
         - alpha * std::log(std::max(sinc(alpha * value), 1e-300))
         - complement * std::log(std::max(sinc(complement * value), 1e-300));
-    return std::exp(log_ratio);
 }
 
-double zolotarev_a(double value, double alpha, double b_ratio) {
+double zolotarev_b_ratio(double value, double alpha) {
+    return std::exp(log_zolotarev_b_ratio(value, alpha));
+}
+
+double zolotarev_a(double alpha, double b_ratio) {
     const double complement = 1.0 - alpha;
     const double log_b_zero = -alpha * std::log(alpha)
         - complement * std::log(complement);
@@ -223,7 +286,7 @@ double exponentially_tilted_stable(
             if (log_uniform + log_rho > 0.0) continue;
 
             z_uniform = std::exp(log_uniform + log_rho);
-            a_value = zolotarev_a(u, alpha, b_ratio);
+            a_value = zolotarev_a(alpha, b_ratio);
             break;
         }
 
@@ -271,7 +334,7 @@ double exponentially_tilted_stable_simple_rejection(
         const double angle = pi * random.uniform();
         if (!(angle > 0.0 && angle < pi)) continue;
         const double b_ratio = zolotarev_b_ratio(angle, alpha);
-        const double a_value = zolotarev_a(angle, alpha, b_ratio);
+        const double a_value = zolotarev_a(alpha, b_ratio);
         const double exponential = random.exponential();
         const double stable = std::pow(
             a_value / std::max(exponential, std::numeric_limits<double>::min()),
@@ -285,14 +348,189 @@ double exponentially_tilted_stable_simple_rejection(
     }
 }
 
+// Qu, Dassios, and Zhao's two-dimensional single-rejection generator
+// (TOMACS 31(4), 2021, Algorithm 3.1) for the same S_{alpha, lambda} law.
+// All four envelope constants and acceptance ratios are stored/evaluated in
+// log space to remain stable over the calibrated MNTS parameter range.
+struct QuTiltedStableParameters {
+    double alpha;
+    double lambda;
+    double complement;
+    double lambda_alpha;
+    double log_lambda;
+    double log_b_zero;
+    double gamma_shape_x;
+    double gamma_shape_z;
+    double z_power;
+    double normal_precision;
+    double x_power;
+    double log_x_ratio_constant;
+    double log_z_ratio_constant;
+    double log_normal_adjustment;
+    double log_constants[4];
+    int envelope;
+};
+
+double log_erf_positive(double value) {
+    const double probability = std::erf(value);
+    if (probability > 0.0) return std::log(probability);
+    constexpr double log_two_over_sqrt_pi = 0.12078223763524522234551844578165;
+    return log_two_over_sqrt_pi + std::log(value);
+}
+
+QuTiltedStableParameters make_qu_tilted_stable_parameters(
+    double alpha,
+    double lambda
+) {
+    constexpr double pi = 3.141592653589793238462643383279502884;
+    constexpr double two_pi = 6.283185307179586476925286766559;
+    QuTiltedStableParameters parameters{};
+    parameters.alpha = alpha;
+    parameters.lambda = lambda;
+    parameters.complement = 1.0 - alpha;
+    parameters.lambda_alpha = std::pow(lambda, alpha);
+    parameters.log_lambda = std::log(lambda);
+    parameters.log_b_zero = alpha * std::log(alpha)
+        + parameters.complement * std::log(parameters.complement);
+    parameters.gamma_shape_x = alpha * parameters.lambda_alpha;
+    parameters.z_power = parameters.complement * parameters.lambda_alpha;
+    parameters.gamma_shape_z = parameters.z_power + 1.0;
+    parameters.normal_precision = alpha * parameters.complement
+        * parameters.lambda_alpha;
+    parameters.x_power = alpha / parameters.complement;
+    const double log_truncation_probability = log_erf_positive(
+        pi * std::sqrt(parameters.normal_precision / 2.0)
+    );
+    const double log_normal_denominator = 0.5 * std::log(
+        two_pi * parameters.normal_precision
+    );
+    parameters.log_x_ratio_constant = std::log(alpha)
+        + parameters.lambda_alpha
+        - std::log(parameters.complement)
+        + std::lgamma(parameters.gamma_shape_x)
+        + parameters.x_power * parameters.log_lambda;
+    parameters.log_z_ratio_constant = parameters.lambda_alpha
+        + std::lgamma(parameters.gamma_shape_z);
+    parameters.log_normal_adjustment = log_truncation_probability
+        - log_normal_denominator;
+
+    const double m = parameters.gamma_shape_x;
+    const double q = parameters.z_power;
+    const double lambda_alpha = parameters.lambda_alpha;
+    parameters.log_constants[0] = -lambda_alpha * std::log(m)
+        + m - 1.0
+        + std::lgamma(m)
+        + (q + 1.0) * std::log(alpha / parameters.complement + m);
+    parameters.log_constants[1] = std::lgamma(q + 1.0)
+        + q - q * std::log(q);
+    parameters.log_constants[2] = std::lgamma(m + 1.0)
+        + m - 1.0
+        - m * std::log(m)
+        - log_normal_denominator
+        + (q + 1.0) * std::log1p(1.0 / q);
+    parameters.log_constants[3] = std::lgamma(q + 1.0)
+        + q - q * std::log(q)
+        - log_normal_denominator;
+    parameters.envelope = 0;
+    for (int index = 1; index < 4; ++index) {
+        if (parameters.log_constants[index]
+                < parameters.log_constants[parameters.envelope]) {
+            parameters.envelope = index;
+        }
+    }
+    return parameters;
+}
+
+double qu_log_b(double angle, const QuTiltedStableParameters &parameters) {
+    return parameters.log_b_zero
+        - log_zolotarev_b_ratio(angle, parameters.alpha);
+}
+
+double negative_exp_from_log(double log_value) {
+    if (log_value >= std::log(std::numeric_limits<double>::max())) {
+        return -std::numeric_limits<double>::infinity();
+    }
+    return -std::exp(log_value);
+}
+
+bool accept_log_ratio(
+    RandomStream &random,
+    double log_ratio,
+    double log_constant
+) {
+    const double log_acceptance = std::min(0.0, log_ratio - log_constant);
+    return std::log(
+        std::max(random.uniform(), std::numeric_limits<double>::min())
+    ) <= log_acceptance;
+}
+
+double exponentially_tilted_stable_qu(
+    RandomStream &random,
+    const QuTiltedStableParameters &parameters
+) {
+    constexpr double pi = 3.141592653589793238462643383279502884;
+    const double alpha = parameters.alpha;
+    const double complement = parameters.complement;
+    const double x_power = parameters.x_power;
+
+    while (true) {
+        const bool normal_angle = parameters.envelope >= 2;
+        const double angle = normal_angle
+            ? truncated_zero_mean_normal(random, parameters.normal_precision, pi)
+            : pi * random.uniform();
+        const double log_b = qu_log_b(angle, parameters);
+
+        if (parameters.envelope == 0 || parameters.envelope == 2) {
+            const double x = gamma_shape(random, parameters.gamma_shape_x);
+            const double log_x = std::log(x);
+            const double log_tempering_term = log_b / complement
+                + x_power * parameters.log_lambda
+                - x_power * log_x;
+            double log_ratio = parameters.log_x_ratio_constant
+                + log_b / complement
+                - (x_power + parameters.gamma_shape_x) * log_x
+                + negative_exp_from_log(log_tempering_term);
+            if (normal_angle) {
+                log_ratio += parameters.log_normal_adjustment
+                    + 0.5 * parameters.normal_precision * angle * angle;
+            }
+            if (accept_log_ratio(
+                    random,
+                    log_ratio,
+                    parameters.log_constants[parameters.envelope])) {
+                const double result = x / parameters.lambda;
+                if (result > 0.0 && std::isfinite(result)) return result;
+            }
+            continue;
+        }
+
+        const double z = gamma_shape(random, parameters.gamma_shape_z);
+        const double log_z = std::log(z);
+        const double log_result = log_b / alpha
+            - complement * log_z / alpha;
+        if (log_result >= std::log(std::numeric_limits<double>::max())) continue;
+        const double result = std::exp(log_result);
+        double log_ratio = parameters.log_z_ratio_constant
+            - parameters.z_power * log_z
+            - parameters.lambda * result;
+        if (normal_angle) {
+            log_ratio += parameters.log_normal_adjustment
+                + 0.5 * parameters.normal_precision * angle * angle;
+        }
+        if (accept_log_ratio(
+                random,
+                log_ratio,
+                parameters.log_constants[parameters.envelope])) {
+            if (result > 0.0 && std::isfinite(result)) return result;
+        }
+    }
+}
+
 struct NTSSubordinatorParameters {
     double scale;
     TiltedStableParameters tilted;
+    QuTiltedStableParameters qu;
 };
-
-// Kanter stable rejection wins comfortably in this range; Devroye's uniformly
-// bounded double-rejection sampler remains the fallback for stronger tilting.
-constexpr double kSimpleRejectionMaxLambdaAlpha = 1.5;
 
 NTSSubordinatorParameters make_nts_subordinator_parameters(
     double tail_index,
@@ -303,18 +541,62 @@ NTSSubordinatorParameters make_nts_subordinator_parameters(
         (1.0 - alpha) * std::log(tempering) - std::log(alpha)
     ) / alpha;
     const double scale = std::exp(log_scale);
-    return {scale, make_tilted_stable_parameters(alpha, tempering * scale)};
+    const double tilt = tempering * scale;
+    return {
+        scale,
+        make_tilted_stable_parameters(alpha, tilt),
+        make_qu_tilted_stable_parameters(alpha, tilt),
+    };
+}
+
+enum class NTSAlgorithm {
+    production = 0,
+    simple_rejection = 1,
+    devroye = 2,
+    qu = 3,
+    legacy_hybrid = 4,
+};
+
+double nts_subordinator_with_algorithm(
+    RandomStream &random,
+    const NTSSubordinatorParameters &parameters,
+    NTSAlgorithm algorithm
+) {
+    double tilted = 0.0;
+    switch (algorithm) {
+        case NTSAlgorithm::simple_rejection:
+            tilted = exponentially_tilted_stable_simple_rejection(
+                random,
+                parameters.tilted
+            );
+            break;
+        case NTSAlgorithm::devroye:
+            tilted = exponentially_tilted_stable(random, parameters.tilted);
+            break;
+        case NTSAlgorithm::qu:
+            tilted = exponentially_tilted_stable_qu(random, parameters.qu);
+            break;
+        case NTSAlgorithm::production:
+            tilted = exponentially_tilted_stable_qu(random, parameters.qu);
+            break;
+        case NTSAlgorithm::legacy_hybrid:
+            tilted = parameters.tilted.lambda_alpha <= 1.5
+                ? exponentially_tilted_stable_simple_rejection(random, parameters.tilted)
+                : exponentially_tilted_stable(random, parameters.tilted);
+            break;
+    }
+    return parameters.scale * tilted;
 }
 
 double nts_subordinator(
     RandomStream &random,
     const NTSSubordinatorParameters &parameters
 ) {
-    const double tilted = parameters.tilted.lambda_alpha
-            <= kSimpleRejectionMaxLambdaAlpha
-        ? exponentially_tilted_stable_simple_rejection(random, parameters.tilted)
-        : exponentially_tilted_stable(random, parameters.tilted);
-    return parameters.scale * tilted;
+    return nts_subordinator_with_algorithm(
+        random,
+        parameters,
+        NTSAlgorithm::production
+    );
 }
 
 template <typename Function>
@@ -352,6 +634,29 @@ extern "C" int mc_sample_mnts_subordinators(
     );
     for (int index = 0; index < samples; ++index) {
         output[index] = nts_subordinator(random, parameters);
+        if (!std::isfinite(output[index]) || output[index] <= 0.0) return 2;
+    }
+    return 0;
+}
+
+extern "C" int mc_sample_mnts_subordinators_algorithm(
+    int samples,
+    double tail_index,
+    double tempering,
+    std::uint64_t seed,
+    int algorithm,
+    double *output
+) {
+    if (samples <= 0 || !(tail_index > 0.0 && tail_index < 2.0) ||
+        !(tempering > 0.0) || algorithm < 0 || algorithm > 4 || !output) return 1;
+    RandomStream random(seed, 0);
+    const NTSSubordinatorParameters parameters = make_nts_subordinator_parameters(
+        tail_index,
+        tempering
+    );
+    const NTSAlgorithm selected = static_cast<NTSAlgorithm>(algorithm);
+    for (int index = 0; index < samples; ++index) {
+        output[index] = nts_subordinator_with_algorithm(random, parameters, selected);
         if (!std::isfinite(output[index]) || output[index] <= 0.0) return 2;
     }
     return 0;
@@ -1062,6 +1367,7 @@ extern "C" int mc_simulate_italian_portfolios(
             int wrapper_return_count = 0;
             const bool managed = tax_regime == 2;
             const bool declarative = tax_regime == 1;
+            const bool withdrawals_enabled = advanced_decumulation || withdrawal > 0.0;
             const double wealth_tax_rate = annual_wealth_tax / 12.0;
 
             struct SpendingState {
@@ -1249,7 +1555,9 @@ extern "C" int mc_simulate_italian_portfolios(
                     }
                 }
 
-                const double opening_value = sum_values(holdings);
+                const double opening_value = withdrawals_enabled
+                    ? sum_values(holdings)
+                    : 0.0;
                 for (int asset = 0; asset < assets; ++asset) {
                     const std::size_t index = (
                         (static_cast<std::size_t>(period) * paths + path) * assets + asset
@@ -1259,24 +1567,28 @@ extern "C" int mc_simulate_italian_portfolios(
                     if (wrapper_benchmark) wrapper[asset] *= growth[index];
                 }
 
-                std::int8_t policy_event = 0;
-                const double active_withdrawal = spending_request(
-                    sum_values(holdings), diy_spending, period, &policy_event
-                );
-                const double gross_active_withdrawal = spending_request(
-                    sum_values(gross), gross_spending, period, nullptr
-                );
-                const double wrapper_active_withdrawal = wrapper_benchmark
-                    ? spending_request(sum_values(wrapper), wrapper_spending, period, nullptr)
-                    : 0.0;
                 double wrapper_funded_withdrawal = 0.0;
-                const std::size_t spending_index = static_cast<std::size_t>(period) * paths + path;
-                if (advanced_decumulation) {
-                    requested_spending[spending_index] = active_withdrawal;
-                    guardrail_events[spending_index] = policy_event;
-                }
+                if (withdrawals_enabled) {
+                    std::int8_t policy_event = 0;
+                    const double active_withdrawal = spending_request(
+                        sum_values(holdings), diy_spending, period, &policy_event
+                    );
+                    const double gross_active_withdrawal = spending_request(
+                        sum_values(gross), gross_spending, period, nullptr
+                    );
+                    const double wrapper_active_withdrawal = wrapper_benchmark
+                        ? spending_request(
+                            sum_values(wrapper), wrapper_spending, period, nullptr
+                        )
+                        : 0.0;
+                    const std::size_t spending_index =
+                        static_cast<std::size_t>(period) * paths + path;
+                    if (advanced_decumulation) {
+                        requested_spending[spending_index] = active_withdrawal;
+                        guardrail_events[spending_index] = policy_event;
+                    }
 
-                if (active_withdrawal > 0.0) {
+                    if (active_withdrawal > 0.0) {
                     const double diy_before_sale = sum_values(holdings);
                     double immediate_withdrawal_tax = 0.0;
                     const double gross_value = sum_values(gross);
@@ -1346,7 +1658,7 @@ extern "C" int mc_simulate_italian_portfolios(
                         funded
                     );
 
-                    if (wrapper_benchmark) {
+                        if (wrapper_benchmark) {
                         const double wrapper_before_sale = sum_values(wrapper);
                         if (declarative) {
                             wrapper_pending_tax += sell_wrapper(
@@ -1380,6 +1692,7 @@ extern "C" int mc_simulate_italian_portfolios(
                                 wrapper_active_withdrawal,
                                 std::max(wrapper_gross_sales - wrapper_tax_total, 0.0)
                             );
+                        }
                         }
                     }
                 }
@@ -1651,6 +1964,605 @@ struct MCItalianPortfolioConfig {
     int year_count;
 };
 
+struct MCRegimeProcessConfig {
+    const double *transition_matrix;
+    const double *start_probabilities;
+    const double *start_state_age_probabilities;
+    int start_state_age_width;
+    int start_state;
+    std::uint64_t seed;
+    int duration_model;
+    const double *duration_hazards;
+    const int *duration_hazard_lengths;
+    int duration_hazard_width;
+    int min_regime_duration;
+    double annual_reporting_inflation;
+    const double *transaction_cost_multipliers;
+    const int *sample_indices;
+    int sample_paths;
+};
+
+struct MCMacroProcessConfig {
+    int dimensions;
+    const double *latest;
+    const double *var_coefficient;
+    const double *var_coefficient_std;
+    int parameter_uncertainty;
+    const double *state_centers;
+    const double *state_innovation_cholesky;
+    const double *emission_coefficients;
+    double transition_weight;
+    int rate_index;
+    double rate_min;
+    double rate_max;
+};
+
+namespace {
+
+struct ParametricPathScratch {
+    std::vector<double> q;
+    std::vector<double> factor;
+    std::vector<double> previous;
+    std::vector<double> independent;
+    std::vector<double> standardized;
+    std::vector<double> conditional_variance;
+
+    void prepare(int assets) {
+        q.resize(static_cast<std::size_t>(assets) * assets);
+        factor.resize(static_cast<std::size_t>(assets) * assets);
+        previous.resize(static_cast<std::size_t>(assets));
+        independent.resize(static_cast<std::size_t>(assets));
+        standardized.resize(static_cast<std::size_t>(assets));
+        conditional_variance.resize(static_cast<std::size_t>(assets));
+    }
+};
+
+int generate_parametric_growth_path(
+    const MCParametricPortfolioConfig &config,
+    const std::vector<std::uint8_t> &regimes,
+    const std::vector<double> &macro_shocks,
+    const NTSSubordinatorParameters *subordinator_parameters,
+    std::uint64_t seed,
+    const double *transaction_cost_multipliers,
+    double default_transaction_cost_rate,
+    std::vector<double> &growth,
+    std::vector<double> &transaction_cost_rates,
+    ParametricPathScratch &scratch
+) {
+    const int periods = config.periods;
+    const int assets = config.assets;
+    scratch.prepare(assets);
+    auto &q = scratch.q;
+    auto &factor = scratch.factor;
+    auto &previous = scratch.previous;
+    auto &independent = scratch.independent;
+    auto &standardized = scratch.standardized;
+    auto &conditional_variance = scratch.conditional_variance;
+    RandomStream random(seed, 0);
+    std::fill(previous.begin(), previous.end(), 0.0);
+    std::fill(conditional_variance.begin(), conditional_variance.end(), 0.0);
+    int previous_state = -1;
+
+    for (int period = 0; period < periods; ++period) {
+        const int state = static_cast<int>(regimes[period]);
+        if (state < 0 || state >= config.states) return 1;
+        const bool reanchored = previous_state != state;
+        const double *base = state_matrix(config.gaussian_correlations, state, assets);
+        const double *correlation_factor = state_matrix(
+            config.gaussian_correlation_cholesky,
+            state,
+            assets
+        );
+        const double *state_mean = state_vector(config.means, state, assets);
+        const double *state_volatility = state_vector(config.volatilities, state, assets);
+        const double *state_skewness = state_vector(config.skewness, state, assets);
+        const double *state_gaussian_scale = state_vector(
+            config.gaussian_scales,
+            state,
+            assets
+        );
+
+        for (int asset = 0; asset < assets; ++asset) {
+            independent[asset] = random.normal();
+        }
+
+        if (config.dynamic_correlation) {
+            if (reanchored) {
+                std::copy(base, base + assets * assets, q.begin());
+            } else {
+                const double base_weight = 1.0
+                    - config.dcc_alpha - config.dcc_beta - config.dcc_asymmetry;
+                for (int row = 0; row < assets; ++row) {
+                    const double negative_row = std::min(previous[row], 0.0);
+                    for (int column = 0; column < assets; ++column) {
+                        const int index = row * assets + column;
+                        q[index] = base_weight * base[index]
+                            + config.dcc_alpha * previous[row] * previous[column]
+                            + config.dcc_beta * q[index]
+                            + config.dcc_asymmetry * negative_row
+                                * std::min(previous[column], 0.0);
+                    }
+                }
+            }
+            cholesky(q, factor, assets);
+            for (int row = 0; row < assets; ++row) {
+                double value = 0.0;
+                for (int column = 0; column <= row; ++column) {
+                    value += factor[row * assets + column] * independent[column];
+                }
+                standardized[row] = value
+                    / std::sqrt(std::max(q[row * assets + row], 1e-10));
+            }
+        } else {
+            for (int row = 0; row < assets; ++row) {
+                double value = 0.0;
+                for (int column = 0; column <= row; ++column) {
+                    value += correlation_factor[row * assets + column]
+                        * independent[column];
+                }
+                standardized[row] = value;
+            }
+        }
+
+        const double subordinator = nts_subordinator(
+            random,
+            subordinator_parameters[state]
+        );
+        const double root_subordinator = std::sqrt(subordinator);
+        for (int asset = 0; asset < assets; ++asset) {
+            standardized[asset] = state_skewness[asset] * (subordinator - 1.0)
+                + root_subordinator * state_gaussian_scale[asset] * standardized[asset];
+        }
+
+        for (int asset = 0; asset < assets; ++asset) {
+            double residual = standardized[asset];
+            if (config.garch) {
+                const double level = state_volatility[asset] * state_volatility[asset];
+                if (reanchored) conditional_variance[asset] = level;
+                residual *= std::sqrt(std::max(conditional_variance[asset], 0.0));
+                conditional_variance[asset] =
+                    (1.0 - config.garch_alpha - config.garch_beta) * level
+                    + config.garch_alpha * residual * residual
+                    + config.garch_beta * conditional_variance[asset];
+            } else {
+                residual *= state_volatility[asset];
+            }
+
+            double macro_effect = 0.0;
+            if (config.macro_dimensions > 0 && !macro_shocks.empty()
+                && config.macro_betas) {
+                const double *shock = macro_shocks.data()
+                    + static_cast<std::size_t>(period) * config.macro_dimensions;
+                for (int dimension = 0; dimension < config.macro_dimensions; ++dimension) {
+                    macro_effect += shock[dimension]
+                        * config.macro_betas[
+                            static_cast<std::size_t>(dimension) * assets + asset
+                        ];
+                }
+            }
+            const double monthly_return = state_mean[asset] + macro_effect + residual;
+            const double asset_growth = config.simple_returns
+                ? (1.0 + monthly_return) * std::exp(config.monthly_fee_log[asset])
+                : std::exp(monthly_return + config.monthly_fee_log[asset]);
+            if (!std::isfinite(asset_growth) || !(asset_growth > 0.0)) return 2;
+            growth[static_cast<std::size_t>(period) * assets + asset] = asset_growth;
+        }
+        if (!transaction_cost_rates.empty()) {
+            transaction_cost_rates[period] = default_transaction_cost_rate
+                * transaction_cost_multipliers[state];
+        }
+        std::copy(standardized.begin(), standardized.end(), previous.begin());
+        previous_state = state;
+    }
+    return 0;
+}
+
+int generate_parametric_growth_path_4(
+    const MCParametricPortfolioConfig &config,
+    const std::vector<std::uint8_t> &regimes,
+    const std::vector<double> &macro_shocks,
+    const NTSSubordinatorParameters *subordinator_parameters,
+    std::uint64_t seed,
+    const double *transaction_cost_multipliers,
+    double default_transaction_cost_rate,
+    std::vector<double> &growth,
+    std::vector<double> &transaction_cost_rates
+) {
+    constexpr int assets = 4;
+    const int periods = config.periods;
+    const int macro_dimensions = config.macro_dimensions;
+    const double *means = config.means;
+    const double *correlation_cholesky = config.gaussian_correlation_cholesky;
+    const double *volatilities = config.volatilities;
+    const double *skewness = config.skewness;
+    const double *gaussian_scales = config.gaussian_scales;
+    const double *macro_betas = config.macro_betas;
+    const double *monthly_fee_log = config.monthly_fee_log;
+    const bool garch = config.garch != 0;
+    const double garch_alpha = config.garch_alpha;
+    const double garch_beta = config.garch_beta;
+    const double garch_base_weight = 1.0 - garch_alpha - garch_beta;
+    double previous[assets]{};
+    double independent[assets];
+    double standardized[assets];
+    double conditional_variance[assets]{};
+    RandomStream random(seed, 0);
+    int previous_state = -1;
+
+    for (int period = 0; period < periods; ++period) {
+        const int state = static_cast<int>(regimes[period]);
+        if (state < 0 || state >= config.states) return 1;
+        const bool reanchored = previous_state != state;
+        const double *correlation_factor = state_matrix(
+            correlation_cholesky,
+            state,
+            assets
+        );
+        const double *state_mean = state_vector(means, state, assets);
+        const double *state_volatility = state_vector(volatilities, state, assets);
+        const double *state_skewness = state_vector(skewness, state, assets);
+        const double *state_gaussian_scale = state_vector(
+            gaussian_scales,
+            state,
+            assets
+        );
+
+        for (int asset = 0; asset < assets; ++asset) {
+            independent[asset] = random.normal();
+        }
+        for (int row = 0; row < assets; ++row) {
+            double value = 0.0;
+            for (int column = 0; column <= row; ++column) {
+                value += correlation_factor[row * assets + column]
+                    * independent[column];
+            }
+            standardized[row] = value;
+        }
+
+        const double subordinator = nts_subordinator(
+            random,
+            subordinator_parameters[state]
+        );
+        const double root_subordinator = std::sqrt(subordinator);
+        for (int asset = 0; asset < assets; ++asset) {
+            standardized[asset] = state_skewness[asset] * (subordinator - 1.0)
+                + root_subordinator * state_gaussian_scale[asset] * standardized[asset];
+        }
+
+        const double *shock = macro_dimensions > 0 && !macro_shocks.empty()
+            ? macro_shocks.data() + static_cast<std::size_t>(period) * macro_dimensions
+            : nullptr;
+        for (int asset = 0; asset < assets; ++asset) {
+            double residual = standardized[asset];
+            if (garch) {
+                const double level = state_volatility[asset] * state_volatility[asset];
+                if (reanchored) conditional_variance[asset] = level;
+                residual *= std::sqrt(std::max(conditional_variance[asset], 0.0));
+                conditional_variance[asset] = garch_base_weight * level
+                    + garch_alpha * residual * residual
+                    + garch_beta * conditional_variance[asset];
+            } else {
+                residual *= state_volatility[asset];
+            }
+
+            double macro_effect = 0.0;
+            if (shock && macro_betas) {
+                if (macro_dimensions == 2) {
+                    macro_effect = shock[0] * macro_betas[asset]
+                        + shock[1] * macro_betas[assets + asset];
+                } else {
+                    for (int dimension = 0; dimension < macro_dimensions; ++dimension) {
+                        macro_effect += shock[dimension]
+                            * macro_betas[
+                                static_cast<std::size_t>(dimension) * assets + asset
+                            ];
+                    }
+                }
+            }
+            const double monthly_return = state_mean[asset] + macro_effect + residual;
+            const double asset_growth = config.simple_returns
+                ? (1.0 + monthly_return) * std::exp(monthly_fee_log[asset])
+                : std::exp(monthly_return + monthly_fee_log[asset]);
+            if (!std::isfinite(asset_growth) || !(asset_growth > 0.0)) return 2;
+            growth[static_cast<std::size_t>(period) * assets + asset] = asset_growth;
+            previous[asset] = standardized[asset];
+        }
+        if (!transaction_cost_rates.empty()) {
+            transaction_cost_rates[period] = default_transaction_cost_rate
+                * transaction_cost_multipliers[state];
+        }
+        previous_state = state;
+    }
+    return 0;
+}
+
+int categorical_draw(RandomStream &random, const double *probabilities, int count) {
+    const double draw = random.uniform();
+    double cumulative = 0.0;
+    for (int index = 0; index < count; ++index) {
+        cumulative += std::max(probabilities[index], 0.0);
+        if (draw < cumulative || index + 1 == count) return index;
+    }
+    return count - 1;
+}
+
+int transition_draw(
+    RandomStream &random,
+    const double *transition,
+    int states,
+    int current,
+    bool exclude_current
+) {
+    const double *row = transition + static_cast<std::size_t>(current) * states;
+    double total = 0.0;
+    for (int state = 0; state < states; ++state) {
+        if (!exclude_current || state != current) total += std::max(row[state], 0.0);
+    }
+    if (!(total > 0.0)) return current;
+    const double draw = random.uniform() * total;
+    double cumulative = 0.0;
+    for (int state = 0; state < states; ++state) {
+        if (exclude_current && state == current) continue;
+        cumulative += std::max(row[state], 0.0);
+        if (draw < cumulative) return state;
+    }
+    for (int state = states - 1; state >= 0; --state) {
+        if (!exclude_current || state != current) return state;
+    }
+    return current;
+}
+
+int sample_sojourn(
+    RandomStream &random,
+    const MCRegimeProcessConfig &config,
+    int state,
+    int start_age = 0
+) {
+    const int length = config.duration_hazard_lengths[state];
+    const double *hazards = config.duration_hazards
+        + static_cast<std::size_t>(state) * config.duration_hazard_width;
+    const double draw = random.uniform();
+    double survival = 1.0;
+    start_age = std::clamp(start_age, 0, std::max(length - 1, 0));
+    for (int age = start_age; age < length; ++age) {
+        const double hazard = age + 1 < config.min_regime_duration
+            ? 0.0
+            : std::clamp(hazards[age], 0.0, 1.0);
+        survival *= 1.0 - hazard;
+        if (draw < 1.0 - survival) return age - start_age + 1;
+    }
+    return std::max({length - start_age, config.min_regime_duration - start_age, 1});
+}
+
+int initialize_regime(
+    RandomStream &random,
+    const MCRegimeProcessConfig &config,
+    int states,
+    int &current,
+    int &current_age
+) {
+    current = config.start_state;
+    current_age = 0;
+    if (current < 0) {
+        if (config.start_state_age_probabilities && config.start_state_age_width > 0) {
+            const int sampled = categorical_draw(
+                random,
+                config.start_state_age_probabilities,
+                states * config.start_state_age_width
+            );
+            current = sampled / config.start_state_age_width;
+            current_age = sampled % config.start_state_age_width;
+        } else {
+            current = categorical_draw(random, config.start_probabilities, states);
+        }
+    }
+    return current < 0 || current >= states ? 1 : 0;
+}
+
+int generate_regime_path(
+    const MCRegimeProcessConfig &config,
+    int states,
+    int periods,
+    int path,
+    std::vector<std::uint8_t> &regimes,
+    std::vector<std::uint64_t> &counts
+) {
+    RandomStream random(config.seed, static_cast<std::uint64_t>(path));
+    int current = -1;
+    int current_age = 0;
+    if (initialize_regime(random, config, states, current, current_age) != 0) return 1;
+
+    int remaining = config.duration_model == 1
+        ? sample_sojourn(random, config, current, current_age)
+        : 0;
+    for (int period = 0; period < periods; ++period) {
+        regimes[period] = static_cast<std::uint8_t>(current);
+        ++counts[current];
+        if (config.duration_model == 0) {
+            current = transition_draw(
+                random,
+                config.transition_matrix,
+                states,
+                current,
+                false
+            );
+            continue;
+        }
+        --remaining;
+        if (remaining > 0) continue;
+        current = transition_draw(
+            random,
+            config.transition_matrix,
+            states,
+            current,
+            true
+        );
+        remaining = sample_sojourn(random, config, current);
+    }
+    return 0;
+}
+
+struct MacroPathScratch {
+    std::vector<double> coefficient;
+    std::vector<double> current;
+    std::vector<double> next;
+    std::vector<double> independent;
+    std::vector<double> probabilities;
+
+    void prepare(int dimensions, int states) {
+        coefficient.resize(static_cast<std::size_t>(dimensions) * dimensions);
+        current.resize(static_cast<std::size_t>(dimensions));
+        next.resize(static_cast<std::size_t>(dimensions));
+        independent.resize(static_cast<std::size_t>(dimensions));
+        probabilities.resize(static_cast<std::size_t>(states));
+    }
+};
+
+int generate_joint_regime_macro_path(
+    const MCRegimeProcessConfig &regime,
+    const MCMacroProcessConfig &macro,
+    int states,
+    int periods,
+    int path,
+    std::vector<std::uint8_t> &regimes,
+    std::vector<double> &macro_shocks,
+    std::vector<double> &macro_values,
+    std::vector<std::uint64_t> &counts,
+    MacroPathScratch &scratch
+) {
+    RandomStream random(regime.seed, static_cast<std::uint64_t>(path));
+    int current = -1;
+    int current_age = 0;
+    if (initialize_regime(random, regime, states, current, current_age) != 0) return 1;
+
+    const int dimensions = macro.dimensions;
+    scratch.prepare(dimensions, states);
+    std::copy(
+        macro.var_coefficient,
+        macro.var_coefficient + static_cast<std::size_t>(dimensions) * dimensions,
+        scratch.coefficient.begin()
+    );
+    std::copy(macro.latest, macro.latest + dimensions, scratch.current.begin());
+    auto &coefficient = scratch.coefficient;
+    auto &current_macro = scratch.current;
+    auto &next_macro = scratch.next;
+    auto &independent = scratch.independent;
+    auto &probabilities = scratch.probabilities;
+    if (macro.parameter_uncertainty) {
+        double maximum_row_norm = 0.0;
+        for (int row = 0; row < dimensions; ++row) {
+            double row_norm = 0.0;
+            for (int column = 0; column < dimensions; ++column) {
+                const int index = row * dimensions + column;
+                coefficient[index] += std::clamp(random.normal(), -2.5, 2.5)
+                    * macro.var_coefficient_std[index] * 0.35;
+                row_norm += std::abs(coefficient[index]);
+            }
+            maximum_row_norm = std::max(maximum_row_norm, row_norm);
+        }
+        if (maximum_row_norm > 0.995) {
+            const double scale = 0.995 / maximum_row_norm;
+            for (double &value : coefficient) value *= scale;
+        }
+    }
+
+    int remaining = regime.duration_model == 1
+        ? sample_sojourn(random, regime, current, current_age)
+        : 0;
+    const double transition_weight = std::clamp(macro.transition_weight, 0.0, 1.0);
+
+    for (int period = 0; period < periods; ++period) {
+        regimes[period] = static_cast<std::uint8_t>(current);
+        ++counts[current];
+        const double *center = macro.state_centers
+            + static_cast<std::size_t>(current) * dimensions;
+        const double *innovation_factor = macro.state_innovation_cholesky
+            + static_cast<std::size_t>(current) * dimensions * dimensions;
+        for (int dimension = 0; dimension < dimensions; ++dimension) {
+            independent[dimension] = random.normal();
+        }
+        for (int output_dimension = 0; output_dimension < dimensions; ++output_dimension) {
+            double shock = 0.0;
+            for (int input_dimension = 0; input_dimension <= output_dimension; ++input_dimension) {
+                shock += innovation_factor[output_dimension * dimensions + input_dimension]
+                    * independent[input_dimension];
+            }
+            macro_shocks[static_cast<std::size_t>(period) * dimensions + output_dimension] = shock;
+            double forecast = center[output_dimension] + shock;
+            for (int input_dimension = 0; input_dimension < dimensions; ++input_dimension) {
+                forecast += (current_macro[input_dimension] - center[input_dimension])
+                    * coefficient[input_dimension * dimensions + output_dimension];
+            }
+            next_macro[output_dimension] = forecast;
+        }
+        if (macro.rate_index >= 0) {
+            next_macro[macro.rate_index] = std::clamp(
+                next_macro[macro.rate_index],
+                macro.rate_min,
+                macro.rate_max
+            );
+        }
+        if (!macro_values.empty()) {
+            std::copy(
+                next_macro.begin(),
+                next_macro.end(),
+                macro_values.begin() + static_cast<std::size_t>(period) * dimensions
+            );
+        }
+        current_macro.swap(next_macro);
+
+        if (regime.duration_model == 1) {
+            --remaining;
+            if (remaining > 0) continue;
+        }
+        const double growth = current_macro[0];
+        const double inflation = current_macro[1];
+        const double features[6] = {
+            growth * growth,
+            growth * inflation,
+            inflation * inflation,
+            growth,
+            inflation,
+            1.0,
+        };
+        const double *transition = regime.transition_matrix
+            + static_cast<std::size_t>(current) * states;
+        double maximum_score = -std::numeric_limits<double>::infinity();
+        for (int state = 0; state < states; ++state) {
+            if (regime.duration_model == 1 && state == current) {
+                probabilities[state] = -std::numeric_limits<double>::infinity();
+                continue;
+            }
+            const double *emission = macro.emission_coefficients
+                + static_cast<std::size_t>(state) * 6;
+            double emission_score = 0.0;
+            for (int feature = 0; feature < 6; ++feature) {
+                emission_score += features[feature] * emission[feature];
+            }
+            probabilities[state] = (1.0 - transition_weight)
+                    * std::log(std::max(transition[state], 1e-12))
+                + transition_weight * emission_score;
+            maximum_score = std::max(maximum_score, probabilities[state]);
+        }
+        double total = 0.0;
+        for (int state = 0; state < states; ++state) {
+            probabilities[state] = std::isfinite(probabilities[state])
+                ? std::exp(probabilities[state] - maximum_score)
+                : 0.0;
+            total += probabilities[state];
+        }
+        if (!(total > 0.0) || !std::isfinite(total)) return 2;
+        for (double &probability : probabilities) probability /= total;
+        current = categorical_draw(random, probabilities.data(), states);
+        if (regime.duration_model == 1) {
+            remaining = sample_sojourn(random, regime, current);
+        }
+    }
+    return 0;
+}
+
+}  // namespace
+
 extern "C" int mc_simulate_parametric_italian_portfolios(
     const MCParametricPortfolioConfig *parametric,
     const MCItalianPortfolioConfig *tax,
@@ -1871,4 +2783,400 @@ extern "C" int mc_simulate_parametric_italian_portfolios(
     return failure.load(std::memory_order_relaxed);
 }
 
-extern "C" int mc_native_version() { return 4; }
+extern "C" int mc_simulate_parametric_italian_portfolios_compact(
+    const MCParametricPortfolioConfig *parametric,
+    const MCItalianPortfolioConfig *tax,
+    const MCRegimeProcessConfig *regime,
+    const MCMacroProcessConfig *macro,
+    double *sample_gross_wealth,
+    double *sample_diy_wealth,
+    std::uint8_t *sample_regimes,
+    double *sample_macro,
+    double *gross_terminal,
+    double *diy_terminal,
+    double *wrapper_terminal,
+    double *wrapper_annualized,
+    double *tax_totals,
+    double *gross_transaction_cost_total,
+    double *year_stats,
+    std::uint64_t *regime_counts,
+    double *max_drawdowns
+) {
+    if (!parametric || !tax || !regime || !parametric->means ||
+        !parametric->gaussian_correlation_cholesky || !parametric->gaussian_correlations ||
+        !parametric->volatilities || !parametric->tail_indexes || !parametric->temperings ||
+        !parametric->skewness || !parametric->gaussian_scales ||
+        !parametric->monthly_fee_log || !tax->weights || !tax->taxable_fraction ||
+        !tax->offsettable || !tax->ftt_rates || !tax->stamp_mask || !tax->ivafe_mask ||
+        !tax->year_slots || !regime->transition_matrix ||
+        (regime->start_state < 0 && !regime->start_probabilities &&
+         !regime->start_state_age_probabilities) ||
+        !regime->sample_indices || !sample_gross_wealth || !sample_diy_wealth ||
+        !sample_regimes || !gross_terminal || !diy_terminal || !tax_totals ||
+        !gross_transaction_cost_total || !year_stats || !regime_counts ||
+        !max_drawdowns) return 1;
+    const int periods = parametric->periods;
+    const int paths = parametric->paths;
+    const int assets = parametric->assets;
+    const int states = parametric->states;
+    const int sample_paths = regime->sample_paths;
+    if (periods <= 0 || paths <= 0 || assets <= 0 || states <= 0 || states > 256 ||
+        tax->year_count <= 0 || sample_paths <= 0 || sample_paths > paths ||
+        regime->duration_model < 0 || regime->duration_model > 1 ||
+        regime->min_regime_duration <= 0) return 2;
+    if (tax->transaction_cost_rate_paths) return 3;
+    if (!macro && parametric->macro_dimensions != 0) return 3;
+    if (macro && (
+        macro->dimensions < 2 || parametric->macro_dimensions != macro->dimensions ||
+        !macro->latest || !macro->var_coefficient || !macro->var_coefficient_std ||
+        !macro->state_centers || !macro->state_innovation_cholesky ||
+        !macro->emission_coefficients || !parametric->macro_betas || !sample_macro ||
+        macro->transition_weight < 0.0 || macro->transition_weight > 1.0 ||
+        macro->rate_index < -1 || macro->rate_index >= macro->dimensions ||
+        (macro->rate_index >= 0 && macro->rate_min > macro->rate_max)
+    )) return 7;
+    if (regime->duration_model == 1 &&
+        (!regime->duration_hazards || !regime->duration_hazard_lengths ||
+         regime->duration_hazard_width <= 0)) return 4;
+    if (regime->start_state_age_probabilities &&
+        regime->start_state_age_width != regime->duration_hazard_width) return 4;
+    if (tax->wrapper_benchmark && (!wrapper_terminal || !wrapper_annualized)) return 5;
+
+    std::vector<NTSSubordinatorParameters> state_subordinators;
+    state_subordinators.reserve(static_cast<std::size_t>(states));
+    for (int state = 0; state < states; ++state) {
+        if (!(parametric->tail_indexes[state] > 0.0
+                && parametric->tail_indexes[state] < 2.0)
+            || !(parametric->temperings[state] > 0.0)) return 22;
+        for (int asset = 0; asset < assets; ++asset) {
+            const std::size_t index = static_cast<std::size_t>(state) * assets + asset;
+            if (!std::isfinite(parametric->skewness[index])
+                || !(parametric->gaussian_scales[index] > 0.0)) return 23;
+        }
+        state_subordinators.push_back(make_nts_subordinator_parameters(
+            parametric->tail_indexes[state],
+            parametric->temperings[state]
+        ));
+    }
+    std::vector<double> reporting_discount(static_cast<std::size_t>(periods));
+    for (int period = 0; period < periods; ++period) {
+        reporting_discount[period] = std::pow(
+            1.0 + regime->annual_reporting_inflation,
+            -static_cast<double>(period + 1) / 12.0
+        );
+    }
+
+    std::vector<int> sample_positions(static_cast<std::size_t>(paths), -1);
+    for (int sample = 0; sample < sample_paths; ++sample) {
+        const int path = regime->sample_indices[sample];
+        if (path < 0 || path >= paths || sample_positions[path] >= 0) return 6;
+        sample_positions[path] = sample;
+    }
+    std::fill(tax_totals, tax_totals + kTaxStatCount, 0.0);
+    *gross_transaction_cost_total = 0.0;
+    std::fill(
+        year_stats,
+        year_stats + static_cast<std::size_t>(tax->year_count) * kYearStatCount,
+        0.0
+    );
+    std::fill(regime_counts, regime_counts + states, 0ULL);
+
+    std::atomic<int> failure{0};
+    std::mutex aggregate_mutex;
+    parallel_paths(paths, parametric->requested_threads, [&](int begin, int end) {
+        std::vector<double> local_tax_totals(kTaxStatCount, 0.0);
+        std::vector<double> local_year_stats(
+            static_cast<std::size_t>(tax->year_count) * kYearStatCount,
+            0.0
+        );
+        std::vector<std::uint64_t> local_regime_counts(
+            static_cast<std::size_t>(states),
+            0ULL
+        );
+        double local_gross_cost_total = 0.0;
+        std::vector<std::uint8_t> path_regimes(static_cast<std::size_t>(periods));
+        std::vector<double> path_macro_shocks(
+            macro
+                ? static_cast<std::size_t>(periods) * macro->dimensions
+                : 0U
+        );
+        std::vector<double> path_macro_values;
+        std::vector<double> path_returns(
+            static_cast<std::size_t>(periods) * assets,
+            0.0
+        );
+        std::vector<double> path_growth(path_returns.size(), 0.0);
+        std::vector<double> path_cost_rates(
+            regime->transaction_cost_multipliers
+                ? static_cast<std::size_t>(periods)
+                : 0U
+        );
+        std::vector<double> path_gross(static_cast<std::size_t>(periods), 0.0);
+        std::vector<double> path_diy(static_cast<std::size_t>(periods), 0.0);
+        std::vector<double> path_wrapper_terminal(tax->wrapper_benchmark ? 1U : 0U);
+        std::vector<double> path_wrapper_annualized(tax->wrapper_benchmark ? 1U : 0U);
+        std::vector<double> path_tax_stats(kTaxStatCount, 0.0);
+        std::vector<double> path_year_stats(
+            static_cast<std::size_t>(tax->year_count) * kYearStatCount,
+            0.0
+        );
+        MacroPathScratch macro_scratch;
+        ParametricPathScratch parametric_scratch;
+        for (int path = begin; path < end; ++path) {
+            if (failure.load(std::memory_order_relaxed) != 0) continue;
+            const int sample = sample_positions[path];
+            path_macro_values.resize(
+                macro && sample >= 0
+                    ? static_cast<std::size_t>(periods) * macro->dimensions
+                    : 0U
+            );
+            const int regime_status = macro
+                ? generate_joint_regime_macro_path(
+                    *regime,
+                    *macro,
+                    states,
+                    periods,
+                    path,
+                    path_regimes,
+                    path_macro_shocks,
+                    path_macro_values,
+                    local_regime_counts,
+                    macro_scratch
+                )
+                : generate_regime_path(
+                    *regime,
+                    states,
+                    periods,
+                    path,
+                    path_regimes,
+                    local_regime_counts
+                );
+            if (regime_status != 0) {
+                failure.store(10, std::memory_order_relaxed);
+                continue;
+            }
+
+            constexpr std::uint64_t stream_constant = 0x9e3779b97f4a7c15ULL;
+            const std::uint64_t adjusted_seed = parametric->seed
+                ^ (stream_constant * (static_cast<std::uint64_t>(path) + 1ULL))
+                ^ stream_constant;
+            const bool specialized_four_assets = assets == 4
+                && !parametric->dynamic_correlation;
+            const bool fused_parametric_growth = !parametric->dynamic_correlation;
+            const int return_status = specialized_four_assets
+                ? generate_parametric_growth_path_4(
+                    *parametric,
+                    path_regimes,
+                    path_macro_shocks,
+                    state_subordinators.data(),
+                    adjusted_seed,
+                    regime->transaction_cost_multipliers,
+                    tax->default_transaction_cost_rate,
+                    path_growth,
+                    path_cost_rates
+                )
+                : fused_parametric_growth
+                ? generate_parametric_growth_path(
+                    *parametric,
+                    path_regimes,
+                    path_macro_shocks,
+                    state_subordinators.data(),
+                    adjusted_seed,
+                    regime->transaction_cost_multipliers,
+                    tax->default_transaction_cost_rate,
+                    path_growth,
+                    path_cost_rates,
+                    parametric_scratch
+                )
+                : mc_simulate_parametric(
+                    periods,
+                    1,
+                    assets,
+                    states,
+                    parametric->macro_dimensions,
+                    path_regimes.data(),
+                    parametric->means,
+                    parametric->gaussian_correlation_cholesky,
+                    parametric->gaussian_correlations,
+                    parametric->volatilities,
+                    parametric->tail_indexes,
+                    parametric->temperings,
+                    parametric->skewness,
+                    parametric->gaussian_scales,
+                    path_macro_shocks.empty() ? nullptr : path_macro_shocks.data(),
+                    parametric->macro_betas,
+                    adjusted_seed,
+                    parametric->garch,
+                    parametric->garch_alpha,
+                    parametric->garch_beta,
+                    parametric->dynamic_correlation,
+                    parametric->dcc_alpha,
+                    parametric->dcc_beta,
+                    parametric->dcc_asymmetry,
+                    1,
+                    path_returns.data()
+                );
+            if (return_status != 0) {
+                failure.store(
+                    fused_parametric_growth && return_status == 2
+                        ? 30
+                        : 20 + return_status,
+                    std::memory_order_relaxed
+                );
+                continue;
+            }
+
+            bool valid_growth = true;
+            if (!fused_parametric_growth) {
+                for (int period = 0; period < periods; ++period) {
+                    for (int asset = 0; asset < assets; ++asset) {
+                        const std::size_t index =
+                            static_cast<std::size_t>(period) * assets + asset;
+                        const double asset_growth = parametric->simple_returns
+                            ? (1.0 + path_returns[index])
+                                * std::exp(parametric->monthly_fee_log[asset])
+                            : std::exp(
+                                path_returns[index] + parametric->monthly_fee_log[asset]
+                            );
+                        path_growth[index] = asset_growth;
+                        valid_growth = valid_growth
+                            && std::isfinite(asset_growth) && asset_growth > 0.0;
+                    }
+                    if (!path_cost_rates.empty()) {
+                        path_cost_rates[period] = tax->default_transaction_cost_rate
+                            * regime->transaction_cost_multipliers[path_regimes[period]];
+                    }
+                }
+            }
+            if (!valid_growth) {
+                failure.store(30, std::memory_order_relaxed);
+                continue;
+            }
+
+            std::fill(path_tax_stats.begin(), path_tax_stats.end(), 0.0);
+            std::fill(path_year_stats.begin(), path_year_stats.end(), 0.0);
+            double path_gross_cost = 0.0;
+            const int ledger_status = mc_simulate_italian_portfolios(
+                periods,
+                1,
+                assets,
+                1,
+                path_growth.data(),
+                tax->weights,
+                tax->initial_value,
+                tax->rebalance_frequency,
+                path_cost_rates.empty() ? nullptr : path_cost_rates.data(),
+                tax->default_transaction_cost_rate,
+                tax->contribution,
+                tax->contribution_mode,
+                tax->withdrawal,
+                tax->withdrawal_start_period,
+                0,
+                0,
+                nullptr,
+                nullptr,
+                nullptr,
+                nullptr,
+                nullptr,
+                0,
+                0.0,
+                nullptr,
+                nullptr,
+                0,
+                12,
+                1.20,
+                0.80,
+                0.10,
+                0.70,
+                1.30,
+                1,
+                tax->tax_regime,
+                tax->taxable_fraction,
+                tax->offsettable,
+                tax->ftt_rates,
+                tax->stamp_mask,
+                tax->ivafe_mask,
+                tax->annual_wealth_tax,
+                tax->terminal_liquidation,
+                tax->wrapper_benchmark,
+                tax->year_slots,
+                tax->year_count,
+                path_gross.data(),
+                path_diy.data(),
+                path_wrapper_terminal.empty() ? nullptr : path_wrapper_terminal.data(),
+                path_wrapper_annualized.empty() ? nullptr : path_wrapper_annualized.data(),
+                path_tax_stats.data(),
+                &path_gross_cost,
+                path_year_stats.data(),
+                nullptr,
+                nullptr,
+                nullptr
+            );
+            if (ledger_status != 0) {
+                failure.store(40 + ledger_status, std::memory_order_relaxed);
+                continue;
+            }
+
+            gross_terminal[path] = path_gross.back();
+            diy_terminal[path] = path_diy.back();
+            double running_peak = tax->initial_value;
+            double max_drawdown = 0.0;
+            for (int period = 0; period < periods; ++period) {
+                const double reporting_value = path_diy[period]
+                    * reporting_discount[period];
+                running_peak = std::max(running_peak, reporting_value);
+                if (running_peak > 0.0) {
+                    max_drawdown = std::max(
+                        max_drawdown,
+                        1.0 - reporting_value / running_peak
+                    );
+                }
+                if (sample >= 0) {
+                    const std::size_t destination =
+                        static_cast<std::size_t>(period) * sample_paths + sample;
+                    sample_gross_wealth[destination] = path_gross[period];
+                    sample_diy_wealth[destination] = path_diy[period];
+                    sample_regimes[destination] = path_regimes[period];
+                    if (macro) {
+                        for (int dimension = 0; dimension < macro->dimensions; ++dimension) {
+                            sample_macro[
+                                destination * macro->dimensions + dimension
+                            ] = path_macro_values[
+                                static_cast<std::size_t>(period) * macro->dimensions
+                                    + dimension
+                            ];
+                        }
+                    }
+                }
+            }
+            max_drawdowns[path] = max_drawdown;
+            if (tax->wrapper_benchmark) {
+                wrapper_terminal[path] = path_wrapper_terminal[0];
+                wrapper_annualized[path] = path_wrapper_annualized[0];
+            }
+
+            for (int stat = 0; stat < kTaxStatCount; ++stat) {
+                local_tax_totals[stat] += path_tax_stats[stat];
+            }
+            local_gross_cost_total += path_gross_cost;
+            for (std::size_t index = 0; index < path_year_stats.size(); ++index) {
+                local_year_stats[index] += path_year_stats[index];
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(aggregate_mutex);
+        for (int stat = 0; stat < kTaxStatCount; ++stat) {
+            tax_totals[stat] += local_tax_totals[stat];
+        }
+        *gross_transaction_cost_total += local_gross_cost_total;
+        for (std::size_t index = 0; index < local_year_stats.size(); ++index) {
+            year_stats[index] += local_year_stats[index];
+        }
+        for (int state = 0; state < states; ++state) {
+            regime_counts[state] += local_regime_counts[state];
+        }
+    });
+    return failure.load(std::memory_order_relaxed);
+}
+
+extern "C" int mc_native_version() { return 8; }

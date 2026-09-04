@@ -1023,8 +1023,12 @@ def _period_quantiles(
 
 
 def _wealth_percentiles(wealth: pd.DataFrame) -> pd.DataFrame:
-    """Compute exact per-period wealth percentiles with bounded workspace."""
+    """Compute per-period bands and preserve exact compact terminal percentiles."""
     quantiles = _period_quantiles(wealth.to_numpy(dtype=float))
+    full_terminal = wealth.attrs.get("full_terminal_values")
+    if full_terminal is not None:
+        terminal = np.asarray(full_terminal, dtype=float)
+        quantiles[:, -1] = np.quantile(terminal, (0.05, 0.50, 0.95))
     return pd.DataFrame(quantiles.T, columns=[0.05, 0.50, 0.95])
 
 
@@ -1124,15 +1128,16 @@ def _analytics_inputs(
 ) -> tuple[pd.DataFrame, Any, np.ndarray, dict[str, Any]]:
     """Bound high-dimensional diagnostics while retaining exact core outputs."""
 
-    total_paths = wealth.shape[1]
-    indices = _reporting_indices(total_paths, MAX_ANALYTICS_PATHS)
+    retained_paths = wealth.shape[1]
+    total_paths = int(wealth.attrs.get("total_simulated_paths", retained_paths))
+    indices = _reporting_indices(retained_paths, MAX_ANALYTICS_PATHS)
     metadata = {
         "paths": int(len(indices)),
         "total_paths": int(total_paths),
-        "sampled": bool(len(indices) < total_paths),
+        "sampled": bool(len(indices) < total_paths or retained_paths < total_paths),
         "selection": "deterministic_even_spacing",
     }
-    if len(indices) == total_paths:
+    if len(indices) == retained_paths:
         return wealth, result, drawdowns, metadata
 
     sampled_wealth = wealth.iloc[:, indices].copy()
@@ -1604,6 +1609,14 @@ def _path_analytics(
 
 
 def _regime_counts(result: Any) -> dict[str, int]:
+    native_portfolio = getattr(result, "native_portfolio", None)
+    if isinstance(native_portfolio, Mapping) and native_portfolio.get("regime_counts") is not None:
+        counts = np.asarray(native_portfolio["regime_counts"], dtype=np.uint64)
+        if counts.shape == (len(result.states),):
+            return {
+                str(state): int(count)
+                for state, count in zip(result.states, counts)
+            }
     regimes = result.regimes
     if regimes.dtype.kind in "iu":
         codes = regimes.ravel()
@@ -1992,20 +2005,29 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     growth_col = scenario.model.metadata.get("growth_col", "growth")
     inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
     percentiles, gross_percentiles = _wealth_percentile_pair(wealth, gross_wealth)
-    terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
-    drawdown_values = _max_drawdown_paths(
-        wealth,
-        initial_value=float(payload.get("initial_value", 100.0)),
+    history_terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
+    terminal_values = np.asarray(
+        wealth.attrs.get("full_terminal_values", history_terminal_values),
+        dtype=float,
+    )
+    native_drawdowns = wealth.attrs.get("native_max_drawdowns")
+    drawdown_values = (
+        np.asarray(native_drawdowns, dtype=float)
+        if native_drawdowns is not None
+        else _max_drawdown_paths(
+            wealth,
+            initial_value=float(payload.get("initial_value", 100.0)),
+        )
     )
     reporting_indices = _reporting_indices(len(terminal_values))
     regime_timelines: dict[str, list[str]] = {}
-    timeline_quantiles = np.quantile(terminal_values, (0.05, 0.50, 0.95))
+    timeline_quantiles = np.quantile(history_terminal_values, (0.05, 0.50, 0.95))
     for label, target_value in zip(
         ("p05", "median", "p95"),
         timeline_quantiles,
         strict=True,
     ):
-        path_index = int(np.argmin(np.abs(terminal_values - target_value)))
+        path_index = int(np.argmin(np.abs(history_terminal_values - target_value)))
         column = result.regimes[:, path_index]
         if result.regimes.dtype.kind in "iu":
             states = np.asarray(result.states, dtype=object)
@@ -2099,8 +2121,13 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "wrapper_advantage_percent": summary_values.get("wrapper_advantage_percent", 0.0),
         "wrapper_annual_drag_bps": summary_values.get("wrapper_annual_drag_bps", 0.0),
     }
+    history_drawdowns = drawdown_values
+    if len(drawdown_values) != wealth.shape[1]:
+        sample_indices = np.asarray(wealth.attrs.get("sample_indices", np.empty(0)), dtype=int)
+        if sample_indices.shape == (wealth.shape[1],):
+            history_drawdowns = drawdown_values[sample_indices]
     analytics_wealth, analytics_result, analytics_drawdowns, analytics_sample = (
-        _analytics_inputs(wealth, result, drawdown_values)
+        _analytics_inputs(wealth, result, history_drawdowns)
     )
     path_analytics = _path_analytics(
         analytics_wealth,
@@ -2122,7 +2149,11 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
                 if misses.any()
                 else 0.0
             ),
-            "risk_of_ruin": _risk_of_ruin(wealth),
+            "risk_of_ruin": (
+                float(np.mean(drawdown_values >= 1.0 - 1e-12))
+                if len(drawdown_values) == len(terminal_values)
+                else _risk_of_ruin(wealth)
+            ),
         }
     )
     path_analytics["goal_curve"] = _goal_probability_curve(
@@ -2141,9 +2172,9 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     warnings = list(scenario.diagnostics.warnings)
     if analytics_sample["sampled"]:
         warnings.append(
-            "Core simulation, tax totals, terminal statistics, wealth percentiles, goal success, shortfall, "
-            f"and ruin use all paths; advanced path diagnostics and charts use a deterministic "
-            f"{analytics_sample['paths']:,}-path sample."
+            "Core simulation, tax totals, terminal statistics, final-horizon wealth percentiles, goal "
+            "success, shortfall, drawdowns, and ruin use all paths; intermediate chart bands and advanced "
+            f"path diagnostics use a deterministic {analytics_sample['paths']:,}-path sample."
         )
     if persistence["low_persistence_warning"]:
         warnings.append(
@@ -2162,7 +2193,10 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "Italian tax rules use the versioned IT-2026 planning snapshot; future simulation years "
             "assume those rules remain unchanged."
         )
-    path_count = max(int(result.regimes.shape[1]), 1)
+    path_count = max(
+        int(wealth.attrs.get("total_simulated_paths", result.regimes.shape[1])),
+        1,
+    )
     tax_by_year = {
         str(year): {
             str(metric): float(value) / path_count
@@ -2182,6 +2216,12 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             else "nominal"
         ),
         "warnings": warnings,
+        "execution": {
+            "native_backend": bool(wealth.attrs.get("native_backend", False)),
+            "compact_reporting": bool(wealth.attrs.get("compact_reporting", False)),
+            "simulated_paths": path_count,
+            "retained_history_paths": int(wealth.shape[1]),
+        },
         "costs": costs,
         "taxes": {
             **(

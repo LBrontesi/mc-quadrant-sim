@@ -9,7 +9,6 @@ import pandas as pd
 from mc_quadrants.decumulation import (
     DecumulationPlan,
     SpendingController,
-    funded_amount,
     inflation_index,
     normalize_decumulation,
 )
@@ -804,6 +803,13 @@ def italian_native_result_frame(
             "native_gross_transaction_cost_total": float(
                 native_result["gross_transaction_cost_total"]
             ),
+            "compact_reporting": bool(native_result.get("compact_reporting", False)),
+            "total_simulated_paths": int(native_result.get("total_paths", paths)),
+            "sample_indices": native_result.get("sample_indices"),
+            "terminal_values": native_result.get("terminal_values"),
+            "gross_terminal_values": native_result.get("gross_terminal_values"),
+            "native_max_drawdowns": native_result.get("max_drawdowns"),
+            "native_regime_counts": native_result.get("regime_counts"),
         }
     )
     return frame

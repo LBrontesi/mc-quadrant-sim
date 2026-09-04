@@ -97,7 +97,7 @@ def benchmark(
     weight_values = np.full(len(assets), 0.25)
     weights = dict(zip(assets, weight_values, strict=True))
 
-    def run_fused(wrapper_benchmark: bool):
+    def run_fused(wrapper_benchmark: bool, *, compact: bool):
         native_config = prepare_italian_native_configuration(
             periods=periods,
             assets=assets,
@@ -123,6 +123,8 @@ def benchmark(
                 "expense_ratios": np.zeros(len(assets)),
                 "return_kind": "log",
                 "state_transaction_cost_multipliers": {},
+                "compact_reporting": compact,
+                "compact_reporting_paths": min(paths, 25_000),
             }
         )
         result = simulate_returns(
@@ -143,20 +145,30 @@ def benchmark(
             fused=True,
         )
 
-    baseline_runs: list[float] = []
+    detailed_runs: list[float] = []
+    compact_runs: list[float] = []
     wrapper_runs: list[float] = []
     baseline_result = None
     baseline = None
     wrapper = None
     for _ in range(repeats):
-        baseline_started = time.perf_counter()
-        baseline_result, baseline = run_fused(False)
-        baseline_runs.append(time.perf_counter() - baseline_started)
+        detailed_started = time.perf_counter()
+        detailed_result, detailed_frame = run_fused(False, compact=False)
+        detailed_runs.append(time.perf_counter() - detailed_started)
+        del detailed_result, detailed_frame
+        compact_started = time.perf_counter()
+        baseline_result, baseline = run_fused(False, compact=True)
+        compact_runs.append(time.perf_counter() - compact_started)
         wrapper_started = time.perf_counter()
-        _, wrapper = run_fused(True)
+        _, wrapper = run_fused(True, compact=True)
         wrapper_runs.append(time.perf_counter() - wrapper_started)
-    assert baseline_result is not None and baseline is not None and wrapper is not None
-    baseline_seconds = float(np.median(baseline_runs))
+    assert (
+        baseline_result is not None
+        and baseline is not None
+        and wrapper is not None
+    )
+    detailed_seconds = float(np.median(detailed_runs))
+    baseline_seconds = float(np.median(compact_runs))
     wrapper_seconds = float(np.median(wrapper_runs))
     wrapper_overhead = wrapper_seconds / baseline_seconds - 1.0
     advanced_paths = min(paths, 5_000)
@@ -207,8 +219,14 @@ def benchmark(
         out=np.ones(advanced_paths, dtype=float),
         where=requested.sum(axis=0) > 0,
     )
-    terminal_values = baseline.iloc[-1].to_numpy(dtype=float)
+    terminal_values = np.asarray(baseline.attrs["terminal_values"], dtype=float)
     terminal_quantiles = np.quantile(terminal_values, (0.05, 0.50, 0.95))
+    detailed_history_bytes = periods * paths * (8 + 8 + 1)
+    compact_paths = baseline.shape[1]
+    compact_history_bytes = (
+        periods * compact_paths * (8 + 8 + 1)
+        + paths * (8 + 8 + 8)
+    )
     report: dict[str, object] = {
         "native_available": native_available(),
         "native_backend_used": bool(baseline.attrs.get("native_backend", False)),
@@ -219,7 +237,21 @@ def benchmark(
         "workers": workers,
         "repeats": repeats,
         "fused_total_seconds": round(baseline_seconds, 4),
+        "detailed_fused_seconds": round(detailed_seconds, 4),
+        "compact_speedup": round(detailed_seconds / baseline_seconds, 2),
+        "compact_time_reduction_percent": round(
+            (1.0 - baseline_seconds / detailed_seconds) * 100.0,
+            2,
+        ),
         "return_cube_shape": list(baseline_result.returns.shape),
+        "retained_wealth_shape": list(baseline.shape),
+        "compact_reporting": bool(baseline.attrs["compact_reporting"]),
+        "estimated_detailed_history_mb": round(detailed_history_bytes / 1_000_000.0, 1),
+        "estimated_compact_history_mb": round(compact_history_bytes / 1_000_000.0, 1),
+        "estimated_history_memory_reduction_percent": round(
+            (1.0 - compact_history_bytes / detailed_history_bytes) * 100.0,
+            2,
+        ),
         "wrapper_fused_seconds": round(wrapper_seconds, 4),
         "wrapper_overhead_percent": round(wrapper_overhead * 100.0, 2),
         "target_under_15_seconds": baseline_seconds <= 15.0,

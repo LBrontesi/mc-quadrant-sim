@@ -96,6 +96,81 @@ def _estimate_emissions(
     return means, covariances
 
 
+def _quadrant_semantic_boundaries(
+    means: np.ndarray,
+    states: list[str],
+    global_mean: np.ndarray,
+) -> np.ndarray | None:
+    """Return stable growth/inflation boundaries implied by seeded labels."""
+
+    if means.shape[1] < 2 or set(states) != set(REGIME_ORDER):
+        return None
+    boundaries = np.asarray(global_mean[:2], dtype=float).copy()
+    for dimension in range(2):
+        signs = np.array([_quadrant_signs(state)[dimension] for state in states])
+        high = means[signs > 0, dimension]
+        low = means[signs < 0, dimension]
+        if len(high) and len(low):
+            high_center = float(np.mean(high))
+            low_center = float(np.mean(low))
+            if high_center > low_center:
+                boundaries[dimension] = 0.5 * (high_center + low_center)
+    return boundaries
+
+
+def _update_emissions(
+    values: np.ndarray,
+    state_weights: np.ndarray,
+    states: list[str],
+    prior_strength: float,
+    semantic_boundaries: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """M-step for Gaussian emissions with shrinkage and quadrant constraints."""
+
+    dimensions = values.shape[1]
+    global_mean = np.mean(values, axis=0)
+    global_covariance = np.atleast_2d(np.cov(values, rowvar=False, ddof=1))
+    if global_covariance.shape != (dimensions, dimensions):
+        global_covariance = np.eye(dimensions, dtype=float)
+    global_covariance = nearest_psd(global_covariance)
+    global_scale = np.sqrt(np.maximum(np.diag(global_covariance), 1e-8))
+    ridge = max(float(np.trace(global_covariance)) / max(dimensions, 1), 1e-8) * 1e-6
+
+    means = np.empty((len(states), dimensions), dtype=float)
+    covariances = np.empty((len(states), dimensions, dimensions), dtype=float)
+    for state_index, state in enumerate(states):
+        weights = np.asarray(state_weights[:, state_index], dtype=float)
+        weight_sum = float(weights.sum())
+        if weight_sum <= 1e-12:
+            local_mean = global_mean
+            local_covariance = global_covariance
+            reliability = 0.0
+        else:
+            local_mean = np.average(values, axis=0, weights=weights)
+            centered = values - local_mean
+            effective_denominator = weight_sum - float(np.square(weights).sum()) / weight_sum
+            local_covariance = (
+                (centered.T * weights) @ centered / effective_denominator
+                if effective_denominator > 1e-9
+                else global_covariance
+            )
+            reliability = weight_sum / (weight_sum + float(prior_strength))
+        updated_mean = reliability * local_mean + (1.0 - reliability) * global_mean
+        if semantic_boundaries is not None and state in REGIME_ORDER:
+            signs = _quadrant_signs(state)
+            for dimension in range(2):
+                gap = max(float(global_scale[dimension]) * 1e-3, 1e-9)
+                boundary = float(semantic_boundaries[dimension])
+                if signs[dimension] > 0:
+                    updated_mean[dimension] = max(updated_mean[dimension], boundary + gap)
+                else:
+                    updated_mean[dimension] = min(updated_mean[dimension], boundary - gap)
+        means[state_index] = updated_mean
+        covariance = reliability * local_covariance + (1.0 - reliability) * global_covariance
+        covariances[state_index] = nearest_psd(covariance + np.eye(dimensions) * ridge)
+    return means, covariances
+
+
 def _emission_log_densities(
     values: np.ndarray,
     means: np.ndarray,
@@ -288,17 +363,20 @@ def fit_quadrant_hsmm(
     columns: tuple[str, str] = ("growth", "inflation"),
     min_duration: int = 5,
     duration_prior_strength: float = 8.0,
+    emission_prior_strength: float = 24.0,
     transition_smoothing: float = 1.0,
     max_duration: int | None = None,
     max_iterations: int = 30,
     tolerance: float = 1e-5,
+    update_emissions: bool = True,
 ) -> HSMMFit:
     """Fit a Gaussian explicit-duration HSMM to growth/inflation observations.
 
     The persistent quadrant labels initialize semantically identified emission
-    distributions only. State probabilities, exit hazards, and destination
-    transitions are then estimated jointly with forward-backward expected
-    counts on the expanded ``(state, age)`` state space.
+    distributions. State probabilities, emission parameters, exit hazards, and
+    destination transitions are then estimated jointly with forward-backward
+    expected counts on the expanded ``(state, age)`` state space. Quadrant
+    constraints preserve the seeded high/low economic meaning during updates.
     """
 
     state_list = list(dict.fromkeys(states))
@@ -308,6 +386,8 @@ def fit_quadrant_hsmm(
         raise ValueError("min_duration must be positive.")
     if not np.isfinite(duration_prior_strength) or duration_prior_strength <= 0:
         raise ValueError("duration_prior_strength must be positive and finite.")
+    if not np.isfinite(emission_prior_strength) or emission_prior_strength <= 0:
+        raise ValueError("emission_prior_strength must be positive and finite.")
     if not np.isfinite(transition_smoothing) or transition_smoothing <= 0:
         raise ValueError("transition_smoothing must be positive and finite.")
     if max_iterations < 1:
@@ -335,6 +415,11 @@ def fit_quadrant_hsmm(
         state_list,
         prior_strength=duration_prior_strength,
     )
+    semantic_boundaries = _quadrant_semantic_boundaries(
+        means,
+        state_list,
+        np.mean(values, axis=0),
+    )
     log_densities = _emission_log_densities(values, means, covariances)
     initial_hazards = estimate_duration_hazards(
         initial_regimes,
@@ -356,6 +441,7 @@ def fit_quadrant_hsmm(
         risk_counts = np.zeros_like(hazards)
         destination_counts = np.zeros_like(exit_matrix)
         initial_counts = np.zeros(len(state_list), dtype=float)
+        state_weights = np.zeros((len(values), len(state_list)), dtype=float)
         for sequence in slices:
             result = _forward_backward(
                 log_densities[sequence],
@@ -369,6 +455,7 @@ def fit_quadrant_hsmm(
             risk_counts += sequence_risk
             destination_counts += sequence_destinations
             initial_counts += gamma[0].sum(axis=1)
+            state_weights[sequence] = gamma.sum(axis=2)
 
         if len(state_list) > 1:
             destination_counts += transition_smoothing
@@ -397,6 +484,15 @@ def fit_quadrant_hsmm(
         updated_hazards = np.clip(updated_hazards, 0.002, 0.95)
         updated_hazards[:, ~allowed] = 0.0
         hazards = updated_hazards
+        if update_emissions:
+            means, covariances = _update_emissions(
+                values,
+                state_weights,
+                state_list,
+                prior_strength=emission_prior_strength,
+                semantic_boundaries=semantic_boundaries,
+            )
+            log_densities = _emission_log_densities(values, means, covariances)
         iterations = iteration
         if np.isfinite(previous_log_likelihood):
             improvement = abs(total_log_likelihood - previous_log_likelihood)

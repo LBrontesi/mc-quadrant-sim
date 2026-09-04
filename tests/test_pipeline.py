@@ -117,6 +117,62 @@ def test_pipeline_reports_italian_tax_accounting_across_chunks():
 
 
 @pytest.mark.skipif(not native_available(), reason="native backend unavailable")
+def test_large_native_tax_run_uses_compact_exact_terminal_reporting():
+    scenario = run_scenario(
+        **_scenario_kwargs(
+            {
+                "periods": 6,
+                "paths": 30_000,
+                "workers": 4,
+                "walk_forward": False,
+                "rebalance_frequency": 3,
+                "tax_country": "IT",
+                "tax_regime": "italy_administered",
+                "annual_inflation": 0.02,
+            }
+        )
+    )
+
+    terminal = np.asarray(scenario.reporting_wealth.attrs["full_terminal_values"])
+    assert scenario.wealth.attrs["compact_reporting"] is True
+    assert scenario.wealth.attrs["total_simulated_paths"] == 30_000
+    assert scenario.wealth.shape == (6, 25_000)
+    assert scenario.result.regimes.shape == (6, 25_000)
+    assert terminal.shape == (30_000,)
+    assert scenario.summary["p50"] == pytest.approx(np.median(terminal))
+    assert np.asarray(scenario.wealth.attrs["native_max_drawdowns"]).shape == (30_000,)
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend unavailable")
+def test_large_native_joint_macro_run_uses_streamed_compact_reporting():
+    scenario = run_scenario(
+        **_scenario_kwargs(
+            {
+                "periods": 6,
+                "paths": 30_000,
+                "workers": 4,
+                "walk_forward": False,
+                "rebalance_frequency": 3,
+                "tax_country": "IT",
+                "tax_regime": "italy_administered",
+                "joint_macro": True,
+                "duration_model": "semi_markov",
+            }
+        )
+    )
+
+    assert scenario.wealth.attrs["compact_reporting"] is True
+    assert scenario.wealth.attrs["total_simulated_paths"] == 30_000
+    assert scenario.result.regimes.shape == (6, 25_000)
+    assert scenario.result.macro_paths.shape == (6, 25_000, 3)
+    assert scenario.result.macro_columns == ["growth", "inflation", "interest_rate"]
+    assert np.isfinite(scenario.result.macro_paths).all()
+    assert np.all(scenario.result.macro_paths[:, :, 2] >= -5.0)
+    assert np.all(scenario.result.macro_paths[:, :, 2] <= 50.0)
+    assert scenario.result.native_portfolio["macro_paths"] is scenario.result.macro_paths
+
+
+@pytest.mark.skipif(not native_available(), reason="native backend unavailable")
 def test_disabled_decumulation_keeps_native_fused_tax_execution():
     common = {
         "periods": 12,
