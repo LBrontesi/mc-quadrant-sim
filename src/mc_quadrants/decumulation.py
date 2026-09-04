@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 
-
 DECUMULATION_MODES = {"manual", "safe_rate"}
 DECUMULATION_POLICIES = {"fixed", "guyton_klinger"}
 DECUMULATION_TARGETS = {"survival", "preserve_initial", "minimum_bequest"}

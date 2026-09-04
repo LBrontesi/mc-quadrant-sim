@@ -28,6 +28,7 @@ def main() -> None:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            page.emulate_media(reduced_motion="reduce")
             browser_errors: list[str] = []
             page.on("console", lambda message: browser_errors.append(message.text) if message.type == "error" else None)
             page.goto(f"{base_url}/?skipAutoLoad=1", wait_until="networkidle")
@@ -62,6 +63,10 @@ def main() -> None:
             page.locator("#decumulation-mode").select_option("manual")
             phase = page.locator(".phase-row").first
             assert phase.locator('[data-field="annual_real_amount"]').input_value() == "60"
+            event_editor = page.locator("details.planner-editor").filter(
+                has=page.locator("#add-decumulation-event")
+            )
+            event_editor.locator("summary").click()
             page.locator("#add-decumulation-event").click()
             assert page.locator(".event-row").count() == 1
             page.locator(".event-row .planner-remove").click()
