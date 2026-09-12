@@ -869,31 +869,6 @@ Then you can adapt:
 python examples/calibrate_real_data.py
 ```
 
-## Run The Web Backend
-
-```bash
-python web_app.py
-```
-
-The backend serves the web UI and the shared simulation API from real market
-data. By default it loads live Yahoo Finance / FRED history; asset and macro
-CSV uploads are supported as an optional override from the UI.
-
-## Run The Gradio UI
-
-```bash
-python gradio_app.py
-```
-
-Open `http://127.0.0.1:7860` after the server starts. Set `PORT` to use a
-different port. The optional data helpers need `.[data]`.
-
-## Run The Streamlit UI
-
-```bash
-streamlit run streamlit_app.py
-```
-
 ## Run The Web UI
 
 The `main` branch provides the same simulation methodology through a plain
@@ -903,9 +878,12 @@ HTML/CSS/JavaScript interface and a small Python HTTP backend:
 python web_app.py
 ```
 
+The backend loads live Yahoo Finance / FRED history by default; asset and macro
+CSV uploads are supported as an optional override from the UI.
+
 Open `http://127.0.0.1:7860`. Set `PORT` to use a different port. The browser
 client calls the shared `/api/load`, `/api/simulate`, and `/api/wealth`
-contracts used by the other frontends.
+contracts exposed by the backend.
 
 The server uses adaptive path chunking, limits concurrent heavy jobs, caps request bodies, and sends a
 deterministic reporting sample of at most 5,000 paths to the browser instead of serializing every path.
@@ -929,22 +907,16 @@ controls, and rendering. Static asset references are relative, including the
 logo, so they resolve when `web/index.html` is inspected directly with a
 `file://` URL. The simulation APIs still require running `web_app.py`.
 
-Open the URL printed by Streamlit (default `http://localhost:8501`). It
-supports the same Yahoo Finance/FRED and CSV sources and the same
-methodology controls, rendered with Altair charts. Charts are layout to the
-browser width.
-
-Both frontends delegate all data loading, scenario building, and result
-shaping to the shared `mc_quadrants.api` layer, so the simulation methodology
-is identical regardless of the interface. The **Model methodology** section
-in each sidebar selects the regime model (quadrant or HMM), the regime
+The browser client delegates all data loading, scenario building, and result
+shaping to the shared `mc_quadrants.api` layer. The **Model methodology**
+section selects the regime model (quadrant or HMM), the regime
 duration model (Markov benchmark or explicit-duration HSMM), the causal threshold window,
 three-month smoothing, hysteresis, transition confirmation, probabilistic
 moment weights, expected-return and duration-hazard shrinkage, parameter
 recalibrations, joint macro paths, GARCH/ADCC dynamics, and walk-forward
 validation.
 
-The UIs load real data from Yahoo Finance/FRED by default and optionally
+The web UI loads real data from Yahoo Finance/FRED by default and optionally
 accept uploaded asset and macro CSVs. Yahoo mode starts at 1990 by default and
 accepts optional proxy pairs such as `SPY:^GSPC, GLD:GC=F`. Select `IEF` or
 `DBMF` in the synthetic asset picker, then choose the resulting `IEFSIM` or
@@ -985,9 +957,6 @@ monthly/quarterly/annual/buy-and-hold rebalancing; and
 stores up to 20 named scenarios locally. Share links serialize the controls,
 portfolio selection, weights, and seed so a run can be reconstructed without
 embedding uploaded CSV contents.
-
-Gradio
-charts are rendered with Plotly; Streamlit charts use Altair.
 
 ## Testing And CI
 
