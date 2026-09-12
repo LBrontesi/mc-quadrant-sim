@@ -896,7 +896,7 @@ streamlit run streamlit_app.py
 
 ## Run The Web UI
 
-The `web-ui-prod` branch provides the same simulation methodology through a plain
+The `main` branch provides the same simulation methodology through a plain
 HTML/CSS/JavaScript interface and a small Python HTTP backend:
 
 ```bash
@@ -1000,7 +1000,7 @@ uv run python -m compileall -q src tests web_app.py
 ```
 
 GitHub Actions runs these checks on Python 3.10, 3.11, and 3.12 for pull
-requests and pushes to the production web branches, including `web-ui-prod`.
+requests and pushes to the production branch, `main`.
 It also runs a Chromium/Playwright smoke test against the real Python web
 server using uploaded CSV fixtures. That test completes a simulation, verifies
 the results UI, checks for browser console errors, and asserts that the 390 px

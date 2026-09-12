@@ -3,7 +3,7 @@ services:
     name: four-quadrant-simulator
     runtime: docker
     repo: https://github.com/LBrontesi/mc-quadrant-sim
-    branch: web-ui-prod
+    branch: main
     dockerContext: .
     dockerfilePath: ./Dockerfile
     plan: free

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "web-ui", "web-ui-prod", "web-ui-prod-Render", "feature/**", "improvements"]
+    branches: ["main", "feature/**", "improvements"]
   pull_request:
 
 jobs:
