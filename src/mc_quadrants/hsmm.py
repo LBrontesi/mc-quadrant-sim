@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 import numpy as np
@@ -32,6 +32,33 @@ class HSMMFit:
     emission_means: dict[str, np.ndarray]
     emission_covariances: dict[str, np.ndarray]
     latest_state_age_probabilities: dict[str, list[float]]
+    diagnostics: dict = field(default_factory=dict)
+
+
+def _regularized_duration_hazards(exits, risk, min_duration, prior_strength, age_strength):
+    """Beta-pseudocount update with pooled and neighboring-age shrinkage.
+
+    Neighbor evidence contributes at most age_strength observations, rather
+    than being counted as another full copy of the data. Forbidden ages never
+    contribute to that prior. The last bucket retains its geometric tail.
+    """
+    allowed = np.arange(risk.shape[1]) >= min_duration - 1
+    pooled_exits, pooled_risk = exits.sum(axis=0), risk.sum(axis=0)
+    baseline = np.clip(pooled_exits[allowed].sum()/max(pooled_risk[allowed].sum(), 1e-12), .002, .95)
+    pooled = (pooled_exits + prior_strength*baseline)/(pooled_risk + prior_strength)
+    neighbor_exits, neighbor_risk = np.zeros_like(exits), np.zeros_like(risk)
+    masked_exits, masked_risk = exits*allowed, risk*allowed
+    for distance, weight in ((1, 1.0), (2, .5)):
+        neighbor_exits[:, distance:] += weight*masked_exits[:, :-distance]
+        neighbor_exits[:, :-distance] += weight*masked_exits[:, distance:]
+        neighbor_risk[:, distance:] += weight*masked_risk[:, :-distance]
+        neighbor_risk[:, :-distance] += weight*masked_risk[:, distance:]
+    strength = age_strength*neighbor_risk/(neighbor_risk + prior_strength)
+    neighbor_rate = (neighbor_exits + prior_strength*pooled)/(neighbor_risk + prior_strength)
+    hazards = (exits + prior_strength*pooled + strength*neighbor_rate)/(risk + prior_strength + strength)
+    hazards = np.clip(hazards, .002, .95)
+    hazards[:, ~allowed] = 0
+    return hazards
 
 
 def _contiguous_slices(index: pd.Index) -> list[slice]:
@@ -369,6 +396,7 @@ def fit_quadrant_hsmm(
     max_iterations: int = 30,
     tolerance: float = 1e-5,
     update_emissions: bool = True,
+    duration_age_strength: float = 4.0,
 ) -> HSMMFit:
     """Fit a Gaussian explicit-duration HSMM to growth/inflation observations.
 
@@ -384,6 +412,8 @@ def fit_quadrant_hsmm(
         raise ValueError("At least one HSMM state is required.")
     if min_duration < 1:
         raise ValueError("min_duration must be positive.")
+    if not np.isfinite(duration_age_strength) or duration_age_strength < 0:
+        raise ValueError("duration_age_strength must be finite and non-negative.")
     if not np.isfinite(duration_prior_strength) or duration_prior_strength <= 0:
         raise ValueError("duration_prior_strength must be positive and finite.")
     if not np.isfinite(emission_prior_strength) or emission_prior_strength <= 0:
@@ -395,7 +425,7 @@ def fit_quadrant_hsmm(
     missing = set(columns).difference(macro.columns)
     if missing:
         raise KeyError(f"Macro data is missing HSMM emission columns: {sorted(missing)}")
-    numeric = macro.loc[:, list(columns)].apply(pd.to_numeric, errors="coerce").sort_index()
+    numeric = macro.loc[:, list(columns)].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan).sort_index()
     valid = numeric.notna().all(axis=1)
     observations = numeric.loc[valid]
     if len(observations) < 2:
@@ -413,7 +443,7 @@ def fit_quadrant_hsmm(
         values,
         labels,
         state_list,
-        prior_strength=duration_prior_strength,
+        prior_strength=emission_prior_strength,
     )
     semantic_boundaries = _quadrant_semantic_boundaries(
         means,
@@ -435,6 +465,7 @@ def fit_quadrant_hsmm(
     converged = False
     previous_log_likelihood = -np.inf
     iterations = 0
+    likelihood_history = []
     for iteration in range(1, int(max_iterations) + 1):
         total_log_likelihood = 0.0
         exit_counts = np.zeros_like(hazards)
@@ -457,6 +488,7 @@ def fit_quadrant_hsmm(
             initial_counts += gamma[0].sum(axis=1)
             state_weights[sequence] = gamma.sum(axis=2)
 
+        likelihood_history.append(float(total_log_likelihood))
         if len(state_list) > 1:
             destination_counts += transition_smoothing
             np.fill_diagonal(destination_counts, 0.0)
@@ -465,25 +497,9 @@ def fit_quadrant_hsmm(
                 1e-300,
             )
         initial = (initial_counts + 1.0) / (initial_counts.sum() + len(state_list))
-        allowed = np.arange(duration_count) >= min_duration - 1
-        pooled_exits = exit_counts.sum(axis=0)
-        pooled_risk = risk_counts.sum(axis=0)
-        baseline = float(
-            np.clip(
-                pooled_exits[allowed].sum() / max(pooled_risk[allowed].sum(), 1e-12),
-                0.002,
-                0.95,
-            )
+        hazards = _regularized_duration_hazards(
+            exit_counts, risk_counts, min_duration, duration_prior_strength, duration_age_strength,
         )
-        pooled_hazard = (pooled_exits + duration_prior_strength * baseline) / (
-            pooled_risk + duration_prior_strength
-        )
-        updated_hazards = (exit_counts + duration_prior_strength * pooled_hazard) / (
-            risk_counts + duration_prior_strength
-        )
-        updated_hazards = np.clip(updated_hazards, 0.002, 0.95)
-        updated_hazards[:, ~allowed] = 0.0
-        hazards = updated_hazards
         if update_emissions:
             means, covariances = _update_emissions(
                 values,
@@ -555,4 +571,13 @@ def fit_quadrant_hsmm(
             state: covariances[index].copy() for index, state in enumerate(state_list)
         },
         latest_state_age_probabilities=state_age_latest,
+        diagnostics={
+            "duration_estimator": "pooled_neighbor_age_beta_shrinkage",
+            "duration_age_strength": float(duration_age_strength),
+            "log_likelihood_history": likelihood_history + [float(final_log_likelihood)],
+            "likelihood_decreases": int(np.sum(np.diff(likelihood_history + [final_log_likelihood]) < -1e-8)),
+            "sequence_count": len(slices),
+            "duration_tail": "geometric_overflow_bucket",
+            "right_censored_endpoints": True,
+        },
     )

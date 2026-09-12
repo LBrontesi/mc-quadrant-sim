@@ -12,7 +12,11 @@ from mc_quadrants.decumulation import (
     inflation_index,
     normalize_decumulation,
 )
-from mc_quadrants.native import simulate_italian_portfolios_native
+from mc_quadrants.native import (
+    NATIVE_YEAR_STAT_NAMES,
+    native_available,
+    simulate_italian_portfolios_native,
+)
 
 ITALY_STANDARD_TAX_RATE = 0.26
 ITALY_GOVERNMENT_BOND_RATE = 0.125
@@ -673,8 +677,6 @@ def prepare_italian_native_configuration(
     """Prepare immutable inputs and reporting metadata for the fused kernel."""
 
     profile = _tax_profile(assets, asset_tax_categories, asset_tax_metadata)
-    if not np.allclose(profile.annual_income_yield, 0.0):
-        raise ValueError("The fused native kernel requires accumulating/total-return instruments.")
     years = _simulation_tax_years(periods, start_date)
     ordered_years = list(dict.fromkeys(int(year) for year in years))
     year_index = {year: index for index, year in enumerate(ordered_years)}
@@ -705,6 +707,9 @@ def prepare_italian_native_configuration(
             "terminal_liquidation": bool(terminal_liquidation),
             "wrapper_benchmark": wrapper_available,
             "year_slots": year_slots,
+            "annual_income_yield": profile.annual_income_yield,
+            "foreign_withholding_rate": profile.foreign_withholding_rate,
+            "foreign_tax_credit_rate": profile.foreign_tax_credit_rate,
         },
         "frame_metadata": {
             "assets": list(assets),
@@ -736,18 +741,7 @@ def italian_native_result_frame(
 
     wealth = np.asarray(native_result["wealth"], dtype=float)
     paths = wealth.shape[1]
-    year_metric_names = (
-        "capital_gains_tax",
-        "managed_result_tax",
-        "deferred_tax_payment",
-        "expired_losses",
-        "financial_transaction_tax",
-        "stamp_duty",
-        "ivafe",
-        "terminal_liquidation_tax",
-        "gross_sales_for_spending",
-        "net_spending",
-    )
+    year_metric_names = NATIVE_YEAR_STAT_NAMES
     ordered_years = list(frame_metadata["ordered_years"])
     year_values = np.asarray(native_result["year_stats"], dtype=float)
     tax_by_year = {
@@ -810,6 +804,8 @@ def italian_native_result_frame(
             "gross_terminal_values": native_result.get("gross_terminal_values"),
             "native_max_drawdowns": native_result.get("max_drawdowns"),
             "native_regime_counts": native_result.get("regime_counts"),
+            "terminal_deflators": native_result.get("terminal_deflators"),
+            "native_risk_statistics": native_result.get("risk_statistics"),
         }
     )
     return frame
@@ -922,13 +918,11 @@ def simulate_italian_portfolio_tax(
     managed = tax_regime == "italy_managed"
     declarative = tax_regime == "italy_declarative"
 
-    # Accumulating/total-return instruments need no distribution ledger, so
-    # the complete gross + DIY + optional wrapper accounting can run in C++.
-    # Any unsupported profile or unavailable/incompatible library falls back
-    # to the reference implementation below without changing the API.
+    # The native ledger includes distributions, source withholding and credits.
+    # Keep the explicit Python reference fallback for unavailable libraries.
     native_result: dict[str, object] | None = None
     native_wrapper = bool(wrapper_benchmark and terminal_liquidation and not managed)
-    if np.allclose(profile.annual_income_yield, 0.0):
+    if native_available():
         ordered_years = list(dict.fromkeys(int(year) for year in years))
         year_index = {year: index for index, year in enumerate(ordered_years)}
         year_slots = np.array([year_index[int(year)] for year in years], dtype=np.int32)
@@ -958,22 +952,14 @@ def simulate_italian_portfolio_tax(
                 withdrawal_cpi=cpi,
                 safe_withdrawal_rate=safe_withdrawal_rate,
                 workers=native_threads,
+                annual_income_yield=profile.annual_income_yield,
+                foreign_withholding_rate=profile.foreign_withholding_rate,
+                foreign_tax_credit_rate=profile.foreign_tax_credit_rate,
             )
         except (AttributeError, OSError, RuntimeError):
             native_result = None
         if native_result is not None:
-            year_metric_names = (
-                "capital_gains_tax",
-                "managed_result_tax",
-                "deferred_tax_payment",
-                "expired_losses",
-                "financial_transaction_tax",
-                "stamp_duty",
-                "ivafe",
-                "terminal_liquidation_tax",
-                "gross_sales_for_spending",
-                "net_spending",
-            )
+            year_metric_names = NATIVE_YEAR_STAT_NAMES
             year_values = np.asarray(native_result["year_stats"], dtype=float)
             tax_by_year = {
                 str(year): {

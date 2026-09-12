@@ -1,5 +1,6 @@
 import io
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,86 @@ from mc_quadrants.native import native_available
 from mc_quadrants.types import SimulationResult
 
 ASSET_TICKERS = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
+
+
+@pytest.mark.parametrize("separate_gross", [False, True])
+@pytest.mark.parametrize("macro_dimensions", [0, 2, 3, 5])
+def test_parallel_reporting_bands_match_serial_without_mutating_inputs(
+    monkeypatch, separate_gross, macro_dimensions,
+):
+    rng = np.random.default_rng(41)
+    wealth = pd.DataFrame(rng.lognormal(size=(12, 10_000)))
+    wealth.attrs["full_terminal_values"] = rng.lognormal(size=15_000)
+    gross = wealth * 1.05 if separate_gross else wealth
+    if separate_gross:
+        gross.attrs["full_terminal_values"] = wealth.attrs["full_terminal_values"] * 1.05
+    macro = rng.normal(size=(12, 10_000, macro_dimensions))
+    result = SimpleNamespace(
+        macro_paths=macro if macro_dimensions else None,
+        macro_columns=[f"macro_{index}" for index in range(macro_dimensions)],
+    )
+    original_wealth, original_gross, original_macro = (
+        wealth.to_numpy().copy(), gross.to_numpy().copy(), macro.copy(),
+    )
+    expected_net = api._wealth_percentiles(wealth)
+    expected_gross = api._wealth_percentiles(gross)
+    expected_macro = api._macro_path_response(result)
+    pool_sizes = []
+    original_executor = api.ThreadPoolExecutor
+
+    def tracked_executor(*, max_workers):
+        pool_sizes.append(max_workers)
+        return original_executor(max_workers=max_workers)
+
+    monkeypatch.setattr(api.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(api, "ThreadPoolExecutor", tracked_executor)
+    actual_net, actual_gross, actual_macro = api._reporting_percentiles(wealth, gross, result)
+    task_count = 1 + int(separate_gross) + macro_dimensions
+    assert pool_sizes == ([min(4, task_count)] if task_count > 1 else [])
+    pd.testing.assert_frame_equal(actual_net, expected_net, check_exact=True)
+    pd.testing.assert_frame_equal(actual_gross, expected_gross, check_exact=True)
+    assert actual_macro == expected_macro
+    if not separate_gross:
+        assert actual_net is actual_gross
+    assert np.array_equal(wealth.to_numpy(), original_wealth)
+    assert np.array_equal(gross.to_numpy(), original_gross)
+    assert np.array_equal(macro, original_macro)
+
+
+@pytest.mark.parametrize("cpu_count,paths", [(8, 5), (1, 10_000), (None, 10_000)])
+def test_reporting_bands_avoid_threads_for_small_or_single_core_runs(monkeypatch, cpu_count, paths):
+    wealth = pd.DataFrame(np.ones((12, paths)))
+    result = SimpleNamespace(macro_paths=np.ones((12, paths, 2)), macro_columns=["x", "y"])
+
+    def unexpected_pool(**kwargs):
+        pytest.fail("Small or single-core runs must use serial quantiles.")
+
+    monkeypatch.setattr(api.os, "cpu_count", lambda: cpu_count)
+    monkeypatch.setattr(api, "ThreadPoolExecutor", unexpected_pool)
+    net, gross, macro = api._reporting_percentiles(wealth, wealth, result)
+    assert net is gross
+    assert macro == api._macro_path_response(result)
+
+
+def test_reporting_bands_handle_macro_paths_without_columns():
+    wealth = pd.DataFrame(np.ones((12, 10_000)))
+    result = SimpleNamespace(macro_paths=np.ones((12, 10_000, 2)), macro_columns=[])
+    net, gross, macro = api._reporting_percentiles(wealth, wealth, result)
+    assert net is gross
+    assert macro is None
+
+
+def test_parallel_reporting_bands_propagate_worker_errors(monkeypatch):
+    wealth = pd.DataFrame(np.ones((12, 10_000)))
+    result = SimpleNamespace(macro_paths=np.ones((12, 10_000, 2)), macro_columns=["x", "y"])
+
+    def failed_quantiles(*args, **kwargs):
+        raise ValueError("quantile failure")
+
+    monkeypatch.setattr(api.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(api, "_period_quantiles", failed_quantiles)
+    with pytest.raises(ValueError, match="quantile failure"):
+        api._reporting_percentiles(wealth, wealth, result)
 
 
 def _csv_payload(**overrides):
@@ -597,6 +678,32 @@ def test_large_simulate_response_uses_compact_native_histories_and_exact_termina
     assert any("intermediate chart bands" in warning for warning in response["warnings"])
 
 
+@pytest.mark.skipif(not native_available(), reason="native backend unavailable")
+@pytest.mark.parametrize("tax_country,tax_regime", [("none", "none"), ("IT", "italy_administered")])
+@pytest.mark.parametrize("macro_dimensions", [2, 3])
+def test_specialized_cpp_joint_macro_adcc_ensemble_matches_generic(
+    monkeypatch, tax_country, tax_regime, macro_dimensions,
+):
+    payload = _csv_payload(
+        periods=24, paths=25_003, parameter_draws=3, workers=4,
+        walk_forward=False, tax_country=tax_country, tax_regime=tax_regime,
+        joint_macro=True, dynamic_correlation=True, structural_returns=True,
+        macro_parameter_uncertainty=True, contribution=2.0,
+        rate_col="interest_rate" if macro_dimensions == 3 else "",
+    )
+    monkeypatch.delenv("MC_NATIVE_FORCE_GENERIC", raising=False)
+    specialized, _, _ = api.run_scenario_payload(payload)
+    monkeypatch.setenv("MC_NATIVE_FORCE_GENERIC", "1")
+    generic, _, _ = api.run_scenario_payload({**payload, "workers": 1})
+    assert specialized.wealth.attrs["compact_reporting"] is True
+    assert specialized.result.macro_paths.shape == (24, 25_000, macro_dimensions)
+    assert np.array_equal(specialized.result.regimes, generic.result.regimes)
+    assert np.array_equal(specialized.result.macro_paths, generic.result.macro_paths)
+    assert np.array_equal(specialized.wealth.to_numpy(), generic.wealth.to_numpy())
+    for field in ("terminal_values", "terminal_deflators", "native_risk_statistics", "native_max_drawdowns"):
+        assert np.array_equal(specialized.wealth.attrs[field], generic.wealth.attrs[field])
+
+
 def test_simulate_reports_inflation_linked_financing():
     rng = np.random.default_rng(7)
     dates = pd.date_range("2010-01-31", periods=120, freq="ME")
@@ -705,8 +812,28 @@ def test_execution_plan_selects_workers_automatically(monkeypatch):
     assert compact["workers"] == 1
 
 
+@pytest.mark.parametrize("flag", ["MC_DISABLE_NATIVE_SIM", "MC_DISABLE_NATIVE_FUSED"])
+def test_execution_plan_respects_disabled_native_flags(monkeypatch, flag):
+    monkeypatch.setenv(flag, "true")
+    payload = {"weights": {"SPY": 1}, "paths": 500_000, "periods": 360}
+    assert not api._native_fused_payload(payload)
+    assert api._chunk_size_value(payload) is not None
+
+
+def test_execution_plan_only_routes_eligible_large_neutral_runs(monkeypatch):
+    monkeypatch.setattr(api, "native_fused_available", lambda: True)
+    payload = {"weights": {"SPY": 1}, "paths": 500_000, "periods": 360}
+    assert api._native_fused_payload(payload)
+    for change in (
+        {"paths": 25_000}, {"withdrawal": 0.000001},
+        {"leverage_multiple": 1.000001}, {"rebalance": "legacy"},
+        {"decumulation": {"enabled": True}},
+    ):
+        assert not api._native_fused_payload({**payload, **change})
+
+
 def test_execution_plan_uses_full_native_tax_batch(monkeypatch):
-    monkeypatch.setattr(api, "native_available", lambda: True)
+    monkeypatch.setattr(api, "native_fused_available", lambda: True)
     monkeypatch.setattr(api.os, "cpu_count", lambda: 10)
     monkeypatch.delenv("MC_SIM_MAX_AUTO_WORKERS", raising=False)
     payload = {

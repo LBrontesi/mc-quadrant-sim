@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from mc_quadrants.hsmm import fit_quadrant_hsmm
+from mc_quadrants.hsmm import _regularized_duration_hazards, fit_quadrant_hsmm
 from mc_quadrants.regimes import REGIME_ORDER
 
 
@@ -41,6 +41,36 @@ def test_hsmm_estimates_normalized_latent_probabilities_and_explicit_durations()
     assert all(duration >= 5.0 for duration in result.expected_duration_months.values())
     assert np.isfinite(result.log_likelihood)
     assert 1 <= result.iterations <= 20
+    assert result.diagnostics["duration_estimator"] == "pooled_neighbor_age_beta_shrinkage"
+    assert len(result.diagnostics["log_likelihood_history"]) == result.iterations + 1
+    assert result.diagnostics["log_likelihood_history"][-1] == result.log_likelihood
+
+
+def test_age_regularization_reduces_an_isolated_sparse_hazard_spike():
+    risk = np.full((2, 12), 10.0)
+    exits = np.ones_like(risk)
+    exits[0, 7] = 8.0
+    original = _regularized_duration_hazards(exits, risk, 5, 8., 0.)
+    smoothed = _regularized_duration_hazards(exits, risk, 5, 8., 4.)
+    assert smoothed[0, 7] < original[0, 7]
+    assert np.all(smoothed[:, :4] == 0)
+    assert np.all((smoothed[:, 4:] > 0) & (smoothed[:, 4:] < 1))
+
+
+def test_age_regularization_handles_empty_and_short_duration_tables():
+    for width in (1, 2, 5):
+        hazards = _regularized_duration_hazards(np.zeros((2, width)), np.zeros((2, width)), width, 8., 4.)
+        assert np.isfinite(hazards).all()
+        assert np.all(hazards[:, :width-1] == 0)
+        assert np.all(hazards[:, -1] > 0)
+
+
+def test_hsmm_excludes_nonfinite_observations():
+    macro, labels = _synthetic_quadrants()
+    macro.iloc[20, 0] = np.inf
+    result = fit_quadrant_hsmm(macro, labels, max_iterations=2)
+    assert np.isfinite(result.log_likelihood)
+    assert result.filtered_probabilities.iloc[20].isna().all()
 
 
 def test_hsmm_viterbi_path_recovers_persistent_quadrant_structure():

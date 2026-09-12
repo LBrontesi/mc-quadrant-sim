@@ -32,7 +32,8 @@ from mc_quadrants.decumulation import (
     success_mask,
     wilson_interval,
 )
-from mc_quadrants.native import native_available
+from mc_quadrants.native import native_fused_available
+from mc_quadrants.native_metrics import money_weighted_returns_native
 from mc_quadrants.pipeline import run_scenario
 from mc_quadrants.regimes import REGIME_ORDER
 from mc_quadrants.simulation import simulate_portfolio_paths
@@ -563,7 +564,7 @@ def _asset_count(payload: Mapping[str, Any]) -> int:
 
 
 def _native_fused_payload(payload: Mapping[str, Any]) -> bool:
-    """Return whether an automatic request can use the fused tax kernel."""
+    """Return whether an automatic request can use the compact native kernel."""
 
     try:
         tax_enabled = resolve_tax_selection(
@@ -571,21 +572,28 @@ def _native_fused_payload(payload: Mapping[str, Any]) -> bool:
         ).enabled
     except ValueError:
         return False
-    if not tax_enabled or not native_available():
+    if not native_fused_available():
         return False
     decumulation = payload.get("decumulation")
     if isinstance(decumulation, Mapping) and bool(decumulation.get("enabled", True)):
         return False
     if decumulation is not None and not isinstance(decumulation, Mapping):
         return False
+    if not tax_enabled:
+        weights = payload.get("weights") or {}
+        return bool(
+            isinstance(weights, Mapping)
+            and weights
+            and int(payload.get("paths", 100_000)) > 25_000
+            and all(float(value) >= 0.0 for value in weights.values())
+            and float(payload.get("leverage_multiple", 1.0)) == 1.0
+            and float(payload.get("withdrawal", 0.0)) == 0.0
+            and str(payload.get("rebalance", "monthly")).lower() != "legacy"
+        )
     metadata = payload.get("asset_tax_metadata") or {}
     if not isinstance(metadata, Mapping):
         return False
-    return all(
-        not isinstance(values, Mapping)
-        or np.isclose(float(values.get("annual_income_yield", 0.0)), 0.0)
-        for values in metadata.values()
-    )
+    return True
 
 
 def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
@@ -936,6 +944,8 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "duration_model": duration_model,
         "min_regime_duration": min_regime_duration,
         "garch": garch,
+        "calibrate_dependence": bool(payload.get("calibrate_dependence", True)),
+        "select_hyperparameters": bool(payload.get("select_hyperparameters", False)),
         "garch_alpha": garch_alpha,
         "garch_beta": garch_beta,
         "walk_forward": bool(payload.get("walk_forward", True)),
@@ -1032,19 +1042,40 @@ def _wealth_percentiles(wealth: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(quantiles.T, columns=[0.05, 0.50, 0.95])
 
 
-def _wealth_percentile_pair(
+def _reporting_percentiles(
     wealth: pd.DataFrame,
     gross_wealth: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Compute independent net and gross bands concurrently."""
+    result: Any,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any] | None]:
+    """Share one bounded pool across independent wealth and macro bands.
 
-    if gross_wealth is wealth:
+    Each task retains the bounded partition workspace in _period_quantiles.
+    NumPy releases the GIL during partitioning; no simulation input is mutated.
+    """
+
+    macro_count = len(result.macro_columns) if result.macro_paths is not None else 0
+    task_count = 1 + int(gross_wealth is not wealth) + macro_count
+    workers = min(4, os.cpu_count() or 1, task_count)
+    if workers == 1 or wealth.size < 100_000:
         percentiles = _wealth_percentiles(wealth)
-        return percentiles, percentiles
-    with ThreadPoolExecutor(max_workers=2) as executor:
+        gross_percentiles = (
+            percentiles if gross_wealth is wealth else _wealth_percentiles(gross_wealth)
+        )
+        return percentiles, gross_percentiles, _macro_path_response(result)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         net_future = executor.submit(_wealth_percentiles, wealth)
-        gross_future = executor.submit(_wealth_percentiles, gross_wealth)
-        return net_future.result(), gross_future.result()
+        gross_future = (
+            net_future if gross_wealth is wealth
+            else executor.submit(_wealth_percentiles, gross_wealth)
+        )
+        macro_futures = [
+            executor.submit(_period_quantiles, result.macro_paths[:, :, index])
+            for index in range(macro_count)
+        ]
+        macro_response = _macro_path_response(
+            result, quantiles=[future.result() for future in macro_futures],
+        )
+        return net_future.result(), gross_future.result(), macro_response
 
 
 def _median_period_returns(wealth: pd.DataFrame, payload: Mapping[str, Any]) -> list[float]:
@@ -1569,17 +1600,19 @@ def _path_analytics(
         )
     sequence_risk = None
     if contribution > 0 and withdrawal == 0:
+        money_weighted = money_weighted_returns_native(terminal, periods, initial_value, contribution)
         low = np.full(paths, -0.99, dtype=float)
         high = np.full(paths, 10.0, dtype=float)
         periods_index = np.arange(1, periods + 1, dtype=float)[:, None]
         interim_cashflow = -contribution
-        for _ in range(64):
+        for _ in range(64 if money_weighted is None else 0):
             midpoint = (low + high) / 2.0
             discount = np.power(1.0 + midpoint[None, :], periods_index)
             npv = -initial_value + np.sum(interim_cashflow / discount, axis=0) + terminal / discount[-1]
             low = np.where(npv > 0, midpoint, low)
             high = np.where(npv > 0, high, midpoint)
-        money_weighted = np.power(1.0 + (low + high) / 2.0, 12.0) - 1.0
+        if money_weighted is None:
+            money_weighted = np.power(1.0 + (low + high) / 2.0, 12.0) - 1.0
         money_weighted = np.clip(money_weighted, -1.0, 100.0)
         sequence_drag = money_weighted - annual_cagr
         sample_indices = np.linspace(0, paths - 1, min(paths, 1_000), dtype=int)
@@ -1748,17 +1781,21 @@ def _parameter_uncertainty_response(frame: pd.DataFrame | None) -> dict[str, Any
     }
 
 
-def _macro_path_response(result: Any) -> dict[str, Any] | None:
+def _macro_path_response(
+    result: Any,
+    *,
+    quantiles: list[np.ndarray] | None = None,
+) -> dict[str, Any] | None:
     if result.macro_paths is None or not result.macro_columns:
         return None
     response: dict[str, Any] = {"periods": list(range(1, len(result.macro_paths) + 1)), "series": {}}
     for index, column in enumerate(result.macro_columns):
         values = result.macro_paths[:, :, index]
-        quantiles = _period_quantiles(values)
+        bands = _period_quantiles(values) if quantiles is None else quantiles[index]
         response["series"][str(column)] = {
-            "p05": quantiles[0].tolist(),
-            "median": quantiles[1].tolist(),
-            "p95": quantiles[2].tolist(),
+            "p05": bands[0].tolist(),
+            "median": bands[1].tolist(),
+            "p95": bands[2].tolist(),
         }
     return response
 
@@ -2004,7 +2041,9 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     summary = scenario.summary
     growth_col = scenario.model.metadata.get("growth_col", "growth")
     inflation_col = scenario.model.metadata.get("inflation_col", "inflation")
-    percentiles, gross_percentiles = _wealth_percentile_pair(wealth, gross_wealth)
+    percentiles, gross_percentiles, macro_path_response = _reporting_percentiles(
+        wealth, gross_wealth, result,
+    )
     history_terminal_values = wealth.iloc[-1].to_numpy(dtype=float)
     terminal_values = np.asarray(
         wealth.attrs.get("full_terminal_values", history_terminal_values),
@@ -2339,7 +2378,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             }
             for state in model.states
         ],
-        "macro_paths": _macro_path_response(result),
+        "macro_paths": macro_path_response,
         "methodology": {
             "data_vintage": model.metadata.get("data_vintage", "user_supplied"),
             "point_in_time": bool(model.metadata.get("point_in_time", False)),
@@ -2357,11 +2396,26 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "hsmm_log_likelihood": model.metadata.get("hsmm_log_likelihood"),
             "hsmm_iterations": model.metadata.get("hsmm_iterations"),
             "hsmm_converged": model.metadata.get("hsmm_converged"),
+            "hsmm_diagnostics": model.metadata.get("hsmm_diagnostics"),
+            "duration_prior_strength": model.metadata.get("duration_prior_strength", 8.0),
             "hsmm_max_duration": model.metadata.get("hsmm_max_duration"),
             "mean_prior_strength": float(model.metadata.get("mean_prior_strength", 0.0)),
             "parameter_draws": int(payload.get("parameter_draws", 0)),
             "joint_macro": bool(payload.get("joint_macro", False)),
             "macro_model": model.metadata.get("macro_model", "ridge_var"),
+            "dependence_fit": model.metadata.get("dependence_fit"),
+            "calibrate_dependence": model.metadata.get("calibrate_dependence", False),
+            "simulation_dependence": model.metadata.get("simulation_dependence"),
+            "simulation_dependence_draws": model.metadata.get("simulation_dependence_draws", []),
+            "mnts_estimation": model.metadata.get("mnts_estimation"),
+            "macro_residual_mnts_estimation": {
+                state: parameters.estimation for state, parameters in
+                model.metadata.get("macro_dynamics", {}).get("residual_mnts", {}).items()
+            },
+            "macro_innovation_rmse": model.metadata.get("macro_dynamics", {}).get("forecast_rmse"),
+            "hyperparameter_selection": model.metadata.get("hyperparameter_selection"),
+            "parameter_uncertainty_components": model.metadata.get("parameter_uncertainty_components", []),
+            "macro_parameter_uncertainty_mode": model.metadata.get("macro_parameter_uncertainty_mode"),
             "macro_instability_score": float(
                 model.metadata.get("macro_dynamics", {}).get("macro_instability_score", 0.0)
             ),
@@ -2413,6 +2467,7 @@ def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     solver_payload["chunk_size"] = requested_paths
     solver_payload["workers"] = 1
     solver_payload["walk_forward"] = False
+    solver_payload["select_hyperparameters"] = False
     scenario, selected_tickers, _ = run_scenario_payload(solver_payload)
     result = scenario.result
     if result.returns.shape[:2] != (periods, requested_paths):
@@ -2632,6 +2687,7 @@ def build_wealth_csv(payload: Mapping[str, Any]) -> dict[str, Any]:
     export_payload["paths"] = replayed_paths
     export_payload["workers"] = 1
     export_payload["walk_forward"] = False
+    export_payload["select_hyperparameters"] = False
     scenario, selected_tickers, _ = run_scenario_payload(export_payload)
     source_wealth = scenario.reporting_wealth if scenario.reporting_wealth is not None else scenario.wealth
     wealth = source_wealth.iloc[:, :export_paths].copy()

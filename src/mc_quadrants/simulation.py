@@ -20,6 +20,9 @@ from mc_quadrants.native import (
     simulate_parametric_italian_portfolios_native,
     simulate_parametric_native,
 )
+from mc_quadrants.native_metrics import inflation_index_native, risk_path_statistics_native
+from mc_quadrants.native_portfolio import simulate_neutral_portfolios_native
+from mc_quadrants.native_process import simulate_regime_macro_native
 from mc_quadrants.tax_policy import TaxSimulationContext, resolve_tax_selection
 from mc_quadrants.taxes import (
     CONTRIBUTION_ALLOCATION_MODES,
@@ -281,6 +284,7 @@ def simulate_regime_paths(
     duration_model: str = "markov",
     min_regime_duration: int = 5,
     return_codes: bool = False,
+    native_threads: int = 1,
 ) -> np.ndarray:
     """Simulate Markov (or semi-Markov) regime paths.
 
@@ -313,6 +317,19 @@ def simulate_regime_paths(
                 "semi_markov requires the model to expose 'duration_hazards' "
                 "in its metadata; recalibrate the model with duration support."
             )
+
+    posterior = _latest_state_age_posterior(model) if start_state is None else None
+    starts = posterior.sum(axis=1) if posterior is not None else stationary_distribution(
+        pd.DataFrame(transition, index=states, columns=states)
+    ).to_numpy()
+    native_paths = simulate_regime_macro_native(
+        model, transition, starts, posterior, periods=periods, paths=paths, start_state=start_state,
+        random_seed=random_seed, duration_model=duration_model, min_regime_duration=min_regime_duration,
+        workers=native_threads,
+    )
+    if native_paths is not None:
+        codes = native_paths[0]
+        return codes if return_codes else _decode_regime_codes(codes, states)
 
     current, current_ages, _ = _sample_initial_states_and_ages(
         rng,
@@ -479,6 +496,7 @@ def simulate_joint_regime_macro_paths(
     macro_transition_weight: float = 0.35,
     macro_parameter_uncertainty: bool = True,
     return_codes: bool = False,
+    native_threads: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Simulate mutually consistent macro paths and time-varying regimes."""
 
@@ -498,6 +516,24 @@ def simulate_joint_regime_macro_paths(
     transition = model.transition_matrix.loc[states, states].to_numpy(dtype=float)
     if transition_concentration is not None:
         transition = _sample_transition_matrix(rng, transition, transition_concentration)
+    posterior = _latest_state_age_posterior(model) if start_state is None else None
+    starts = posterior.sum(axis=1) if posterior is not None else stationary_distribution(
+        pd.DataFrame(transition, index=states, columns=states)
+    ).to_numpy()
+    emissions = (
+        _prepare_macro_emissions(states, model.metadata.get("hsmm_emission_means"), model.metadata.get("hsmm_emission_covariances"))
+        if model.metadata.get("macro_membership_model", "joint_emission") == "joint_emission" else None
+    )
+    native_paths = simulate_regime_macro_native(
+        model, transition, starts, posterior, periods=periods, paths=paths, start_state=start_state,
+        random_seed=random_seed, duration_model=duration_model, min_regime_duration=min_regime_duration,
+        macro_dynamics=dynamics, emission_coefficients=emissions,
+        macro_transition_weight=macro_transition_weight,
+        macro_parameter_uncertainty=macro_parameter_uncertainty, workers=native_threads,
+    )
+    if native_paths is not None:
+        codes, values, shocks = native_paths
+        return (codes if return_codes else _decode_regime_codes(codes, states)), values, shocks
     current, current_ages, _ = _sample_initial_states_and_ages(
         rng,
         model,
@@ -745,7 +781,8 @@ def simulate_returns(
     )
     diagonal_indexes = np.arange(len(assets))
     state_correlations[:, diagonal_indexes, diagonal_indexes] = 1.0
-    mnts_parameters = [resolved_mnts_parameters(model.moments[state]) for state in model.states]
+    residual_parameters = macro_dynamics.get("residual_mnts", {}) if isinstance(macro_dynamics, Mapping) else {}
+    mnts_parameters = [residual_parameters.get(state) or resolved_mnts_parameters(model.moments[state]) for state in model.states]
     state_tail_indexes = np.array(
         [parameters.tail_index for parameters in mnts_parameters], dtype=float
     )
@@ -806,6 +843,8 @@ def simulate_returns(
                 dtype=float,
             )
         expense_ratios = np.asarray(native_portfolio_config["expense_ratios"], dtype=float)
+        if not np.isfinite(expense_ratios).all() or (expense_ratios < 0).any() or (expense_ratios >= 1).any():
+            raise ValueError("Asset expense ratios must be finite decimals between 0 and 1.")
         monthly_fee_log = np.log1p(-expense_ratios) / 12.0
 
         compact_requested = bool(native_portfolio_config.get("compact_reporting", False))
@@ -945,6 +984,12 @@ def simulate_returns(
                         "return_betas": macro_betas,
                         "rate_index": rate_index,
                         "rate_bounds": macro_dynamics.get("rate_bounds"),
+                        "inflation_index": (
+                            macro_columns.index(model.metadata.get("inflation_col", "inflation"))
+                            if model.metadata.get("inflation_col", "inflation") in macro_columns else -1
+                        ),
+                        "inflation_scale": 0.01 if macro_dynamics.get("inflation_is_percent", False) else 1.0,
+                        "rate_scale": 0.01 if macro_dynamics.get("rate_is_percent", False) else 1.0,
                     }
             if compact_requested:
                 compact_portfolio = simulate_parametric_italian_portfolios_compact_native(
@@ -989,6 +1034,9 @@ def simulate_returns(
                     annual_reporting_inflation=float(
                         native_portfolio_config.get("annual_reporting_inflation", 0.0)
                     ),
+                    annual_risk_free_rate=float(
+                        native_portfolio_config.get("annual_risk_free_rate", 0.0)
+                    ),
                     workers=native_threads,
                     **compact_kwargs,
                 )
@@ -1023,6 +1071,12 @@ def simulate_returns(
                         native_portfolio=compact_portfolio,
                     )
 
+    # Neutral accounting is supported only by the compact fused entry point.
+    # If it declined the model, use the standalone portfolio ledger instead.
+    if native_kwargs is not None and native_kwargs.get("tax_regime") == "none":
+        native_portfolio_config = None
+        native_kwargs = None
+
     macro_paths: np.ndarray | None = None
     macro_shocks: np.ndarray | None = None
     if joint_macro:
@@ -1038,6 +1092,7 @@ def simulate_returns(
             macro_transition_weight=macro_transition_weight,
             macro_parameter_uncertainty=macro_parameter_uncertainty,
             return_codes=True,
+            native_threads=native_threads,
         )
     else:
         regime_paths = simulate_regime_paths(
@@ -1050,6 +1105,7 @@ def simulate_returns(
             duration_model=duration_model,
             min_regime_duration=min_regime_duration,
             return_codes=True,
+            native_threads=native_threads,
         )
     rng = _rng(None if random_seed is None else random_seed + 1)
 
@@ -1498,11 +1554,15 @@ def simulate_portfolio_paths(
         legacy_start_period=withdrawal_start_period,
         annual_inflation_fallback=annual_inflation,
     )
-    cpi = inflation_index(
-        periods,
-        int(result.returns.shape[1]),
-        annual_inflation=decumulation_plan.annual_inflation_fallback,
-        inflation_paths=withdrawal_inflation_paths,
+    cpi = (
+        inflation_index(
+            periods,
+            int(result.returns.shape[1]),
+            annual_inflation=decumulation_plan.annual_inflation_fallback,
+            inflation_paths=withdrawal_inflation_paths,
+        )
+        if decumulation_plan.active
+        else np.broadcast_to(1.0, result.returns.shape[:2])
     )
     if not np.isfinite(leverage_multiple) or leverage_multiple < 1:
         raise ValueError("leverage_multiple must be at least 1.0.")
@@ -1568,6 +1628,61 @@ def simulate_portfolio_paths(
         raise ValueError("Asset expense ratios must be finite decimals between 0 and 1.")
     monthly_fee_log = np.log1p(-expense_ratios.to_numpy(dtype=float)) / 12.0
     monthly_fee_growth = np.exp(monthly_fee_log)
+
+    if tax_selection.policy is None:
+        annual_rates = None
+        leveraged = (
+            not np.isclose(leverage_multiple, 1.0) or not np.isclose(financing_rate, 0.0)
+            or not np.isclose(maintenance_margin, 0.0)
+        )
+        if leveraged and financing_rate_paths is not None:
+            short_rates = np.asarray(financing_rate_paths, dtype=float)
+            if short_rates.shape != result.returns.shape[:2]:
+                raise ValueError("financing_rate_paths must have shape (periods, paths).")
+            annual_rates = short_rates + financing_rate
+            if not np.isclose(financing_inflation_sensitivity, 0.0):
+                if financing_inflation_paths is None:
+                    raise ValueError("financing_inflation_paths are required when dynamic rates use inflation sensitivity.")
+                inflation_rates = np.asarray(financing_inflation_paths, dtype=float)
+                if inflation_rates.shape != result.returns.shape[:2]:
+                    raise ValueError("financing_inflation_paths must have shape (periods, paths).")
+                annual_rates += financing_inflation_sensitivity * inflation_rates
+            annual_rates = np.clip(annual_rates, 0.0, 1.0)
+        elif leveraged and not np.isclose(financing_inflation_sensitivity, 0.0) and result.states and state_inflation:
+            rate_lookup = np.array([
+                financing_rate + financing_inflation_sensitivity * float(state_inflation.get(state, 0.0))
+                for state in result.states
+            ])
+            codes = result.regimes
+            if codes.dtype.kind not in "iu":
+                codes = pd.Index(result.states).get_indexer(codes.ravel()).reshape(codes.shape)
+                annual_rates = np.where(codes >= 0, rate_lookup[np.maximum(codes, 0)], financing_rate)
+            else:
+                annual_rates = rate_lookup[codes]
+        native_ledger = simulate_neutral_portfolios_native(
+            result.returns, target_weights, monthly_fee_log,
+            initial_value=initial_value, return_kind=return_kind,
+            rebalance_frequency=rebalance_frequency, contribution=contribution,
+            contribution_allocation=contribution_allocation,
+            transaction_cost_bps=transaction_cost_bps,
+            transaction_cost_rate_paths=_transaction_cost_rate_paths(
+                result, transaction_cost_bps, state_transaction_cost_multipliers,
+            ),
+            leverage_multiple=leverage_multiple, financing_rate=financing_rate,
+            financing_rate_paths=annual_rates, maintenance_margin=maintenance_margin,
+            plan=decumulation_plan, cpi=cpi, safe_rate=safe_withdrawal_rate, workers=native_threads,
+        )
+        if native_ledger is not None:
+            frame = pd.DataFrame(native_ledger.pop("wealth"), columns=[f"path_{i}" for i in range(result.returns.shape[1])])
+            frame.attrs.update(native_ledger)
+            frame.attrs.update({
+                "native_backend": True, "native_portfolio_backend": True,
+                "tax_country": "none", "tax_regime": "none",
+                "state_dependent_transaction_costs": bool(state_transaction_cost_multipliers),
+                "withdrawal_start_period": withdrawal_start_period,
+                "decumulation": decumulation_plan.to_dict(), "withdrawal_cpi": cpi,
+            })
+            return frame
 
     if rebalance_frequency is None:
         if return_kind == "log":
@@ -1743,9 +1858,21 @@ def simulate_portfolio_paths(
         cpi=cpi,
         safe_rate=safe_withdrawal_rate,
     )
-    requested_spending = np.zeros((periods, paths), dtype=float)
-    funded_spending = np.zeros((periods, paths), dtype=float)
-    guardrail_events = np.zeros((periods, paths), dtype=np.int8)
+    requested_spending = (
+        np.zeros((periods, paths), dtype=float)
+        if decumulation_plan.active
+        else np.broadcast_to(0.0, (periods, paths))
+    )
+    funded_spending = (
+        np.zeros((periods, paths), dtype=float)
+        if decumulation_plan.active
+        else requested_spending
+    )
+    guardrail_events = (
+        np.zeros((periods, paths), dtype=np.int8)
+        if decumulation_plan.active
+        else np.broadcast_to(np.int8(0), (periods, paths))
+    )
 
     for period in range(periods):
         if contribution:
@@ -1757,15 +1884,16 @@ def simulate_portfolio_paths(
             )
         holdings *= asset_growth[period]
         values = holdings.sum(axis=1)
-        requested, policy_events = spending.request(period + 1, values)
-        funded = funded_amount(requested, values)
-        requested_spending[period] = requested
-        funded_spending[period] = funded
-        guardrail_events[period] = policy_events
-        if np.any(funded > 0):
-            fraction = funded / np.maximum(values, 1e-300)
-            holdings -= holdings * fraction[:, None]
-            holdings = np.maximum(holdings, 0.0)
+        if decumulation_plan.active:
+            requested, policy_events = spending.request(period + 1, values)
+            funded = funded_amount(requested, values)
+            requested_spending[period] = requested
+            funded_spending[period] = funded
+            guardrail_events[period] = policy_events
+            if np.any(funded > 0):
+                fraction = funded / np.maximum(values, 1e-300)
+                holdings -= holdings * fraction[:, None]
+                holdings = np.maximum(holdings, 0.0)
         value_before_rebalance = holdings.sum(axis=1)
         if rebalance_frequency > 0 and (period + 1) % rebalance_frequency == 0:
             target_holdings = value_before_rebalance[:, None] * target_weights
@@ -1828,6 +1956,9 @@ def inflation_deflators(
         raise ValueError("inflation_paths must have shape (periods, paths).")
     if not np.isfinite(rates).all() or (rates <= -1.0).any():
         raise ValueError("inflation_paths must contain finite annual rates greater than -100%.")
+    native = inflation_index_native(periods, paths, annual_inflation, rates, frequency=periods_per_year, inverse=True)
+    if native is not None:
+        return native
     periodic_growth = np.power(1.0 + rates, 1.0 / periods_per_year)
     return 1.0 / np.cumprod(periodic_growth, axis=0)
 
@@ -1856,7 +1987,7 @@ def inflation_adjust_wealth(
     return adjusted
 
 
-def summarize_wealth_risk(
+def _validate_wealth_risk_inputs(
     wealth: pd.DataFrame,
     initial_value: float = 100.0,
     confidence: float = 0.95,
@@ -1869,13 +2000,8 @@ def summarize_wealth_risk(
     withdrawal_paths: np.ndarray | None = None,
     inflation_paths: np.ndarray | None = None,
     risk_free_paths: np.ndarray | None = None,
-) -> pd.Series:
-    """Calculate terminal, loss-tail, drawdown, and annualized metrics.
-
-    With ``annual_inflation > 0`` all metrics are computed on inflation-adjusted
-    wealth, so results are expressed in real (purchasing power) terms. The
-    Sharpe ratio uses ``risk_free_rate`` as the annualized risk-free return.
-    """
+) -> tuple[np.ndarray, int]:
+    """Validate inputs shared by reference and native-reduction reporting."""
 
     if wealth.empty or wealth.shape[1] == 0:
         raise ValueError("wealth must contain at least one simulated path.")
@@ -1914,6 +2040,51 @@ def summarize_wealth_risk(
         raise ValueError(
             "withdrawal_start_period must be between 1 and the available periods."
         )
+    for name, rate_paths in (
+        ("inflation_paths", inflation_paths), ("risk_free_paths", risk_free_paths),
+    ):
+        if rate_paths is not None:
+            rates = np.asarray(rate_paths, dtype=float)
+            if rates.shape != (periods, paths):
+                raise ValueError(f"{name} must have shape (periods, paths).")
+            if not np.isfinite(rates).all() or (rates <= -1.0).any():
+                raise ValueError(f"{name} must contain finite annual rates above -100%.")
+    if withdrawal_paths is not None:
+        amounts = np.asarray(withdrawal_paths, dtype=float)
+        if amounts.shape != (periods, paths):
+            raise ValueError("withdrawal_paths must have shape (periods, paths).")
+        if not np.isfinite(amounts).all() or (amounts < 0).any():
+            raise ValueError("withdrawal_paths must be finite and non-negative.")
+    return wealth_values, withdrawal_start_period
+
+
+def summarize_wealth_risk(
+    wealth: pd.DataFrame,
+    initial_value: float = 100.0,
+    confidence: float = 0.95,
+    periods_per_year: float = 12.0,
+    risk_free_rate: float = 0.0,
+    annual_inflation: float = 0.0,
+    contribution: float = 0.0,
+    withdrawal: float = 0.0,
+    withdrawal_start_period: int = 1,
+    withdrawal_paths: np.ndarray | None = None,
+    inflation_paths: np.ndarray | None = None,
+    risk_free_paths: np.ndarray | None = None,
+) -> pd.Series:
+    """Calculate terminal, loss-tail, drawdown, and annualized metrics.
+
+    With ``annual_inflation > 0`` all metrics are computed on inflation-adjusted
+    wealth, so results are expressed in real (purchasing power) terms. The
+    Sharpe ratio uses ``risk_free_rate`` as the annualized risk-free return.
+    """
+
+    wealth_values, withdrawal_start_period = _validate_wealth_risk_inputs(
+        wealth, initial_value, confidence, periods_per_year, risk_free_rate,
+        annual_inflation, contribution, withdrawal, withdrawal_start_period,
+        withdrawal_paths, inflation_paths, risk_free_paths,
+    )
+    periods, paths = wealth_values.shape
     if inflation_paths is None:
         period = np.arange(1, periods + 1, dtype=float)
         deflator = ((1.0 + annual_inflation) ** (-period / periods_per_year))[:, None]
@@ -1931,10 +2102,6 @@ def summarize_wealth_risk(
 
     if risk_free_paths is not None:
         nominal_risk_free = np.asarray(risk_free_paths, dtype=float)
-        if nominal_risk_free.shape != (periods, paths):
-            raise ValueError("risk_free_paths must have shape (periods, paths).")
-        if not np.isfinite(nominal_risk_free).all() or (nominal_risk_free <= -1.0).any():
-            raise ValueError("risk_free_paths must contain finite annual rates above -100%.")
     if risk_free_paths is None and inflation_paths is None:
         real_risk_free = (1.0 + float(risk_free_rate)) / (1.0 + annual_inflation) - 1.0
         periodic_risk_free: float | np.ndarray = float(
@@ -1973,10 +2140,6 @@ def summarize_wealth_risk(
         nominal_withdrawals = withdrawal * withdrawal_schedule
     else:
         nominal_withdrawals = np.asarray(withdrawal_paths, dtype=float)
-        if nominal_withdrawals.shape != (periods, paths):
-            raise ValueError("withdrawal_paths must have shape (periods, paths).")
-        if not np.isfinite(nominal_withdrawals).all() or (nominal_withdrawals < 0).any():
-            raise ValueError("withdrawal_paths must be finite and non-negative.")
     real_withdrawals = nominal_withdrawals * withdrawal_deflator
 
     # Compute per-path drawdown and downside metrics in blocks so the full
@@ -1992,7 +2155,14 @@ def summarize_wealth_risk(
     downside_sum = 0.0
     downside_count = 0
     block = max(1, int(4096))
-    for start in range(0, paths, block):
+    native_statistics = risk_path_statistics_native(
+        wealth_values, real_contributions, real_withdrawals, periodic_risk_free, initial_value,
+    )
+    if native_statistics is not None:
+        return_sum, return_squares, return_count, log_return_sum, log_return_count, excess_return_sum, downside_sum = native_statistics[:7].sum(axis=1)
+        downside_count = return_count
+        max_drawdown, ulcer = native_statistics[7:]
+    for start in range(0, paths if native_statistics is None else 0, block):
         values = wealth_values[:, start:start + block]
         values_with_initial = np.vstack([np.full(values.shape[1], initial_value), values])
         running_max = np.maximum.accumulate(values_with_initial, axis=0)

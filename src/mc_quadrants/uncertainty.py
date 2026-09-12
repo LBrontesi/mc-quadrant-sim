@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -145,6 +147,30 @@ def bootstrap_quadrant_models(
     return models
 
 
+def anchor_parameter_models(models: list[ScenarioModel], reference: ScenarioModel) -> list[ScenarioModel]:
+    """Vary fitted parameters, not the observed forecast origin; leave caches intact."""
+    anchored = []
+    for model in models:
+        metadata = deepcopy(model.metadata)
+        for key in ("latest_regime_probabilities", "hsmm_latest_state_age_probabilities"):
+            if key in reference.metadata:
+                metadata[key] = deepcopy(reference.metadata[key])
+        # Hazard tables can have different bootstrap lengths. Pad them to retain
+        # every age represented by the reference posterior, using the terminal hazard.
+        posterior = metadata.get("hsmm_latest_state_age_probabilities")
+        if posterior is not None:
+            width = max(len(values) for values in posterior.values()) if isinstance(posterior, Mapping) else np.asarray(posterior).shape[-1]
+            metadata["duration_hazards"] = {
+                state: np.pad(np.asarray(values), (0, max(0, width-len(values))), mode="edge").tolist()
+                for state, values in metadata["duration_hazards"].items()
+            }
+        if "macro_dynamics" in metadata and "macro_dynamics" in reference.metadata:
+            metadata["macro_dynamics"]["latest"] = deepcopy(reference.metadata["macro_dynamics"]["latest"])
+        metadata["forecast_origin"] = "observed_reference_state"
+        anchored.append(replace(model, metadata=metadata))
+    return anchored
+
+
 def summarize_parameter_models(
     models: list[ScenarioModel],
     weights: Mapping[str, float],
@@ -184,6 +210,10 @@ def summarize_parameter_models(
                 "annualized_return": monthly_mean * periods_per_year,
                 "annualized_volatility": np.sqrt(max(total_variance, 0.0) * periods_per_year),
                 "average_persistence": float(np.mean(np.diag(transition))),
+                **{key: float(model.metadata.get("dependence_fit", {}).get(key, np.nan))
+                   for key in ("garch_alpha", "garch_beta", "dcc_alpha", "dcc_beta", "dcc_asymmetry")},
+                "mean_mnts_tail_index": float(np.mean([model.moments[state].mnts.tail_index for state in model.states])),
+                "mean_mnts_tempering": float(np.mean([model.moments[state].mnts.tempering for state in model.states])),
             }
         )
     return pd.DataFrame(rows)

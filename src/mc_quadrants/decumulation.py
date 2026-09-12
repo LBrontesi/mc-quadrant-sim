@@ -407,6 +407,10 @@ def inflation_index(
 ) -> np.ndarray:
     """Return end-of-month nominal units per unit of initial purchasing power."""
 
+    from mc_quadrants.native_metrics import inflation_index_native
+    native = inflation_index_native(periods, paths, annual_inflation, inflation_paths)
+    if native is not None:
+        return native
     if inflation_paths is None:
         rates = np.full((periods, paths), float(annual_inflation), dtype=float)
     else:

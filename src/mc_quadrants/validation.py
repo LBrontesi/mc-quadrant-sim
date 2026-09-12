@@ -199,6 +199,10 @@ def walk_forward_validation(
     mean_prior_strength: float = 24.0,
     weights: Mapping[str, float] | None = None,
     hsmm_max_iterations: int = 5,
+    evaluation_start: str | None = None,
+    use_fitted_dependence: bool = True,
+    garch: bool = True,
+    dynamic_correlation: bool = True,
 ) -> WalkForwardResult:
     """Evaluate the regime model strictly out of sample.
 
@@ -264,6 +268,8 @@ def walk_forward_validation(
 
     rows: list[dict[str, object]] = []
     for split in range(min_train_periods, n, step):
+        if evaluation_start is not None and aligned_returns.index[split] < pd.Timestamp(evaluation_start):
+            continue
         train_returns = aligned_returns.iloc[:split]
         train_cutoff = aligned_returns.index[split - 1]
         train_macro = macro.loc[macro.index <= train_cutoff]
@@ -323,8 +329,22 @@ def walk_forward_validation(
             mask = sampled_states == state_index
             if not mask.any():
                 continue
+            predictive = model.moments[state]
+            fitted = model.metadata.get("dependence_fit", {})
+            if use_fitted_dependence and fitted.get("status") == "fitted" and state == fitted.get("last_state"):
+                next_variance = (np.asarray(fitted["next_variance"], dtype=float) if garch
+                                 else np.diag(predictive.covariance))
+                scale = np.sqrt(next_variance / np.maximum(np.diag(predictive.covariance), 1e-12))
+                predictive = replace(
+                    predictive,
+                    covariance=pd.DataFrame(predictive.covariance.to_numpy()*np.outer(scale, scale),
+                                            index=predictive.mean.index, columns=predictive.mean.index),
+                    mnts=replace(predictive.mnts, gaussian_correlation=pd.DataFrame(
+                        fitted["next_gaussian_correlation"], index=predictive.mean.index, columns=predictive.mean.index))
+                    if dynamic_correlation else predictive.mnts,
+                )
             conditional_draws[mask] = _sample_mnts_observations(
-                model.moments[state],
+                predictive,
                 int(mask.sum()),
                 split * 101 + state_index,
             )
@@ -438,6 +458,8 @@ def walk_forward_validation(
             }
         )
 
+    if not rows:
+        raise ValueError("No observations are available in the requested evaluation window.")
     splits = pd.DataFrame(rows)
     summary = pd.Series(
         {

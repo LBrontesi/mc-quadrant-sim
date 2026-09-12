@@ -15,6 +15,7 @@ class MNTSParameters:
     tempering: float
     skewness: pd.Series
     gaussian_correlation: pd.DataFrame
+    estimation: dict[str, Any] = field(default_factory=dict)
 
     def validate(self, assets: list[str]) -> None:
         if not np.isfinite(self.tail_index) or not 0 < self.tail_index < 2:

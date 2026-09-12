@@ -229,13 +229,84 @@ def _fit_common_tail_parameters(
     return 2.0 * best[1], best[2], best[3]
 
 
+def _refine_characteristic_fit(local, pooled, reliability, correlation, tail, theta, nu):
+    """Regularized multivariate ECF refinement, initialized by moment fitting.
+
+    For unit-mean T, log L_T(s)=theta/alpha*(1-(1+s/theta)**alpha).
+    Axis and cross-asset directions identify marginal shape and common tails.
+    Bounded ECF observations avoid dependence on noisy sample fourth moments.
+    """
+    dimensions = correlation.shape[0]
+    directions = [row for row in np.eye(dimensions)]
+    if dimensions > 1:
+        directions += [np.ones(dimensions)/np.sqrt(dimensions)]
+        directions += [(np.eye(dimensions)[i]-np.eye(dimensions)[i+1])/np.sqrt(2)
+                       for i in range(dimensions-1)]
+    frequencies = np.vstack([np.asarray(directions)*t for t in (.25, .5, 1.0, 1.5, 2.0)])
+
+    def empirical(values):
+        centered = values - values.mean(axis=0)
+        standardized = centered / np.maximum(values.std(axis=0), 1e-12)
+        return np.exp(1j*(standardized @ frequencies.T)).mean(axis=0)
+
+    target = empirical(pooled)
+    if len(local) >= 4:
+        target = reliability*empirical(local)+(1-reliability)*target
+    correlation = nearest_correlation(pd.DataFrame(correlation)).to_numpy(dtype=float)
+    beta = nu*np.sqrt((1-tail/2)/theta)
+    for _ in range(400):
+        if np.linalg.eigvalsh(correlation-np.outer(beta, beta)).min() > 1e-12:
+            break
+        beta *= .9
+    initial = np.r_[tail/2, np.log(theta), beta]
+
+    def objective(parameters):
+        alpha, log_theta = parameters[:2]
+        beta = parameters[2:]
+        if not .2 <= alpha <= .975 or not np.log(.02) <= log_theta <= np.log(50) or np.any(np.abs(beta) >= .985):
+            return np.inf
+        covariance = correlation-np.outer(beta, beta)
+        if np.linalg.eigvalsh(covariance).min() <= 1e-12:
+            return np.inf
+        tempering = np.exp(log_theta)
+        skew = beta/np.sqrt((1-alpha)/tempering)
+        linear = frequencies @ skew
+        quadratic = np.einsum("ij,jk,ik->i", frequencies, covariance, frequencies)
+        exponent = -1j*linear + tempering/alpha*(1-(1+(.5*quadratic-1j*linear)/tempering)**alpha)
+        fitted = np.exp(exponent)
+        penalty = 1e-5 * np.mean((parameters-initial)**2)
+        return float(np.mean(np.abs(fitted-target)**2)+penalty)
+
+    best = initial.copy()
+    original_loss = loss = objective(best)
+    steps = np.r_[.10, .5, np.full(dimensions, .10)]
+    for _ in range(5):
+        improved = False
+        for coordinate in range(len(best)):
+            for sign in (-1, 1):
+                trial = best.copy()
+                trial[coordinate] += sign*steps[coordinate]
+                trial_loss = objective(trial)
+                if trial_loss < loss:
+                    best, loss, improved = trial, trial_loss, True
+        if not improved:
+            steps *= .5
+    alpha, log_theta = best[:2]
+    tempering = float(np.exp(log_theta))
+    skew = best[2:]/np.sqrt((1-alpha)/tempering)
+    return 2*alpha, tempering, skew, {"method": "regularized_multivariate_ecf", "objective": loss,
+                                     "initial_objective": original_loss, "observations": len(local),
+                                     "pooled_observations": len(pooled), "local_weight": reliability,
+                                     "frequency_directions": len(frequencies)}
+
+
 def fit_mnts_parameters(
     moments: RegimeMoments,
     state_returns: pd.DataFrame,
     pooled_returns: pd.DataFrame,
     prior_observations: float = 48.0,
 ) -> MNTSParameters:
-    """Fit parsimonious standardized MNTS parameters by pooled moments.
+    """Fit standardized MNTS by pooled moments and multivariate ECF refinement.
 
     Tail index and tempering are common within a quadrant. Asset skewness is
     fitted separately, then the latent Gaussian correlation is reconstructed
@@ -255,6 +326,12 @@ def fit_mnts_parameters(
         target_kurtosis,
     )
 
+    estimation = {"method": "pooled_moments", "observations": len(local)}
+    if len(pooled) >= 24:
+        tail_index, tempering, nu, estimation = _refine_characteristic_fit(
+            local, pooled, reliability, moments.correlation.to_numpy(dtype=float), tail_index, tempering, nu,
+        )
+
     alpha = tail_index / 2.0
     variance_t = (1.0 - alpha) / tempering
     gamma = np.sqrt(np.maximum(1.0 - nu * nu * variance_t, 1e-8))
@@ -270,6 +347,7 @@ def fit_mnts_parameters(
         tempering=float(tempering),
         skewness=pd.Series(nu, index=assets, dtype=float),
         gaussian_correlation=latent_frame,
+        estimation=estimation,
     )
 
 

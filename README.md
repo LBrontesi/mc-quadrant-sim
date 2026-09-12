@@ -259,6 +259,15 @@ latent factor preserves cross-asset dependence. Parameters are standardized so
 the fitted state means, volatilities, and correlations remain the target first
 two moments.
 
+Estimation starts from pooled skewness/kurtosis estimates, then refines the
+parameters against a regularized multivariate empirical characteristic function
+(ECF), using marginal and cross-asset directions. Sparse states borrow pooled
+information; fewer than 24 pooled observations retain the moment estimator.
+Diagnostics report the initial and final fitting objectives. This is bounded
+coordinate optimization, not exact MNTS maximum likelihood or proof of better
+out-of-sample forecasts. Joint-macro simulations fit a separate MNTS law to
+macro-residual returns to avoid fitting the same macro tails twice.
+
 The native engine samples the tempered-stable subordinator exactly with the
 two-dimensional single-rejection algorithm of Qu, Dassios, and Zhao (2021).
 For every state parameter pair it selects the lowest-cost of four gamma-based
@@ -275,14 +284,25 @@ each regime: every asset's variance follows
 unconditional level matches the regime covariance, and the variance re-anchors
 when a path enters a new regime. Shocks therefore cluster in time without
 drifting away from the calibrated regime covariance. `garch_alpha` governs
-responsiveness to new shocks (default 0.10) and `garch_beta` the persistence
-of past variance (default 0.85).
+responsiveness to new shocks and `garch_beta` the persistence of past variance.
+The scenario pipeline now estimates these coefficients with constrained,
+variance-targeted Gaussian quasi-likelihood, pooling coefficients across assets
+and states to match the C++ engine. Histories shorter than 60 observations use
+explicitly reported fallback coefficients (0.10 and 0.85).
 
 **Asymmetric dynamic correlation (ADCC)** evolves the correlation matrix after
 each standardized shock. `dcc_alpha` controls shock response, `dcc_beta`
 controls persistence, and `dcc_asymmetry` increases the response to joint
 negative MNTS shocks. It re-anchors to the relevant state-level latent
 correlation after a regime change.
+The three coefficients are also fitted by constrained Gaussian quasi-likelihood
+using the engine's regime-reset recurrence. This is not the textbook ADCC
+negative-moment intercept specification. Set `calibrate_dependence=False` in
+`run_scenario` (or the equivalent API/dashboard control) to use supplied manual
+coefficients. Direct low-level `simulate_returns` calls retain explicit/manual
+coefficient defaults. Forecast paths still initialize variance and correlation
+at their starting regime's long-run levels; one-step validation uses filtered
+end-of-training dependence when the state continues.
 
 **Joint macro-financial paths** default to a shrinkage Bayesian VAR(1) ensemble
 that blends full-history and rolling-window coefficients for growth, inflation,
@@ -300,6 +320,32 @@ benchmark and leveraged financing base. This compact model improves internal
 consistency but is not a structural macroeconomic forecast, a Taylor-rule
 model, or a full yield-curve model.
 
+Macro centers and innovation covariances now shrink sparse-state estimates
+toward pooled estimates. Asset exposures are estimated against state-centered
+forecast innovations, matching the shocks injected by the simulator, rather
+than raw macro differences. Innovation RMSE is retained for inspection.
+
+With parameter draws enabled, each paired stationary bootstrap refits moments,
+MNTS, transitions/durations, dependence coefficients, and the enabled macro
+model. Every draw is anchored to the observed reference macro level and
+state/age distribution rather than its artificial bootstrap endpoint. Separate
+per-path macro-coefficient draws are disabled in this mode to avoid counting
+macro-parameter uncertainty twice. This is a bootstrap mixture conditional on
+the reference starting state, not a fully Bayesian joint posterior; dependence
+coefficients remain pooled, and hyperparameter/model-choice uncertainty is not
+integrated over.
+
+The HSMM duration update now uses pooled and neighboring-age Beta pseudocounts.
+Nearby ages contribute bounded evidence, reducing isolated sparse-age hazard
+spikes while preserving minimum durations and the geometric overflow tail.
+`fit_quadrant_hsmm(duration_age_strength=0)` disables neighboring-age shrinkage;
+the default is 4 effective prior observations at most. Emission initialization
+now uses the emission prior independently of the duration prior. Nonfinite
+macro observations are excluded and gaps remain separate sequences. API
+`hsmm_diagnostics` includes the likelihood trace, decreases, sequence count,
+and duration-estimator details. This regularized update is not guaranteed to
+increase unpenalized likelihood at every iteration or improve holdout scores.
+
 **Walk-forward validation** (quadrant model only, enabled by default in the
 dashboard) checks the regime model and selected portfolio strictly out of sample: each split fits on
 data up to period `t` and scores the next observation under the one-step
@@ -316,7 +362,29 @@ The UI shows expected months in every state and expected
 switches per decade, and warns when the implied persistence is unusually low.
 Weak or miscalibrated results are surfaced as warnings rather than hidden.
 
+**Hyperparameter selection** is enabled by the dashboard's separate checkbox
+and opt-in through `select_hyperparameters=True` in Python/API requests. It
+requires walk-forward quadrant validation and at least 84 complete monthly
+observations. A small development-only walk-forward search selects mean
+shrinkage from the requested value, 12, and 48 prior observations. The
+search also tests duration-prior strengths of 4 and 16 with the requested mean
+prior (a small candidate set, not an exhaustive joint grid). The final
+12 observations are excluded from selection and then scored chronologically
+with the selected setting; earlier holdout observations may enter subsequent
+expanding-window fits. Final simulation calibration uses all available history.
+Selection scores are labeled separately from holdout performance. Short data
+fall back to requested settings with a warning. Validation assesses return and
+regime forecasts, not the complete joint macro/portfolio/bootstrap distribution.
+Calibration and validation take additional time; production path generation
+still uses the existing native C++ kernels. The HSMM now has age-regularized
+duration estimation; additional latent states and new emission families remain
+deferred until validation justifies their complexity.
+
 #### Legacy-methodology comparison
+
+The historical comparisons below predate the ECF/dependence-calibration changes
+described above. They are not out-of-sample evidence for the updated estimator;
+rerun holdout validation on the intended data before interpreting improvements.
 
 The removed Student-t and Gaussian-GARCH return laws are retained only in Git
 history for controlled research comparisons; they are not selectable product
@@ -658,7 +726,7 @@ Build the C++17 production backend on macOS (including Apple Silicon) or Linux:
 The native backend uses `std::thread`; the scenario `workers` setting controls
 that thread pool. A fused MNTS-GARCH kernel generates one path at a time and
 immediately updates gross, DIY, and optional wrapper ledgers, so no full asset-
-return cube is retained. Large eligible tax simulations also generate the
+return cube is retained. Large eligible simulations also generate the
 four-state Markov or explicit-duration semi-Markov process inside the same C++
 kernel. Joint macro simulations use that compact path as well: native workers
 generate macro innovations, likelihood-conditioned regime transitions,
@@ -671,6 +739,28 @@ library is missing or its ABI version does not match, execution automatically
 falls back to the Python reference implementation. Set
 `MC_DISABLE_NATIVE_SIM=1` to force that reference path for verification.
 
+The standalone simulation routes also use C++: Markov/semi-Markov and joint
+macro path generation, MNTS-GARCH/ADCC returns, legacy weighted portfolios,
+buy-and-hold and rebalanced holdings, leveraged debt/margin accounting,
+contributions, withdrawals and Guyton–Klinger guardrails. Italian administered,
+declarative and managed ledgers support distribution-paying assets, source
+withholding and foreign-tax credits in both detailed and fused execution.
+Inflation paths, core per-path risk reductions and contribution-based
+money-weighted returns have native kernels as well. Calibration, input
+validation, scenario orchestration, DataFrame/JSON conversion and chart
+analytics remain Python; reference simulation implementations are retained
+for fallback and regression checks. Unsupported custom tax-policy extensions
+continue to use their registered implementation.
+
+Rebuild the library after pulling these changes (ABI **10**). Formerly
+NumPy-generated standalone regime/macro paths now use the native per-path
+random stream: identical seeds are reproducible across native worker counts,
+but do not reproduce the old NumPy draws. The existing compact large-run
+random stream is unchanged. Numerical ledger parity is tested with identical
+input returns and tight floating-point tolerances, not by comparing unrelated
+random streams. Native generation supports up to 256 states; larger standalone
+regime models retain the reference path.
+
 The production MNTS subordinator uses the exact two-dimensional
 single-rejection Algorithm 3.1 of
 [Qu, Dassios, and Zhao (2021)](https://doi.org/10.1145/3449357). The C++ engine
@@ -680,12 +770,25 @@ sampler and the former simple-rejection/Devroye hybrid remain callable for
 distributional regression tests and reproducible performance comparisons.
 The Python fallback continues to use Devroye's exact reference algorithm.
 
-Automatic Italian-tax runs without active decumulation use one fused native
-batch and up to eight threads by default. Tax totals, terminal statistics,
+Automatic unlevered holdings-based runs above 25,000 paths without active decumulation use the
+fused native path for both tax-neutral and compatible Italian-tax portfolios.
+Parameter-recalibration ensembles share one 25,000-path reporting budget while
+retaining all-path terminal and risk reductions. Bootstrap calibrations are
+cached across simulation-only changes, with bounded storage and invalidation
+when historical data, calibration options or the seed change. The kernel uses up to eight
+threads by default. Tax totals, terminal statistics,
 final-horizon wealth percentiles, goal success, shortfall, maximum drawdowns,
 and ruin remain exact across every requested path. Intermediate chart bands
 and advanced path diagnostics use the retained 25,000-path sample, preventing
 reporting memory from dominating the simulation.
+
+When complete native risk reductions are present, reporting validates inputs
+and uses those reductions directly, without recalculating sampled Python risk
+matrices. Missing or incomplete reductions retain the reference fallback.
+Large-run wealth and macro chart percentiles share a pool of at most four
+threads, with bounded partition workspace and no duplicate net/gross work
+when those histories are shared. Small runs use serial chart calculations;
+the reporting sample size and exact all-path terminal bands are unchanged.
 
 On the development machine, Qu's sampler won all 45 points in the calibrated
 grid (`alpha=0.55..0.95`, `tempering=0.04..20`, 100,000 draws and three repeats
@@ -697,8 +800,17 @@ reduction using eight native threads. After adding native regime generation and
 compact reporting, the equivalent 500,000-path benchmark takes 10.89 seconds,
 versus 13.97 seconds in detailed native mode: 22.0% less time. Estimated retained
 history memory falls from 3.06 GB to 165 MB, a 94.6% reduction, while all-path
-terminal estimates remain exact. These are hardware-specific engineering
-benchmarks rather than runtime guarantees. Run
+terminal estimates remain exact. A September 2026 default-like API benchmark
+with 500,000 paths, 360 months, four assets, eight parameter recalibrations,
+joint macro paths, GARCH and ADCC completed in 14.61 seconds with about 2.70 GB
+peak parent-process memory on an eight-logical-CPU Apple Silicon machine; a
+repeat with cached bootstrap calibrations took 13.69 seconds. The
+same 50,000-path workload fell from 13.24 to 5.31 seconds after compact neutral
+ensemble execution was added. These single-run measurements exclude historical
+data downloads and walk-forward validation; they are hardware-specific engineering
+benchmarks rather than runtime guarantees. Reproduce the API workload with
+`.venv/bin/python scripts/benchmark_api.py --paths 500000 --periods 360 --draws 8 --workers 8 --profile`;
+add `--repeats 2` to observe calibration-cache reuse or `--walk-forward` to include validation. Run
 `scripts/benchmark_nts_samplers.py` for the sampler grid and
 `scripts/benchmark_native.py` for the complete scenario. The constrained HSMM,
 joint macro-membership, and latest-posterior comparison is reproducible with
@@ -706,6 +818,50 @@ joint macro-membership, and latest-posterior comparison is reproducible with
 `scripts/benchmark_joint_macro.py` for the Python optimizer, streamed native
 path, distribution check, and retained-memory comparison. Pass `--repeats 1`
 for a single large-scale measurement instead of the default median.
+
+Further C++ tuning specializes the four-asset ADCC factorization and the two-
+and three-variable macro loops, and precomputes gamma/normal sampler setup per
+regime. It preserves the sampler's random draw order and uses no approximate
+math or reduced precision. In a matched repeat of the offline 500,000-path API
+benchmark above, cold execution fell from 15.98 to 13.73 seconds (14% less time),
+with native simulation falling from 11.92 to 9.92 seconds. Cached execution
+fell from 14.68 to 12.41 seconds; peak parent RSS remained about 2.70 GB.
+
+The reporting follow-up reduced a fresh matched warm-cache run from 12.38 to
+11.84 seconds (4.3% less time), and cold execution from 13.64 to 13.19 seconds.
+Peak parent RSS across two runs was 2.58 GB versus 2.66 GB before this change.
+This uses the same offline 500,000 x 360 workload above on an eight-core Apple
+M3; timings include Python profiling overhead and vary with machine load.
+
+The four-asset return kernel also selects GARCH mode once per native batch,
+traverses macro coefficients contiguously across assets, and separates asset
+arithmetic from scalar exponential calls. This preserves the original random
+stream, floating-point operation order within each asset, and scalar math
+functions. In a matched 500,000 x 360 run, summed return-generation worker time
+fell from 47.18 to 43.99 seconds (6.8% less), while warm API runtime fell from
+10.91 to 10.62 seconds (2.7% less). Alternating old/new library runs verified
+bit-identical all-path terminal outcomes, deflators, drawdowns, risk reductions,
+and retained wealth/macro/regime histories. These timings are machine-specific;
+other asset counts retain the generic return kernel.
+
+Set `MC_NATIVE_PROFILE=1` when running `scripts/benchmark_api.py` to print macro,
+return-generation, ledger and reporting stage timings from C++. These are sums
+of elapsed worker times, not end-to-end wall time. Set `MC_NATIVE_FORCE_GENERIC=1`
+to disable the fixed-size specializations for same-seed regression comparisons;
+other dimensions always use the generic kernels. Both flags are off by default.
+
+After the broader native migration, the offline 500,000-path × 360-month,
+four-asset/eight-draw/eight-worker workload completed in 12.01 seconds cold
+and 10.64 seconds with cached calibrations, at 2.60 GB peak parent RSS.
+These are fresh measurements, not a controlled speedup comparison; the
+default compact route was already native. Compare newly migrated holdings
+and leveraged ledgers on identical returns with
+`.venv/bin/python scripts/benchmark_native_migration.py --paths 25000 --periods 360 --workers 8`.
+One such 25,000-path × 360-month run reduced holdings-with-spending accounting
+from 0.627 to 0.133 seconds (4.72×), and leveraged-with-spending accounting
+from 0.687 to 0.144 seconds (4.76×). Maximum absolute wealth differences were
+2.1e-11 and 6.6e-11 respectively, with an initial balance of 1,000. These are
+ledger-only measurements on fixed input returns, not full simulation timings.
 
 Then you can adapt:
 

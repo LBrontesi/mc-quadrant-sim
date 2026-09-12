@@ -49,6 +49,7 @@ def test_parameter_bootstrap_recalibrates_complete_models():
     summary = summarize_parameter_models(models, {"SPY": 0.6, "IEF": 0.4})
 
     assert len(models) == 3
-    assert summary.shape == (3, 4)
+    assert summary.shape == (3, 11)
+    assert {"garch_alpha", "dcc_alpha", "mean_mnts_tail_index"}.issubset(summary.columns)
     assert np.isfinite(summary.to_numpy(dtype=float)).all()
     assert all(model.metadata["regime_assignment"] == "probabilistic" for model in models)

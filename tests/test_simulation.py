@@ -76,6 +76,43 @@ def test_compact_regime_codes_match_public_labels():
     assert np.array_equal(labels, np.asarray(model.states, dtype=object)[codes])
 
 
+@pytest.mark.parametrize("joint", [False, True])
+@pytest.mark.parametrize("duration", ["markov", "semi_markov"])
+def test_native_standalone_process_is_worker_invariant(monkeypatch, joint, duration):
+    from mc_quadrants.native import native_available
+    if not native_available():
+        pytest.skip("native simulator is not compiled")
+    model = _calibrated_model(joint_macro=joint)
+    function = simulation_module.simulate_joint_regime_macro_paths if joint else simulate_regime_paths
+    kwargs = dict(periods=24, paths=257, random_seed=11, duration_model=duration, return_codes=True)
+    # Fail if the public route unexpectedly drops into NumPy process generation.
+    monkeypatch.setattr(simulation_module, "_sample_initial_states_and_ages", lambda *a, **k: pytest.fail("Python regime loop used"))
+    first = function(model, native_threads=1, **kwargs)
+    second = function(model, native_threads=4, **kwargs)
+    for left, right in zip(first if joint else (first,), second if joint else (second,), strict=True):
+        np.testing.assert_array_equal(left, right)
+        assert np.isfinite(left).all()
+
+
+def test_native_standalone_macro_preserves_conditional_innovation_moments():
+    from mc_quadrants.native import native_available
+    if not native_available():
+        pytest.skip("native simulator is not compiled")
+    model = _calibrated_model(joint_macro=True)
+    state = model.states[0]
+    dynamics = model.metadata["macro_dynamics"]
+    _, values, shocks = simulation_module.simulate_joint_regime_macro_paths(
+        model, periods=1, paths=30_000, start_state=state, random_seed=79,
+        macro_parameter_uncertainty=False, return_codes=True, native_threads=4,
+    )
+    covariance = np.asarray(dynamics["state_innovation_covariances"][state])
+    np.testing.assert_allclose(shocks[0].mean(axis=0), 0, atol=.02 * np.sqrt(np.diag(covariance)).max())
+    np.testing.assert_allclose(np.cov(shocks[0], rowvar=False), covariance, rtol=.04, atol=.01)
+    center = np.asarray(dynamics["state_centers"][state])
+    forecast = center + (np.asarray(dynamics["latest"]) - center) @ dynamics["var_coefficient"]
+    np.testing.assert_allclose(values[0] - shocks[0], np.broadcast_to(forecast, shocks[0].shape), atol=1e-12)
+
+
 def test_vectorized_cholesky_matches_numpy():
     rng = np.random.default_rng(12)
     samples = rng.standard_normal((40, 6, 6))
@@ -1054,6 +1091,8 @@ def test_macro_probabilities_use_joint_hsmm_emission_likelihoods():
 
 
 def test_joint_macro_scores_only_paths_eligible_to_exit(monkeypatch):
+    # This test instruments the Python reference's eligibility masks.
+    monkeypatch.setenv("MC_DISABLE_NATIVE_SIM", "1")
     model = _calibrated_model(joint_macro=True)
     model.metadata["duration_hazards"] = {
         state: np.array([0.0, 0.0, 0.0, 0.0, 1.0]) for state in model.states

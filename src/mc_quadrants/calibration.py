@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -354,6 +355,7 @@ def _fit_joint_macro_dynamics(
     structural_returns: bool = False,
     macro_model: str = "bvar_ensemble",
     ridge: float = 1e-3,
+    macro_lag_periods: int = 0,
 ) -> dict[str, object]:
     """Fit a compact regime-conditioned macro VAR and return-factor link.
 
@@ -412,6 +414,7 @@ def _fit_joint_macro_dynamics(
     radius = float(np.max(np.abs(eigenvalues))) if len(eigenvalues) else 0.0
     if radius >= 0.98:
         coefficient *= 0.98 / radius
+    coefficient_scaled = coefficient * scale[:, None] / scale[None, :]
     residuals = y - x @ coefficient
     global_residual_covariance = nearest_psd(np.atleast_2d(np.cov(residuals, rowvar=False)))
     scaled_residuals = y_scaled - x_scaled @ coefficient_scaled
@@ -441,20 +444,33 @@ def _fit_joint_macro_dynamics(
     for state in REGIME_ORDER:
         weights = macro_membership[state].fillna(0.0).to_numpy(dtype=float)
         if weights.sum() > 1e-9:
-            center = np.average(macro_values, axis=0, weights=weights)
+            local_center = np.average(macro_values, axis=0, weights=weights)
+            effective = weights.sum()**2 / max(float(weights @ weights), 1e-12)
+            reliability = effective / (effective + 12.0)
+            center = reliability*local_center + (1-reliability)*global_mean
         else:
             center = global_mean
-        residual_weights = weights[1:]
-        covariance = _weighted_covariance(
-            residuals,
-            residual_weights,
-            global_residual_covariance,
-        )
         state_centers[state] = center.tolist()
-        state_covariances[state] = covariance.tolist()
 
-    macro_changes = macro_clean.diff().dropna()
-    aligned_changes = macro_changes.reindex(returns.index, method="ffill")
+    # Fit innovation covariance and return exposure to the SAME one-step
+    # state-centered forecast used by simulation, rather than raw level changes.
+    membership = macro_membership.reindex(columns=REGIME_ORDER).fillna(0).to_numpy(dtype=float, copy=True)
+    membership /= np.maximum(membership.sum(axis=1, keepdims=True), 1e-12)
+    conditional_centers = membership @ np.asarray([state_centers[state] for state in REGIME_ORDER])
+    conditional_centers[membership.sum(axis=1) == 0] = global_mean
+    forecasts = conditional_centers[:-1] + (macro_values[:-1]-conditional_centers[:-1]) @ coefficient
+    residuals = macro_values[1:]-forecasts
+    global_residual_covariance = nearest_psd(np.atleast_2d(np.cov(residuals, rowvar=False)))
+    for index, state in enumerate(REGIME_ORDER):
+        weights = membership[:-1, index]
+        local = _weighted_covariance(residuals, weights, global_residual_covariance)
+        effective = weights.sum()**2 / max(float(weights @ weights), 1e-12)
+        reliability = effective/(effective+24.0)
+        state_covariances[state] = nearest_psd(
+            reliability*local + (1-reliability)*global_residual_covariance
+        ).tolist()
+    macro_innovations = pd.DataFrame(residuals, index=macro_clean.index[1:], columns=columns)
+    aligned_changes = macro_innovations.reindex(returns.index, method="ffill").shift(macro_lag_periods)
     joint = returns.join(aligned_changes.add_prefix("__macro_"), how="inner").dropna()
     return_values = joint.loc[:, returns.columns].to_numpy(dtype=float)
     change_values = joint.loc[:, [f"__macro_{column}" for column in columns]].to_numpy(dtype=float)
@@ -522,6 +538,10 @@ def _fit_joint_macro_dynamics(
         "macro_prior_strength": float(prior_strength),
         "macro_rolling_observations": int(rolling_observations),
         "macro_instability_score": instability_score,
+        "return_exposure_basis": "state_centered_forecast_innovations",
+        "_residual_returns": pd.DataFrame(return_values-change_values @ betas, index=joint.index, columns=returns.columns),
+        "innovation_covariance_prior_observations": 24,
+        "forecast_rmse": np.sqrt(np.mean(residuals**2, axis=0)).tolist(),
         "state_centers": state_centers,
         "state_innovation_covariances": state_covariances,
         "return_betas": betas.tolist(),
@@ -703,6 +723,7 @@ def calibrate_quadrant_model(
         "hsmm_log_likelihood": hsmm.log_likelihood,
         "hsmm_iterations": hsmm.iterations,
         "hsmm_converged": hsmm.converged,
+        "hsmm_diagnostics": hsmm.diagnostics,
         "hsmm_max_duration": hsmm.max_duration,
         "hsmm_emission_means": hsmm.emission_means,
         "hsmm_emission_covariances": hsmm.emission_covariances,
@@ -739,8 +760,27 @@ def calibrate_quadrant_model(
             asset_profiles,
             structural_returns=structural_returns,
             macro_model=macro_model,
+            macro_lag_periods=macro_lag_periods,
         )
 
+    from mc_quadrants.dependence import fit_dependence
+    dependence_returns, dependence_regimes, dependence_moments = clean_returns, aligned_regimes, moments
+    if joint_macro:
+        dynamics = metadata["macro_dynamics"]
+        dependence_returns = dynamics.pop("_residual_returns").reindex(clean_returns.index).dropna()
+        dependence_regimes = aligned_regimes.reindex(dependence_returns.index)
+        dependence_moments = {}
+        for state in REGIME_ORDER:
+            covariance = pd.DataFrame(dynamics["return_residual_covariances"][state], index=returns.columns, columns=returns.columns)
+            dependence_moments[state] = replace(moments[state], covariance=covariance,
+                                                correlation=covariance_to_correlation(covariance))
+        dependence_moments = attach_mnts_parameters(dependence_moments, {
+            state: dependence_returns.loc[dependence_regimes == state] for state in REGIME_ORDER
+        })
+        dynamics["residual_mnts"] = {state: dependence_moments[state].mnts for state in REGIME_ORDER}
+    metadata["dependence_fit"] = fit_dependence(dependence_returns, dependence_regimes, dependence_moments)
+    metadata["dependence_fit"]["input_basis"] = "macro_residual_returns" if joint_macro else "returns"
+    metadata["mnts_estimation"] = {state: moments[state].mnts.estimation for state in REGIME_ORDER}
     model = ScenarioModel(
         states=REGIME_ORDER.copy(),
         transition_matrix=transition_matrix,

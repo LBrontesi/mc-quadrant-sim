@@ -9,7 +9,12 @@ import numpy as np
 
 from mc_quadrants.decumulation import DecumulationPlan
 
-NATIVE_ABI_VERSION = 8
+NATIVE_ABI_VERSION = 10
+NATIVE_RISK_STAT_NAMES = (
+    "return_sum", "return_squares", "return_count", "log_return_sum",
+    "log_return_count", "excess_return_sum", "downside_sum", "risk_free_sum",
+    "ulcer_index",
+)
 NATIVE_TAX_STAT_NAMES = (
     "capital_gains_tax_total",
     "investment_income_tax_total",
@@ -37,6 +42,8 @@ NATIVE_YEAR_STAT_NAMES = (
     "terminal_liquidation_tax",
     "gross_sales_for_spending",
     "net_spending",
+    "investment_income_tax",
+    "foreign_withholding_tax",
 )
 
 
@@ -94,6 +101,9 @@ class _ItalianPortfolioConfig(ctypes.Structure):
         ("wrapper_benchmark", ctypes.c_int),
         ("year_slots", ctypes.c_void_p),
         ("year_count", ctypes.c_int),
+        ("annual_income_yield", ctypes.c_void_p),
+        ("foreign_withholding_rate", ctypes.c_void_p),
+        ("foreign_tax_credit_rate", ctypes.c_void_p),
     ]
 
 
@@ -114,6 +124,7 @@ class _RegimeProcessConfig(ctypes.Structure):
         ("transaction_cost_multipliers", ctypes.c_void_p),
         ("sample_indices", ctypes.c_void_p),
         ("sample_paths", ctypes.c_int),
+        ("annual_risk_free_rate", ctypes.c_double),
     ]
 
 
@@ -131,6 +142,14 @@ class _MacroProcessConfig(ctypes.Structure):
         ("rate_index", ctypes.c_int),
         ("rate_min", ctypes.c_double),
         ("rate_max", ctypes.c_double),
+        ("inflation_index", ctypes.c_int),
+        ("inflation_scale", ctypes.c_double),
+        ("rate_scale", ctypes.c_double),
+        ("logistic_membership", ctypes.c_int),
+        ("membership_growth_threshold", ctypes.c_double),
+        ("membership_inflation_threshold", ctypes.c_double),
+        ("membership_growth_scale", ctypes.c_double),
+        ("membership_inflation_scale", ctypes.c_double),
     ]
 
 _LIBRARY: ctypes.CDLL | None | bool = None
@@ -269,6 +288,7 @@ def _load_library() -> ctypes.CDLL | None:
                 ctypes.c_void_p,
                 ctypes.c_void_p,
             ]
+            tax_function.argtypes += [ctypes.c_void_p] * 3
             fused_function = library.mc_simulate_parametric_italian_portfolios
             fused_function.restype = ctypes.c_int
             fused_function.argtypes = [
@@ -291,7 +311,7 @@ def _load_library() -> ctypes.CDLL | None:
                 ctypes.POINTER(_ItalianPortfolioConfig),
                 ctypes.POINTER(_RegimeProcessConfig),
                 ctypes.POINTER(_MacroProcessConfig),
-                *([ctypes.c_void_p] * 13),
+                *([ctypes.c_void_p] * 15),
             ]
             _LIBRARY = library
             return library
@@ -305,6 +325,16 @@ def native_available() -> bool:
     """Return whether the optional compiled simulation backend is loadable."""
 
     return _load_library() is not None
+
+
+def native_fused_available() -> bool:
+    """Return whether fused execution is both loadable and enabled."""
+
+    disabled = {"1", "true", "yes", "on"}
+    return native_available() and not any(
+        os.getenv(name, "").strip().lower() in disabled
+        for name in ("MC_DISABLE_NATIVE_SIM", "MC_DISABLE_NATIVE_FUSED")
+    )
 
 
 def sample_mnts_subordinators_native(
@@ -349,6 +379,16 @@ def sample_mnts_subordinators_native(
 
 def _pointer(values: np.ndarray | None) -> ctypes.c_void_p:
     return ctypes.c_void_p(0 if values is None else values.ctypes.data)
+
+
+def _income_arrays(assets, annual_income_yield, foreign_withholding_rate, foreign_tax_credit_rate):
+    arrays = []
+    for values in (annual_income_yield, foreign_withholding_rate, foreign_tax_credit_rate):
+        array = np.ascontiguousarray(np.zeros(assets) if values is None else values, dtype=np.float64)
+        if array.shape != (assets,) or not np.isfinite(array).all() or (array < 0).any() or (array > 1).any():
+            raise ValueError("Income yields and withholding/credit rates must be finite asset vectors between 0 and 1.")
+        arrays.append(array)
+    return arrays
 
 
 def simulate_parametric_native(
@@ -493,6 +533,9 @@ def simulate_italian_portfolios_native(
     decumulation: DecumulationPlan | None = None,
     withdrawal_cpi: np.ndarray | None = None,
     safe_withdrawal_rate: float = 0.0,
+    annual_income_yield: np.ndarray | None = None,
+    foreign_withholding_rate: np.ndarray | None = None,
+    foreign_tax_credit_rate: np.ndarray | None = None,
     workers: int = 1,
 ) -> dict[str, object] | None:
     """Run the fused gross/Italian-tax ledger, or return ``None`` as fallback."""
@@ -585,6 +628,7 @@ def simulate_italian_portfolios_native(
     stats = np.zeros((len(NATIVE_TAX_STAT_NAMES), paths), dtype=np.float64)
     gross_costs = np.zeros(paths, dtype=np.float64)
     year_stats = np.zeros((year_count, len(NATIVE_YEAR_STAT_NAMES)), dtype=np.float64)
+    income_arrays = _income_arrays(assets, annual_income_yield, foreign_withholding_rate, foreign_tax_credit_rate)
     status = library.mc_simulate_italian_portfolios(
         periods,
         paths,
@@ -644,6 +688,7 @@ def simulate_italian_portfolios_native(
         _pointer(requested_spending),
         _pointer(funded_spending),
         _pointer(guardrail_events),
+        *[_pointer(array) for array in income_arrays],
     )
     if status != 0:
         raise RuntimeError(f"Native Italian tax ledger failed with status {status}.")
@@ -703,6 +748,9 @@ def simulate_parametric_italian_portfolios_native(
     year_slots: np.ndarray,
     macro_shocks: np.ndarray | None = None,
     macro_betas: np.ndarray | None = None,
+    annual_income_yield: np.ndarray | None = None,
+    foreign_withholding_rate: np.ndarray | None = None,
+    foreign_tax_credit_rate: np.ndarray | None = None,
     workers: int = 1,
 ) -> dict[str, object] | None:
     """Generate parametric returns and update all ledgers without a return cube."""
@@ -825,6 +873,7 @@ def simulate_parametric_italian_portfolios_native(
         _pointer(fees),
         int(return_kind == "simple"),
     )
+    income_arrays = _income_arrays(assets, annual_income_yield, foreign_withholding_rate, foreign_tax_credit_rate)
     tax_config = _ItalianPortfolioConfig(
         _pointer(weights),
         float(initial_value),
@@ -846,6 +895,7 @@ def simulate_parametric_italian_portfolios_native(
         int(bool(wrapper_benchmark)),
         _pointer(slots),
         year_count,
+        *[_pointer(array) for array in income_arrays],
     )
     gross = np.empty((periods, paths), dtype=np.float64)
     diy = np.empty((periods, paths), dtype=np.float64)
@@ -930,7 +980,11 @@ def simulate_parametric_italian_portfolios_compact_native(
     wrapper_benchmark: bool,
     year_slots: np.ndarray,
     annual_reporting_inflation: float = 0.0,
+    annual_risk_free_rate: float = 0.0,
     reporting_paths: int = 25_000,
+    annual_income_yield: np.ndarray | None = None,
+    foreign_withholding_rate: np.ndarray | None = None,
+    foreign_tax_credit_rate: np.ndarray | None = None,
     workers: int = 1,
 ) -> dict[str, object] | None:
     """Run the native state/return/tax pipeline while retaining compact histories."""
@@ -1124,6 +1178,13 @@ def simulate_parametric_italian_portfolios_compact_native(
         else:
             rate_min = 0.0
             rate_max = 0.0
+        inflation_index = int(macro_process.get("inflation_index", -1))
+        inflation_scale = float(macro_process.get("inflation_scale", 1.0))
+        rate_scale = float(macro_process.get("rate_scale", 1.0))
+        if inflation_index < -1 or inflation_index >= macro_dimensions:
+            raise ValueError("macro_process inflation_index is outside the macro vector.")
+        if not np.isfinite([inflation_scale, rate_scale]).all() or min(inflation_scale, rate_scale) <= 0:
+            raise ValueError("Macro reporting scales must be positive and finite.")
         macro_config = _MacroProcessConfig(
             macro_dimensions,
             _pointer(macro_latest),
@@ -1137,6 +1198,9 @@ def simulate_parametric_italian_portfolios_compact_native(
             rate_index,
             rate_min,
             rate_max,
+            inflation_index,
+            inflation_scale,
+            rate_scale,
         )
 
     multipliers = None
@@ -1170,11 +1234,35 @@ def simulate_parametric_italian_portfolios_compact_native(
     year_count = int(slots.max()) + 1
     if not np.isfinite(annual_reporting_inflation) or annual_reporting_inflation <= -1.0:
         raise ValueError("annual_reporting_inflation must be finite and above -100%.")
+    if not np.isfinite(annual_risk_free_rate) or annual_risk_free_rate <= -1.0:
+        raise ValueError("annual_risk_free_rate must be finite and above -100%.")
     regime_code = {
         "italy_administered": 0,
         "italy_declarative": 1,
         "italy_managed": 2,
+        "none": 3,
     }[str(tax_regime).strip().lower()]
+    if regime_code == 3:
+        return_kind = str(return_kind).lower()
+        contribution_allocation = str(contribution_allocation).strip().lower()
+        if not np.isfinite(initial_value) or initial_value <= 0:
+            raise ValueError("initial_value must be positive and finite.")
+        if not np.isfinite(contribution) or contribution < 0:
+            raise ValueError("contribution must be a finite, non-negative number.")
+        if contribution_allocation not in {"target", "underweight_first"}:
+            raise ValueError("contribution_allocation must be target or underweight_first.")
+        if int(rebalance_frequency) < 0:
+            raise ValueError("rebalance_frequency must be non-negative.")
+        if not np.isfinite(transaction_cost_bps) or transaction_cost_bps < 0:
+            raise ValueError("transaction_cost_bps must be a non-negative number.")
+        if rebalance_frequency == 0 and not np.isclose(transaction_cost_bps, 0.0):
+            raise ValueError("Transaction costs require monthly, quarterly, or annual rebalancing.")
+        if not np.isfinite(weights).all() or (weights < 0).any() or not np.isclose(weights.sum(), 1.0):
+            raise ValueError("Compact target weights must be finite, non-negative and sum to one.")
+        if not np.isfinite(fees).all() or (fees > 0).any():
+            raise ValueError("Monthly fee logs must be finite and non-positive.")
+        if return_kind not in {"log", "simple"}:
+            raise ValueError("return_kind must be 'log' or 'simple'.")
 
     sample_count = min(max(1, int(reporting_paths)), paths)
     sample_indices = np.unique(np.linspace(0, paths - 1, sample_count, dtype=np.int32))
@@ -1208,6 +1296,7 @@ def simulate_parametric_italian_portfolios_compact_native(
         _pointer(fees),
         int(return_kind == "simple"),
     )
+    income_arrays = _income_arrays(assets, annual_income_yield, foreign_withholding_rate, foreign_tax_credit_rate)
     tax_config = _ItalianPortfolioConfig(
         _pointer(weights),
         float(initial_value),
@@ -1229,6 +1318,7 @@ def simulate_parametric_italian_portfolios_compact_native(
         int(bool(wrapper_benchmark)),
         _pointer(slots),
         year_count,
+        *[_pointer(array) for array in income_arrays],
     )
     regime_config = _RegimeProcessConfig(
         _pointer(transition),
@@ -1246,6 +1336,7 @@ def simulate_parametric_italian_portfolios_compact_native(
         _pointer(multipliers),
         _pointer(sample_indices),
         sample_count,
+        float(annual_risk_free_rate),
     )
 
     gross_sample = np.empty((periods, sample_count), dtype=np.float64)
@@ -1265,6 +1356,8 @@ def simulate_parametric_italian_portfolios_compact_native(
     year_stats = np.zeros((year_count, len(NATIVE_YEAR_STAT_NAMES)), dtype=np.float64)
     regime_counts = np.zeros(states, dtype=np.uint64)
     max_drawdowns = np.empty(paths, dtype=np.float64)
+    terminal_deflators = np.empty(paths, dtype=np.float64)
+    risk_statistics = np.empty((len(NATIVE_RISK_STAT_NAMES), paths), dtype=np.float64)
     status = library.mc_simulate_parametric_italian_portfolios_compact(
         ctypes.byref(parametric_config),
         ctypes.byref(tax_config),
@@ -1283,6 +1376,8 @@ def simulate_parametric_italian_portfolios_compact_native(
         _pointer(year_stats),
         _pointer(regime_counts),
         _pointer(max_drawdowns),
+        _pointer(terminal_deflators),
+        _pointer(risk_statistics),
     )
     if status != 0:
         raise RuntimeError(f"Compact native portfolio kernel failed with status {status}.")
@@ -1302,5 +1397,9 @@ def simulate_parametric_italian_portfolios_compact_native(
         "year_stats": year_stats,
         "regime_counts": regime_counts,
         "max_drawdowns": max_drawdowns,
+        "terminal_deflators": terminal_deflators,
+        # The compact pipeline excludes withdrawals; direct legacy ledger
+        # callers still work, but cannot use contribution-only risk moments.
+        "risk_statistics": risk_statistics if withdrawal == 0.0 else None,
         "compact_reporting": True,
     }

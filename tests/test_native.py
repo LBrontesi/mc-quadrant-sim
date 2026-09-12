@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import pytest
 
 from mc_quadrants.decumulation import inflation_index, normalize_decumulation
@@ -10,7 +11,10 @@ from mc_quadrants.native import (
     simulate_parametric_italian_portfolios_native,
     simulate_parametric_native,
 )
+from mc_quadrants.pipeline import _apply_compact_risk_summary
+from mc_quadrants.simulation import simulate_portfolio_paths, summarize_wealth_risk
 from mc_quadrants.taxes import simulate_italian_portfolio_tax
+from mc_quadrants.types import SimulationResult
 
 pytestmark = pytest.mark.skipif(not native_available(), reason="native simulator is not compiled")
 
@@ -288,7 +292,8 @@ def test_native_italian_ledger_is_path_identical_across_thread_counts():
     "regime",
     ["italy_administered", "italy_declarative", "italy_managed"],
 )
-def test_fused_parametric_kernel_matches_separate_generation_and_ledger(regime):
+@pytest.mark.parametrize("income", [False, True])
+def test_fused_parametric_kernel_matches_separate_generation_and_ledger(regime, income):
     inputs = _inputs(periods=24, paths=500)
     weights = np.array([0.6, 0.4])
     monthly_fee_log = np.log1p(-np.array([0.001, 0.002])) / 12.0
@@ -315,6 +320,10 @@ def test_fused_parametric_kernel_matches_separate_generation_and_ledger(regime):
         "workers": 4,
     }
     returns = simulate_parametric_native(**inputs, workers=4)
+    if income:
+        ledger.update(annual_income_yield=np.array([.03, .04]),
+                      foreign_withholding_rate=np.array([.15, .1]),
+                      foreign_tax_credit_rate=np.array([.1, .05]))
     separate = simulate_italian_portfolios_native(
         np.exp(returns + monthly_fee_log),
         weights,
@@ -365,11 +374,19 @@ def _compact_ledger(periods: int, assets: int = 2):
     }
 
 
-def test_compact_native_kernel_matches_detailed_kernel_for_fixed_regime():
+@pytest.mark.parametrize("dynamic_correlation", [False, True])
+@pytest.mark.parametrize("garch", [False, True])
+@pytest.mark.parametrize("income", [False, True])
+def test_compact_native_kernel_matches_detailed_kernel_for_fixed_regime(dynamic_correlation, garch, income):
     periods = 24
     paths = 600
     inputs = _inputs(periods=periods, paths=paths)
+    inputs.update(dynamic_correlation=dynamic_correlation, garch=garch)
     ledger = _compact_ledger(periods)
+    if income:
+        ledger.update(annual_income_yield=np.array([.03, .04]),
+                      foreign_withholding_rate=np.array([.15, .1]),
+                      foreign_tax_credit_rate=np.array([.1, .05]))
     detailed = simulate_parametric_italian_portfolios_native(
         **inputs,
         **ledger,
@@ -406,9 +423,108 @@ def test_compact_native_kernel_matches_detailed_kernel_for_fixed_regime():
     assert compact["regime_counts"].tolist() == [periods * paths]
     for name, values in detailed["tax_stats"].items():
         assert compact["tax_stats"][name] == pytest.approx(values.sum(), rel=1e-13, abs=1e-10)
+    np.testing.assert_allclose(compact["year_stats"], detailed["year_stats"], rtol=1e-13, atol=1e-10)
 
 
-def test_compact_native_four_asset_fast_path_matches_detailed_kernel():
+@pytest.mark.parametrize("return_kind", ["log", "simple"])
+@pytest.mark.parametrize("contribution_allocation", ["target", "underweight_first"])
+@pytest.mark.parametrize("rebalance_frequency", [0, 3])
+def test_compact_neutral_kernel_returns_exact_real_risk_reductions(
+    return_kind, contribution_allocation, rebalance_frequency,
+):
+    periods = 24
+    paths = 600
+    inputs = _inputs(periods=periods, paths=paths)
+    inputs.update(garch=True, dynamic_correlation=True)
+    # Keep this fixture valid for simple returns as well as log returns.
+    inputs["volatilities"] *= 0.05
+    compact_inputs = dict(inputs)
+    compact_inputs.pop("regime_codes")
+    ledger = {
+        **_compact_ledger(periods),
+        "withdrawal": 0.0,
+        "tax_regime": "none",
+        "annual_wealth_tax": 0.0,
+        "terminal_liquidation": False,
+        "wrapper_benchmark": False,
+        "return_kind": return_kind,
+        "contribution_allocation": contribution_allocation,
+        "rebalance_frequency": rebalance_frequency,
+        "transaction_cost_bps": 5.0 if rebalance_frequency else 0.0,
+    }
+    annual_inflation = 0.025
+    annual_risk_free = 0.01
+    compact = simulate_parametric_italian_portfolios_compact_native(
+        **compact_inputs,
+        **ledger,
+        periods=periods,
+        paths=paths,
+        transition_matrix=np.ones((1, 1)),
+        start_probabilities=np.ones(1),
+        start_state_index=0,
+        duration_model="markov",
+        duration_hazards=None,
+        duration_hazard_lengths=None,
+        min_regime_duration=5,
+        state_transaction_cost_multipliers=None,
+        regime_random_seed=99,
+        annual_reporting_inflation=annual_inflation,
+        annual_risk_free_rate=annual_risk_free,
+        reporting_paths=paths,
+        workers=4,
+    )
+
+    reference = simulate_portfolio_paths(
+        SimulationResult(
+            returns=simulate_parametric_native(**inputs),
+            regimes=np.full((periods, paths), "state"),
+            assets=["Stocks", "Bonds"], states=["state"], frequency="ME",
+        ),
+        weights={"Stocks": 0.5, "Bonds": 0.5},
+        initial_value=100.0, contribution=2.0,
+        rebalance_frequency=rebalance_frequency,
+        contribution_allocation=contribution_allocation,
+        transaction_cost_bps=ledger["transaction_cost_bps"],
+        asset_expense_ratios={"Stocks": 0.001, "Bonds": 0.002},
+        return_kind=return_kind,
+    )
+    assert compact["wealth"] == pytest.approx(reference.to_numpy(), rel=1e-12, abs=1e-10)
+    assert compact["gross_transaction_cost_total"] == pytest.approx(
+        reference.attrs["transaction_cost_total"], rel=1e-12, abs=1e-10,
+    )
+
+    discounts = (1.0 + annual_inflation) ** (
+        -np.arange(1, periods + 1, dtype=float) / 12.0
+    )
+    real_wealth = compact["wealth"] * discounts[:, None]
+    previous = np.vstack([np.full(paths, 100.0), real_wealth[:-1]])
+    contribution_discount = np.concatenate(([1.0], discounts[:-1]))[:, None]
+    returns = real_wealth / (previous + 2.0 * contribution_discount) - 1.0
+    real_risk_free = (1.0 + annual_risk_free) / (1.0 + annual_inflation) - 1.0
+    periodic_risk_free = (1.0 + real_risk_free) ** (1.0 / 12.0) - 1.0
+    excess = returns - periodic_risk_free
+    with_initial = np.vstack([np.full(paths, 100.0), real_wealth])
+    drawdowns = 1.0 - with_initial / np.maximum.accumulate(with_initial, axis=0)
+    statistics = compact["risk_statistics"]
+
+    assert np.allclose(compact["terminal_deflators"], discounts[-1])
+    assert np.allclose(compact["terminal_values"] * compact["terminal_deflators"], real_wealth[-1])
+    assert np.allclose(compact["max_drawdowns"], drawdowns.max(axis=0))
+    assert np.allclose(statistics[0], returns.sum(axis=0))
+    assert np.allclose(statistics[1], np.square(returns).sum(axis=0))
+    assert np.allclose(statistics[2], periods)
+    assert np.allclose(statistics[3], np.log1p(returns).sum(axis=0))
+    assert np.allclose(statistics[4], periods)
+    assert np.allclose(statistics[5], excess.sum(axis=0))
+    assert np.allclose(statistics[6], np.square(np.minimum(excess, 0.0)).sum(axis=0))
+    assert np.allclose(statistics[7], periods * real_risk_free)
+    assert np.allclose(statistics[8], np.sqrt(np.square(drawdowns).mean(axis=0)))
+
+
+@pytest.mark.parametrize("dynamic_correlation", [False, True])
+@pytest.mark.parametrize("garch", [False, True])
+@pytest.mark.parametrize("return_kind", ["log", "simple"])
+def test_compact_native_four_asset_fast_path_matches_detailed_kernel(dynamic_correlation, garch, return_kind):
     periods = 24
     paths = 300
     assets = 4
@@ -431,16 +547,17 @@ def test_compact_native_four_asset_fast_path_matches_detailed_kernel():
         "skewness": np.array([[0.10, -0.05, 0.02, -0.08]]),
         "gaussian_scales": np.ones((1, assets)),
         "random_seed": 42,
-        "garch": True,
+        "garch": garch,
         "garch_alpha": 0.10,
         "garch_beta": 0.85,
-        "dynamic_correlation": False,
+        "dynamic_correlation": dynamic_correlation,
         "dcc_alpha": 0.04,
         "dcc_beta": 0.94,
         "dcc_asymmetry": 0.01,
     }
     ledger = {
         **_compact_ledger(periods, assets),
+        "return_kind": return_kind,
         "contribution": 0.0,
         "withdrawal": 0.0,
     }
@@ -484,6 +601,77 @@ def test_compact_native_four_asset_fast_path_matches_detailed_kernel():
             else detailed["gross_wealth" if name.startswith("gross") else "wealth"][-1]
         )
         assert np.array_equal(compact[name], expected)
+
+
+@pytest.mark.parametrize("dynamic_correlation", [False, True])
+@pytest.mark.parametrize("garch", [False, True])
+@pytest.mark.parametrize("return_kind", ["log", "simple"])
+@pytest.mark.parametrize("macro_dimensions", [0, 2, 3, 5])
+def test_four_asset_return_generation_matches_generic_with_switching_regimes(
+    monkeypatch, dynamic_correlation, garch, return_kind, macro_dimensions,
+):
+    # Exceed four minimum-size worker batches to exercise actual concurrency.
+    periods, paths, assets, states = 36, 1_025, 4, 4
+    rng = np.random.default_rng(63)
+    correlation = np.full((assets, assets), 0.15)
+    np.fill_diagonal(correlation, 1.0)
+    macro_process = None
+    if macro_dimensions:
+        macro_process = {
+            "latest": rng.normal(0, 0.1, macro_dimensions),
+            "var_coefficient": np.eye(macro_dimensions) * 0.7,
+            "var_coefficient_std": np.full((macro_dimensions, macro_dimensions), 0.01),
+            "parameter_uncertainty": True,
+            "state_centers": rng.normal(0, 0.2, (states, macro_dimensions)),
+            "state_innovation_covariances": np.repeat(
+                (np.eye(macro_dimensions) * 0.02)[None], states, axis=0,
+            ),
+            "emission_coefficients": rng.normal(0, 0.1, (states, 6)),
+            "transition_weight": 0.35,
+            "return_betas": rng.normal(0, 0.015, (macro_dimensions, assets)),
+            "rate_index": 0, "rate_bounds": [-5.0, 50.0], "rate_scale": 0.01,
+            "inflation_index": 1, "inflation_scale": 0.01,
+        }
+    kwargs = {
+        **_compact_ledger(periods, assets),
+        "periods": periods, "paths": paths,
+        "means": rng.normal(0.003, 0.001, (states, assets)),
+        "gaussian_correlation_cholesky": np.repeat(np.linalg.cholesky(correlation)[None], states, axis=0),
+        "gaussian_correlations": np.repeat(correlation[None], states, axis=0),
+        "volatilities": rng.uniform(0.01, 0.04, (states, assets)),
+        "tail_indexes": np.array([1.2, 1.5, 1.7, 1.9]),
+        "temperings": np.array([0.15, 0.5, 1.0, 2.0]),
+        "skewness": rng.uniform(-0.1, 0.1, (states, assets)),
+        "gaussian_scales": rng.uniform(0.9, 1.0, (states, assets)),
+        "transition_matrix": np.full((states, states), 0.25),
+        "start_probabilities": np.full(states, 0.25), "start_state_index": 0,
+        "duration_model": "markov", "duration_hazards": None,
+        "duration_hazard_lengths": None, "min_regime_duration": 1,
+        "state_transaction_cost_multipliers": np.array([0.8, 1.0, 1.3, 1.5]),
+        "macro_process": macro_process,
+        "withdrawal": 0.0, "return_kind": return_kind,
+        "random_seed": 42, "regime_random_seed": 17,
+        "garch": garch, "garch_alpha": 0.10, "garch_beta": 0.85,
+        "dynamic_correlation": dynamic_correlation,
+        "dcc_alpha": 0.04, "dcc_beta": 0.94, "dcc_asymmetry": 0.01,
+        "reporting_paths": 75,
+    }
+    monkeypatch.delenv("MC_NATIVE_FORCE_GENERIC", raising=False)
+    optimized = simulate_parametric_italian_portfolios_compact_native(**kwargs, workers=1)
+    parallel = simulate_parametric_italian_portfolios_compact_native(**kwargs, workers=4)
+    monkeypatch.setenv("MC_NATIVE_FORCE_GENERIC", "1")
+    generic = simulate_parametric_italian_portfolios_compact_native(**kwargs, workers=1)
+    assert optimized is not None and parallel is not None and generic is not None
+    assert np.any(optimized["regimes"][1:] != optimized["regimes"][:-1])
+    for field, values in optimized.items():
+        if isinstance(values, np.ndarray):
+            np.testing.assert_array_equal(values, generic[field], err_msg=field)
+            if field == "year_stats":
+                # Annual tax totals are reduced in worker completion order;
+                # only this aggregate permits ordinary summation roundoff.
+                np.testing.assert_allclose(values, parallel[field], rtol=1e-13, atol=1e-10, err_msg=field)
+            else:
+                np.testing.assert_array_equal(values, parallel[field], err_msg=field)
 
 
 def test_compact_native_semi_markov_is_reproducible_across_threads():
@@ -607,9 +795,10 @@ def test_compact_native_semi_markov_respects_latest_state_age_posterior():
     assert np.all(compact["regimes"][2:] == 1)
 
 
-def test_compact_native_streams_joint_macro_paths_reproducibly():
+@pytest.mark.parametrize("macro_dimensions", [2, 3, 5])
+def test_compact_native_streams_joint_macro_paths_reproducibly(monkeypatch, macro_dimensions):
     periods = 12
-    paths = 200
+    paths = 600
     base = _inputs(periods=periods, paths=paths)
     expanded = {
         name: np.repeat(values, 4, axis=0)
@@ -638,21 +827,24 @@ def test_compact_native_streams_joint_macro_paths_reproducibly():
         )
     )
     macro_process = {
-        "latest": np.array([1.0, -1.0]),
-        "var_coefficient": np.eye(2) * 0.7,
-        "var_coefficient_std": np.full((2, 2), 0.02),
+        "latest": np.array([1.0, -1.0] + [0.0] * (macro_dimensions - 2)),
+        "var_coefficient": np.eye(macro_dimensions) * 0.7,
+        "var_coefficient_std": np.full((macro_dimensions, macro_dimensions), 0.02),
         "parameter_uncertainty": True,
-        "state_centers": centers,
+        "state_centers": np.column_stack((centers, np.zeros((4, macro_dimensions - 2)))),
         "state_innovation_covariances": np.repeat(
-            (np.eye(2) * 0.05)[None],
+            (np.eye(macro_dimensions) * 0.05)[None],
             4,
             axis=0,
         ),
         "emission_coefficients": emission_coefficients,
         "transition_weight": 0.35,
-        "return_betas": np.zeros((2, 2)),
-        "rate_index": -1,
-        "rate_bounds": None,
+        "return_betas": np.zeros((macro_dimensions, 2)),
+        "rate_index": 0,
+        "rate_bounds": [-5.0, 50.0],
+        "rate_scale": 0.01,
+        "inflation_index": 1,
+        "inflation_scale": 0.01,
     }
     kwargs = {
         **expanded,
@@ -672,6 +864,7 @@ def test_compact_native_streams_joint_macro_paths_reproducibly():
         "min_regime_duration": 5,
         "state_transaction_cost_multipliers": None,
         "macro_process": macro_process,
+        "withdrawal": 0.0,
         "random_seed": 42,
         "regime_random_seed": 17,
         "garch": False,
@@ -691,7 +884,7 @@ def test_compact_native_streams_joint_macro_paths_reproducibly():
             **kwargs,
             "macro_process": {
                 **macro_process,
-                "return_betas": np.full((2, 2), 0.20),
+                "return_betas": np.full((macro_dimensions, 2), 0.20),
             },
         },
         workers=1,
@@ -699,16 +892,47 @@ def test_compact_native_streams_joint_macro_paths_reproducibly():
 
     assert single is not None
     assert parallel is not None
-    assert single["macro_paths"].shape == (periods, paths, 2)
+    assert single["macro_paths"].shape == (periods, paths, macro_dimensions)
     assert np.isfinite(single["macro_paths"]).all()
     assert np.array_equal(single["macro_paths"], parallel["macro_paths"])
     assert np.array_equal(single["regimes"], parallel["regimes"])
     assert np.array_equal(single["wealth"], parallel["wealth"])
     assert np.all(single["regimes"][:5] == 0)
-    assert np.allclose(single["macro_paths"][:5].mean(axis=(0, 1)), [1.0, -1.0], atol=0.08)
+    assert np.allclose(single["macro_paths"][:5, :, :2].mean(axis=(0, 1)), [1.0, -1.0], atol=0.08)
     assert np.array_equal(single["macro_paths"], with_macro_return_effect["macro_paths"])
     assert np.array_equal(single["regimes"], with_macro_return_effect["regimes"])
     assert not np.array_equal(single["wealth"], with_macro_return_effect["wealth"])
+
+    sparse = simulate_parametric_italian_portfolios_compact_native(
+        **{**kwargs, "reporting_paths": 100}, workers=4,
+    )
+    assert np.array_equal(sparse["risk_statistics"], single["risk_statistics"])
+    assert np.array_equal(sparse["terminal_deflators"], single["terminal_deflators"])
+    assert np.array_equal(sparse["max_drawdowns"], single["max_drawdowns"])
+    reference = summarize_wealth_risk(
+        pd.DataFrame(single["wealth"]), initial_value=100.0, contribution=2.0,
+        inflation_paths=np.clip(single["macro_paths"][:, :, 1] * 0.01, -0.1, 0.5),
+        risk_free_paths=np.clip(single["macro_paths"][:, :, 0] * 0.01, -0.05, 0.5),
+    )
+    sampled = pd.DataFrame(sparse["wealth"])
+    sampled.attrs["native_risk_statistics"] = sparse["risk_statistics"]
+    sampled.attrs["native_max_drawdowns"] = sparse["max_drawdowns"]
+    reduced = reference * 0.0
+    _apply_compact_risk_summary(reduced, sampled, periods=periods, contribution=2.0)
+    for metric in (
+        "annualized_return", "annualized_volatility", "effective_risk_free_rate",
+        "geometric_annualized_return", "sharpe_ratio", "sortino_ratio", "calmar_ratio",
+        "max_drawdown_mean", "max_drawdown_p95", "max_drawdown_worst",
+        "ulcer_index_mean", "ulcer_index_p95",
+        "cash_flow_adjusted_annualized_return", "cash_flow_adjusted_volatility",
+        "cash_flow_adjusted_sharpe_ratio",
+    ):
+        assert reduced[metric] == pytest.approx(reference[metric], rel=1e-11, abs=1e-11)
+
+    monkeypatch.setenv("MC_NATIVE_FORCE_GENERIC", "1")
+    generic = simulate_parametric_italian_portfolios_compact_native(**kwargs, workers=1)
+    for field in ("regimes", "macro_paths", "wealth", "terminal_deflators", "risk_statistics"):
+        assert np.array_equal(generic[field], single[field])
 
 
 @pytest.mark.parametrize("policy", ["fixed", "guyton_klinger"])

@@ -1,0 +1,99 @@
+{
+  "metrics": {
+    "energy": {
+      "baseline": 0.05531334053350439,
+      "updated": 0.05591096914956855,
+      "improvement_percent": -1.0804420964273012,
+      "delta_ci_95": [
+        0.000131960439904723,
+        0.001023094283448158
+      ],
+      "observations": 72
+    },
+    "crps_1m": {
+      "baseline": 0.015985859175049633,
+      "updated": 0.016204614487797156,
+      "improvement_percent": -1.368430125350742,
+      "delta_ci_95": [
+        -9.147014943091136e-05,
+        0.0005713453846863447
+      ],
+      "observations": 72
+    },
+    "loss_brier": {
+      "baseline": 0.21888098451826307,
+      "updated": 0.226817453900973,
+      "improvement_percent": -3.6259291322987086,
+      "delta_ci_95": [
+        0.0016423113644123077,
+        0.014108614602850544
+      ],
+      "observations": 72
+    },
+    "crps_3m": {
+      "baseline": 0.024805940057845907,
+      "updated": 0.02540450865724896,
+      "improvement_percent": -2.413005102839202,
+      "delta_ci_95": [
+        -0.0002357402390894387,
+        0.0013825778644838997
+      ],
+      "observations": 70
+    },
+    "crps_12m": {
+      "baseline": 0.05820361376804948,
+      "updated": 0.05827080097089487,
+      "improvement_percent": -0.11543476168533087,
+      "delta_ci_95": [
+        -0.002766952212515572,
+        0.002899412563485212
+      ],
+      "observations": 61
+    },
+    "drawdown_crps_3m": {
+      "baseline": 0.013521980808050796,
+      "updated": 0.014141343802491359,
+      "improvement_percent": -4.580416162636474,
+      "delta_ci_95": [
+        -0.0004229848433980502,
+        0.0015527152698577892
+      ],
+      "observations": 70
+    },
+    "drawdown_crps_12m": {
+      "baseline": 0.0236161151584514,
+      "updated": 0.02477640362282076,
+      "improvement_percent": -4.913121639966792,
+      "delta_ci_95": [
+        -0.0012788620003457835,
+        0.0035402188059051485
+      ],
+      "observations": 61
+    }
+  },
+  "diagnostics": {
+    "baseline": {
+      "breach_05": 0.06944444444444445,
+      "coverage_90": 0.8194444444444444,
+      "interval_width": 0.07895828615357453,
+      "pit": 0.5449625651041666,
+      "expected_duration": 23.553103844655155,
+      "macro_growth_rmse": 5.184757832500201,
+      "macro_inflation_rmse": 2.8860888948983208,
+      "macro_interest_rate_rmse": 2.5859868574487095
+    },
+    "updated": {
+      "breach_05": 0.06944444444444445,
+      "coverage_90": 0.8611111111111112,
+      "interval_width": 0.09037180934883084,
+      "pit": 0.5401340060763888,
+      "expected_duration": 24.215155564042522,
+      "macro_growth_rmse": 2.893450998565917,
+      "macro_inflation_rmse": 0.6365782672092513,
+      "macro_interest_rate_rmse": 0.39745822783440676
+    }
+  },
+  "selected_parameters": {
+    "mean_prior_strength": 48.0
+  }
+}

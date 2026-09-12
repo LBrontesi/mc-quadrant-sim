@@ -401,8 +401,12 @@
             </details>
           </div>
           <label class="check-inline" id="garch-group"><input type="checkbox" id="garch" checked> GARCH(1,1) volatility clustering</label>
+          <label class="check-inline"><input type="checkbox" id="calibrate-dependence" checked> Estimate GARCH/ADCC coefficients from history</label>
+          <span class="hint">Constrained pooled QML, with a short-history fallback. Uncheck to use manual/default coefficients above.</span>
           <span class="hint" id="garch-hint">GARCH is applied to the calibrated MNTS innovations in each macro quadrant.</span>
           <label class="check-inline" id="walk-forward-group"><input type="checkbox" id="walk-forward" checked> Walk-forward validation</label>
+          <label class="check-inline"><input type="checkbox" id="select-hyperparameters" checked> Select mean and HSMM duration priors on development folds</label>
+          <span class="hint">Requires at least 84 observations; reserves the final 12 months for separate validation. Tunes shrinkage without adding latent states; adds calibration time.</span>
           <span class="hint">Validation checks the current portfolio out of sample against an unconditional benchmark.</span>
         </details>
 

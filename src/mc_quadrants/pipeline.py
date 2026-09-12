@@ -21,10 +21,12 @@ from mc_quadrants.diagnostics import (
     build_hmm_diagnostics,
 )
 from mc_quadrants.hmm import fit_hmm_model
-from mc_quadrants.native import native_available
+from mc_quadrants.model_selection import select_calibration_hyperparameters
+from mc_quadrants.native import NATIVE_RISK_STAT_NAMES, native_fused_available
 from mc_quadrants.regimes import classify_persistent_quadrants
 from mc_quadrants.simulation import (
     DEFAULT_LIQUIDITY_COST_MULTIPLIERS,
+    _validate_wealth_risk_inputs,
     inflation_adjust_wealth,
     simulate_portfolio_paths,
     simulate_returns,
@@ -37,7 +39,11 @@ from mc_quadrants.taxes import (
     prepare_italian_native_configuration,
 )
 from mc_quadrants.types import ScenarioModel, SimulationResult
-from mc_quadrants.uncertainty import bootstrap_quadrant_models, summarize_parameter_models
+from mc_quadrants.uncertainty import (
+    anchor_parameter_models,
+    bootstrap_quadrant_models,
+    summarize_parameter_models,
+)
 from mc_quadrants.validation import WalkForwardResult, walk_forward_validation
 
 
@@ -62,6 +68,9 @@ _CHUNK_WORKER_STATE: dict[str, Any] = {}
 _WALK_FORWARD_CACHE_MAX_ENTRIES = 8
 _WALK_FORWARD_CACHE: dict[bytes, WalkForwardResult] = {}
 _WALK_FORWARD_CACHE_LOCK = threading.Lock()
+_PARAMETER_MODEL_CACHE_MAX_ENTRIES = 4
+_PARAMETER_MODEL_CACHE: dict[bytes, list[ScenarioModel]] = {}
+_PARAMETER_MODEL_CACHE_LOCK = threading.Lock()
 _ADDITIVE_WEALTH_ATTRS = (
     "margin_calls",
     "capital_gains_tax_total",
@@ -144,6 +153,63 @@ def _clear_walk_forward_cache() -> None:
 
     with _WALK_FORWARD_CACHE_LOCK:
         _WALK_FORWARD_CACHE.clear()
+
+
+def _cache_token(value: Any) -> Any:
+    """Convert nested calibration options into a stable, hashable value."""
+
+    if isinstance(value, pd.DataFrame):
+        return (_frame_cache_digest(value), _cache_token(value.attrs))
+    if isinstance(value, pd.Series):
+        return (_frame_cache_digest(value.to_frame()), _cache_token(value.attrs))
+    if isinstance(value, Mapping):
+        return tuple(
+            sorted(
+                ((_cache_token(key), _cache_token(item)) for key, item in value.items()),
+                key=repr,
+            )
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_cache_token(item) for item in value)
+    if isinstance(value, np.ndarray):
+        digest = hashlib.blake2b(value.tobytes(), digest_size=16).digest()
+        return (value.shape, str(value.dtype), digest)
+    return value
+
+
+def _cached_bootstrap_quadrant_models(
+    returns: pd.DataFrame,
+    macro: pd.DataFrame,
+    **kwargs: Any,
+) -> list[ScenarioModel]:
+    """Cache bootstrap calibrations across simulation-only changes."""
+
+    # An unseeded request must remain a fresh draw.
+    if kwargs.get("random_seed") is None:
+        return bootstrap_quadrant_models(returns, macro, **kwargs)
+    digest = hashlib.blake2b(digest_size=20)
+    digest.update(_frame_cache_digest(returns))
+    digest.update(_frame_cache_digest(macro))
+    digest.update(repr(_cache_token((returns.attrs, macro.attrs))).encode())
+    digest.update(repr(_cache_token(kwargs)).encode())
+    key = digest.digest()
+    with _PARAMETER_MODEL_CACHE_LOCK:
+        cached = _PARAMETER_MODEL_CACHE.get(key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+    models = bootstrap_quadrant_models(returns, macro, **kwargs)
+    with _PARAMETER_MODEL_CACHE_LOCK:
+        _PARAMETER_MODEL_CACHE[key] = copy.deepcopy(models)
+        while len(_PARAMETER_MODEL_CACHE) > _PARAMETER_MODEL_CACHE_MAX_ENTRIES:
+            _PARAMETER_MODEL_CACHE.pop(next(iter(_PARAMETER_MODEL_CACHE)))
+    return models
+
+
+def _clear_parameter_model_cache() -> None:
+    """Clear cached bootstrap calibrations (used by tests and long-lived hosts)."""
+
+    with _PARAMETER_MODEL_CACHE_LOCK:
+        _PARAMETER_MODEL_CACHE.clear()
 
 
 def _alternative_decumulation(plan: DecumulationPlan) -> DecumulationPlan | None:
@@ -233,19 +299,122 @@ def _cash_flow_adjusted_geometric_returns(
     return annualized
 
 
+def _compact_risk_summary(
+    wealth: pd.DataFrame,
+    *,
+    periods: int,
+    contribution: float,
+) -> dict[str, float] | None:
+    """Read exact native reductions, or decline incomplete reporting data."""
+
+    values = wealth.attrs.get("native_risk_statistics")
+    drawdowns = wealth.attrs.get("native_max_drawdowns")
+    if values is None or drawdowns is None:
+        return None
+    try:
+        statistics = np.asarray(values, dtype=float)
+        exact_drawdowns = np.asarray(drawdowns, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    terminal = wealth.attrs.get("terminal_values")
+    if (
+        periods <= 0
+        or statistics.ndim != 2
+        or statistics.shape[0] != len(NATIVE_RISK_STAT_NAMES)
+        or statistics.shape[1] == 0
+        or exact_drawdowns.shape != (statistics.shape[1],)
+        or (terminal is not None and np.shape(terminal) != exact_drawdowns.shape)
+        or not np.isfinite(statistics).all()
+        or not np.isfinite(exact_drawdowns).all()
+    ):
+        return None
+    stats = dict(zip(NATIVE_RISK_STAT_NAMES, statistics, strict=True))
+    count = float(stats["return_count"].sum())
+    return_sum = float(stats["return_sum"].sum())
+    mean_return = return_sum / count if count else 0.0
+    variance = max(float(stats["return_squares"].sum()) / count - mean_return**2, 0.0) if count else 0.0
+    annualized_return = mean_return * 12.0
+    annualized_volatility = float(np.sqrt(variance) * np.sqrt(12.0))
+    annualized_excess = float(stats["excess_return_sum"].sum()) / count * 12.0 if count else 0.0
+    downside = float(np.sqrt(float(stats["downside_sum"].sum()) / count) * np.sqrt(12.0)) if count else 0.0
+    log_count = float(stats["log_return_count"].sum())
+    geometric = (
+        float(np.exp(float(stats["log_return_sum"].sum()) / log_count * 12.0) - 1.0)
+        if log_count > 0.0 else 0.0
+    )
+    mean_drawdown = float(exact_drawdowns.mean())
+    ulcers = np.asarray(stats["ulcer_index"], dtype=float)
+    summary: dict[str, float] = {}
+    summary.update(
+        {
+            "annualized_return": annualized_return,
+            "effective_risk_free_rate": float(stats["risk_free_sum"].sum()) / (periods * statistics.shape[1]),
+            "annualized_volatility": annualized_volatility,
+            "geometric_annualized_return": geometric,
+            "sharpe_ratio": annualized_excess / annualized_volatility if annualized_volatility > 0 else 0.0,
+            "sortino_ratio": annualized_excess / downside if downside > 0 else 0.0,
+            "calmar_ratio": geometric / mean_drawdown if mean_drawdown > 0 else 0.0,
+            "max_drawdown_mean": mean_drawdown,
+            "max_drawdown_p95": float(np.quantile(exact_drawdowns, 0.95)),
+            "max_drawdown_worst": float(exact_drawdowns.max()),
+            "ulcer_index_mean": float(ulcers.mean()),
+            "ulcer_index_p95": float(np.quantile(ulcers, 0.95)),
+        }
+    )
+    if contribution:
+        summary.update(
+            {
+                "cash_flow_adjusted_annualized_return": annualized_return,
+                "cash_flow_adjusted_volatility": annualized_volatility,
+                "cash_flow_adjusted_sharpe_ratio": (
+                    annualized_excess / annualized_volatility
+                    if annualized_volatility > 0 else 0.0
+                ),
+                "total_contributed": float(contribution * periods),
+                "total_withdrawn": 0.0,
+                "net_external_cash_flow": float(contribution * periods),
+            }
+        )
+    return summary
+
+
+def _apply_compact_risk_summary(
+    summary: pd.Series,
+    wealth: pd.DataFrame,
+    *,
+    periods: int,
+    contribution: float,
+) -> None:
+    """Replace sampled path metrics with native all-path reductions."""
+
+    metrics = _compact_risk_summary(wealth, periods=periods, contribution=contribution)
+    if metrics is not None:
+        summary.update(metrics)
+
+
 def _native_tax_compatible(
     enabled: bool,
     metadata: Mapping[str, Mapping[str, object]] | None,
 ) -> bool:
-    """Return whether the accumulating/total-return native ledger can be used."""
+    """Return whether the native ledger (including distributed income) can be used."""
 
     return bool(
         enabled
-        and native_available()
-        and all(
-            np.isclose(float(values.get("annual_income_yield", 0.0)), 0.0)
-            for values in (metadata or {}).values()
-        )
+        and native_fused_available()
+    )
+
+
+def _compact_compatible(
+    *, tax_enabled: bool, metadata: Mapping[str, Mapping[str, object]] | None,
+    weights: Mapping[str, float], rebalance_frequency: int | None,
+    leverage_multiple: float, withdrawal: float, decumulation: DecumulationPlan,
+) -> bool:
+    """Only route accounting represented exactly by the compact ledger."""
+    return bool(
+        native_fused_available() and rebalance_frequency is not None
+        and leverage_multiple == 1.0 and withdrawal == 0.0 and not decumulation.active
+        and all(float(weight) >= 0.0 for weight in weights.values())
+        and (not tax_enabled or _native_tax_compatible(True, metadata))
     )
 
 
@@ -427,7 +596,7 @@ def _run_chunk(
         {
             key: np.asarray(chunk_wealth.attrs[key])
             for key in _PATH_WEALTH_ATTRS
-            if key in chunk_wealth.attrs
+            if state["decumulation"].active and key in chunk_wealth.attrs
         },
     )
 
@@ -492,6 +661,8 @@ def _simulate_chunked(
     inflation_col: str,
     workers: int = 1,
     compact_reporting: bool = False,
+    reporting_paths: int = 25_000,
+    risk_free_rate: float = 0.0,
 ) -> tuple[SimulationResult, pd.DataFrame, pd.DataFrame]:
     """Simulate returns and portfolio wealth, chunking the path dimension.
 
@@ -511,6 +682,12 @@ def _simulate_chunked(
         tax_selection.enabled,
         asset_tax_metadata,
     ) and (decumulation.legacy_nominal or not decumulation.active)
+    native_neutral_execution = compact_reporting and not tax_selection.enabled and _compact_compatible(
+        tax_enabled=False, metadata=asset_tax_metadata, weights=weight_series.to_dict(),
+        rebalance_frequency=rebalance_frequency, leverage_multiple=leverage_multiple,
+        withdrawal=withdrawal, decumulation=decumulation,
+    )
+    native_tax_execution = native_tax_execution or native_neutral_execution
     native_threads = max(1, int(workers)) if native_tax_execution else 1
     native_portfolio_config: dict[str, object] | None = None
     if native_tax_execution:
@@ -527,14 +704,14 @@ def _simulate_chunked(
             contribution_allocation=contribution_allocation,
             withdrawal=withdrawal,
             withdrawal_start_period=withdrawal_start_period,
-            asset_tax_categories=asset_tax_categories,
-            asset_tax_metadata=asset_tax_metadata,
-            annual_wealth_tax=italy_annual_wealth_tax,
-            terminal_liquidation=tax_terminal_liquidation,
+            asset_tax_categories=asset_tax_categories if tax_selection.enabled else None,
+            asset_tax_metadata=asset_tax_metadata if tax_selection.enabled else None,
+            annual_wealth_tax=italy_annual_wealth_tax if tax_selection.enabled else 0.0,
+            terminal_liquidation=tax_terminal_liquidation and tax_selection.enabled,
             tax_regime=tax_selection.regime,
             wealth_tax_mode=italy_wealth_tax_mode,
             start_date=tax_start_date,
-            wrapper_benchmark=tax_wrapper_benchmark,
+            wrapper_benchmark=tax_wrapper_benchmark and tax_selection.enabled,
         )
         native_portfolio_config.update(
             {
@@ -546,8 +723,9 @@ def _simulate_chunked(
                     state_transaction_cost_multipliers or {}
                 ),
                 "compact_reporting": bool(compact_reporting),
-                "compact_reporting_paths": min(int(paths), 25_000),
+                "compact_reporting_paths": min(int(paths), reporting_paths),
                 "annual_reporting_inflation": float(annual_inflation),
+                "annual_risk_free_rate": float(risk_free_rate),
             }
         )
 
@@ -592,6 +770,9 @@ def _simulate_chunked(
                 }
             )
             native_gross = chunk_wealth.attrs.pop("native_gross_wealth")
+            if not tax_selection.enabled:
+                chunk_wealth.attrs.pop("native_gross_transaction_cost_total", None)
+                return chunk_result, chunk_wealth, chunk_wealth
             gross_wealth = pd.DataFrame(native_gross, columns=chunk_wealth.columns)
             gross_wealth.attrs.update(
                 {
@@ -1093,6 +1274,8 @@ def run_scenario(
     chunk_size: int | None = None,
     return_kind: str = "log",
     workers: int = 1,
+    calibrate_dependence: bool = True,
+    select_hyperparameters: bool = False,
 ) -> SimulationRun:
     """Calibrate and simulate one fully specified investment scenario.
 
@@ -1201,6 +1384,32 @@ def run_scenario(
         fx_quote=fx_quote,
     )
 
+    selection_report = None
+    selection_warning = None
+    if select_hyperparameters:
+        if model_kind != "quadrant" or not walk_forward:
+            raise ValueError("Hyperparameter selection requires quadrant mode and walk-forward validation.")
+        try:
+            selection_report = select_calibration_hyperparameters(
+                scenario_returns, macro, validation_runner=_cached_walk_forward_validation,
+                validation_kwargs=dict(
+                    growth_col=growth_col, inflation_col=inflation_col,
+                    growth_threshold=growth_threshold, inflation_threshold=inflation_threshold,
+                    macro_lag_periods=macro_lag_periods, threshold_window=threshold_window,
+                    probabilistic_regimes=probabilistic_regimes, regime_temperature=regime_temperature,
+                    regime_smoothing_window=regime_smoothing_window, regime_hysteresis=regime_hysteresis,
+                    regime_confirmation_periods=regime_confirmation_periods,
+                    duration_prior_strength=duration_prior_strength, min_regime_duration=min_regime_duration,
+                    mean_prior_strength=mean_prior_strength, weights=normalized_weights,
+                    use_fitted_dependence=calibrate_dependence,
+                    garch=garch, dynamic_correlation=dynamic_correlation,
+                ),
+            )
+            mean_prior_strength = selection_report["selected_parameters"]["mean_prior_strength"]
+            duration_prior_strength = selection_report["selected_parameters"].get("duration_prior_strength", duration_prior_strength)
+        except ValueError as exc:
+            selection_warning = f"Hyperparameter selection unavailable; using requested settings: {exc}"
+
     if model_kind == "hmm":
         model, fit = fit_hmm_model(
             scenario_returns,
@@ -1288,6 +1497,15 @@ def run_scenario(
         if asset_currencies:
             model.metadata["asset_currencies"] = dict(asset_currencies)
 
+    model.metadata["hyperparameter_selection"] = selection_report
+    if selection_warning:
+        diagnostics.warnings.append(selection_warning)
+    if select_hyperparameters and selection_report:
+        diagnostics.warnings.append("Hyperparameters selected on development folds; reported validation uses only the reserved final holdout.")
+    if calibrate_dependence and "dependence_fit" not in model.metadata:
+        from mc_quadrants.dependence import fit_dependence
+        model.metadata["dependence_fit"] = fit_dependence(scenario_returns, regimes.reindex(scenario_returns.index), model.moments)
+
     if tax_selection.enabled and structural_returns:
         for asset, profile in model.metadata.get("asset_profiles", {}).items():
             metadata = normalized_tax_metadata.setdefault(asset, {})
@@ -1296,7 +1514,7 @@ def run_scenario(
     parameter_models: list[ScenarioModel] = []
     parameter_summary: pd.DataFrame | None = None
     if parameter_draws:
-        parameter_models = bootstrap_quadrant_models(
+        parameter_models = _cached_bootstrap_quadrant_models(
             scenario_returns,
             macro,
             draws=parameter_draws,
@@ -1326,13 +1544,58 @@ def run_scenario(
             asset_income_yields=normalized_asset_income_yields,
             macro_model=macro_model,
         )
+        parameter_models = anchor_parameter_models(parameter_models, model)
         parameter_summary = summarize_parameter_models(parameter_models, normalized_weights)
 
     simulation_models = parameter_models or [model]
+    model.metadata["calibrate_dependence"] = bool(calibrate_dependence)
+    model.metadata["parameter_uncertainty_components"] = (
+        (["moments", "mnts", "transitions", "durations"]
+         + (["garch"] if calibrate_dependence and garch else [])
+         + (["adcc"] if calibrate_dependence and dynamic_correlation else [])
+         + (["macro"] if joint_macro else [])) if parameter_models else []
+    )
+    model.metadata["macro_parameter_uncertainty_mode"] = (
+        "disabled" if not joint_macro else "bootstrap" if parameter_models
+        else "per_path" if macro_parameter_uncertainty else "disabled"
+    )
     quotient, remainder = divmod(int(paths), len(simulation_models))
     model_path_counts = [quotient + (1 if index < remainder else 0) for index in range(len(simulation_models))]
+    compact_ensemble = bool(
+        int(paths) > 25_000
+        and chunk_size is None
+        and _compact_compatible(
+            tax_enabled=tax_selection.enabled,
+            metadata=normalized_tax_metadata,
+            weights=normalized_weights,
+            rebalance_frequency=rebalance_frequency,
+            leverage_multiple=float(leverage_multiple),
+            withdrawal=float(withdrawal),
+            decumulation=decumulation_plan,
+        )
+    )
+    reporting_counts = [count for count in model_path_counts]
+    if compact_ensemble:
+        target = min(25_000, int(paths))
+        raw = np.asarray(model_path_counts, dtype=float) * target / int(paths)
+        reporting_counts = np.floor(raw).astype(int).tolist()
+        for index in np.argsort(-(raw - np.floor(raw)))[: target - sum(reporting_counts)]:
+            reporting_counts[int(index)] += 1
     simulation_runs: list[tuple[SimulationResult, pd.DataFrame, pd.DataFrame]] = []
-    for draw, (simulation_model, draw_paths) in enumerate(zip(simulation_models, model_path_counts)):
+    model.metadata["simulation_dependence_draws"] = []
+    for draw, (simulation_model, draw_paths, draw_reporting_paths) in enumerate(
+        zip(simulation_models, model_path_counts, reporting_counts)
+    ):
+        fitted_dependence = simulation_model.metadata.get("dependence_fit", {}) if calibrate_dependence else {}
+        effective_dependence = {
+            key: float(fitted_dependence.get(key, fallback)) for key, fallback in {
+                "garch_alpha": garch_alpha, "garch_beta": garch_beta,
+                "dcc_alpha": dcc_alpha, "dcc_beta": dcc_beta, "dcc_asymmetry": dcc_asymmetry,
+            }.items()
+        }
+        if draw == 0:
+            model.metadata["simulation_dependence"] = effective_dependence
+        model.metadata["simulation_dependence_draws"].append({"draw": draw, "paths": draw_paths, **effective_dependence})
         draw_result, draw_wealth, draw_gross_wealth = _simulate_chunked(
                 simulation_model,
                 periods=int(periods),
@@ -1348,15 +1611,15 @@ def run_scenario(
                 duration_model=duration_model,
                 min_regime_duration=int(min_regime_duration),
                 garch=garch,
-                garch_alpha=float(garch_alpha),
-                garch_beta=float(garch_beta),
+                garch_alpha=effective_dependence["garch_alpha"],
+                garch_beta=effective_dependence["garch_beta"],
                 joint_macro=joint_macro,
-                macro_parameter_uncertainty=macro_parameter_uncertainty,
+                macro_parameter_uncertainty=macro_parameter_uncertainty and not bool(parameter_models),
                 macro_transition_weight=float(macro_transition_weight),
                 dynamic_correlation=dynamic_correlation,
-                dcc_alpha=float(dcc_alpha),
-                dcc_beta=float(dcc_beta),
-                dcc_asymmetry=float(dcc_asymmetry),
+                dcc_alpha=effective_dependence["dcc_alpha"],
+                dcc_beta=effective_dependence["dcc_beta"],
+                dcc_asymmetry=effective_dependence["dcc_asymmetry"],
                 chunk_size=chunk_size,
                 weight_series=pd.Series(normalized_weights, dtype=float),
                 initial_value=initial_value,
@@ -1389,11 +1652,9 @@ def run_scenario(
                 rate_col=rate_col,
                 inflation_col=inflation_col,
                 workers=workers,
-                compact_reporting=bool(
-                    not parameter_models
-                    and chunk_size is None
-                    and draw_paths > 25_000
-                ),
+                compact_reporting=compact_ensemble,
+                reporting_paths=draw_reporting_paths,
+                risk_free_rate=float(risk_free_rate),
             )
         if parameter_models and draw_result.returns.shape[1]:
             draw_result = SimulationResult(
@@ -1409,9 +1670,31 @@ def run_scenario(
             )
         simulation_runs.append((draw_result, draw_wealth, draw_gross_wealth))
 
+    terminal_groups: list[np.ndarray] = []
+    for _, run_wealth, _ in simulation_runs:
+        terminal_values = run_wealth.attrs.get("terminal_values")
+        terminal_groups.append(
+            np.array(
+                terminal_values if terminal_values is not None else run_wealth.iloc[-1],
+                dtype=float,
+                copy=True,
+            )
+        )
+    terminal_deflator_groups = [
+        (
+            np.array(run_wealth.attrs["terminal_deflators"], dtype=float, copy=True)
+            if run_wealth.attrs.get("terminal_deflators") is not None
+            else None
+        )
+        for _, run_wealth, _ in simulation_runs
+    ]
     if len(simulation_runs) == 1:
         result, wealth, gross_wealth = simulation_runs[0]
     else:
+        compact_runs = all(
+            bool(run_wealth.attrs.get("compact_reporting", False))
+            for _, run_wealth, _ in simulation_runs
+        )
         wealth = pd.DataFrame(
             np.concatenate(
                 [run_wealth.to_numpy(dtype=float) for _, run_wealth, _ in simulation_runs],
@@ -1484,6 +1767,40 @@ def run_scenario(
                 },
             }
         )
+        if compact_runs:
+            path_offsets = np.cumsum([0, *model_path_counts[:-1]])
+            wealth.attrs.update(
+                {
+                    "compact_reporting": True,
+                    "total_simulated_paths": int(paths),
+                    "sample_indices": np.concatenate(
+                        [
+                            np.asarray(run_wealth.attrs["sample_indices"], dtype=int) + offset
+                            for offset, (_, run_wealth, _) in zip(path_offsets, simulation_runs)
+                        ]
+                    ),
+                    "terminal_values": np.concatenate(
+                        [np.asarray(run_wealth.attrs["terminal_values"], dtype=float) for _, run_wealth, _ in simulation_runs]
+                    ),
+                    "gross_terminal_values": np.concatenate(
+                        [np.asarray(run_wealth.attrs["gross_terminal_values"], dtype=float) for _, run_wealth, _ in simulation_runs]
+                    ),
+                    "terminal_deflators": np.concatenate(
+                        [np.asarray(run_wealth.attrs["terminal_deflators"], dtype=float) for _, run_wealth, _ in simulation_runs]
+                    ),
+                    "native_max_drawdowns": np.concatenate(
+                        [np.asarray(run_wealth.attrs["native_max_drawdowns"], dtype=float) for _, run_wealth, _ in simulation_runs]
+                    ),
+                    "native_risk_statistics": np.concatenate(
+                        [np.asarray(run_wealth.attrs["native_risk_statistics"], dtype=float) for _, run_wealth, _ in simulation_runs],
+                        axis=1,
+                    ),
+                    "native_regime_counts": np.sum(
+                        [np.asarray(run_wealth.attrs["native_regime_counts"], dtype=np.uint64) for _, run_wealth, _ in simulation_runs],
+                        axis=0,
+                    ),
+                }
+            )
         if tax_selection.enabled:
             gross_wealth = pd.DataFrame(
                 np.concatenate(
@@ -1500,6 +1817,16 @@ def run_scenario(
                         for _, _, run_gross in simulation_runs
                     )
                 )
+            if compact_runs:
+                gross_wealth.attrs.update(
+                    {
+                        "compact_reporting": True,
+                        "total_simulated_paths": int(paths),
+                        "sample_indices": wealth.attrs["sample_indices"],
+                        "terminal_values": wealth.attrs["gross_terminal_values"],
+                        "terminal_deflators": wealth.attrs["terminal_deflators"],
+                    }
+                )
         else:
             gross_wealth = wealth
         regimes_combined = np.concatenate(
@@ -1510,6 +1837,7 @@ def run_scenario(
             for run_result, _, _ in simulation_runs
             if run_result.macro_paths is not None
         ]
+        combined_macro = np.concatenate(macro_parts, axis=1) if macro_parts else None
         result = SimulationResult(
             returns=np.empty((int(periods), 0, len(model.assets)), dtype=float),
             regimes=regimes_combined,
@@ -1517,14 +1845,19 @@ def run_scenario(
             states=model.states.copy(),
             frequency=model.frequency,
             distribution="mnts",
-            macro_paths=(np.concatenate(macro_parts, axis=1) if macro_parts else None),
+            macro_paths=combined_macro,
             macro_columns=(simulation_runs[0][0].macro_columns if macro_parts else []),
+            native_portfolio=(
+                {
+                    "regime_counts": wealth.attrs["native_regime_counts"],
+                    "macro_paths": combined_macro,
+                }
+                if compact_runs else None
+            ),
         )
         if parameter_summary is not None:
-            terminal_offset = 0
             terminal_metrics: list[dict[str, float]] = []
-            for draw_paths in model_path_counts:
-                terminal = wealth.iloc[-1, terminal_offset:terminal_offset + draw_paths].to_numpy(dtype=float)
+            for terminal in terminal_groups:
                 terminal_metrics.append(
                     {
                         "terminal_p05": float(np.quantile(terminal, 0.05)),
@@ -1532,22 +1865,13 @@ def run_scenario(
                         "terminal_p95": float(np.quantile(terminal, 0.95)),
                     }
                 )
-                terminal_offset += draw_paths
             parameter_summary = pd.concat(
                 [parameter_summary.reset_index(drop=True), pd.DataFrame(terminal_metrics)],
                 axis=1,
             )
-    terminal_groups: list[np.ndarray] = []
-    for _, run_wealth, _ in simulation_runs:
-        terminal_values = run_wealth.attrs.get("terminal_values")
-        terminal_groups.append(
-            np.asarray(
-                terminal_values
-                if terminal_values is not None
-                else run_wealth.iloc[-1].to_numpy(dtype=float),
-                dtype=float,
-            )
-        )
+        if compact_runs:
+            simulation_runs.clear()
+            macro_parts.clear()
     total_terminal_count = max(sum(len(values) for values in terminal_groups), 1)
     group_weights = np.array([len(values) / total_terminal_count for values in terminal_groups], dtype=float)
     group_means = np.array([float(np.mean(values)) for values in terminal_groups], dtype=float)
@@ -1589,6 +1913,10 @@ def run_scenario(
                 min_regime_duration=int(min_regime_duration),
                 mean_prior_strength=float(mean_prior_strength),
                 weights=normalized_weights,
+                use_fitted_dependence=calibrate_dependence,
+                garch=garch, dynamic_correlation=dynamic_correlation,
+                evaluation_start=selection_report["holdout_start"] if selection_report else None,
+                **({"step": 1} if selection_report else {}),
             )
             diagnostics.warnings.extend(walk_forward_result.warnings)
         except ValueError as exc:
@@ -1646,18 +1974,23 @@ def run_scenario(
     compact_reporting = bool(wealth.attrs.get("compact_reporting", False))
     compact_terminal = wealth.attrs.get("terminal_values")
     compact_gross_terminal = wealth.attrs.get("gross_terminal_values")
-    terminal_deflator = (
+    sampled_terminal_deflator = (
         float((1.0 + annual_inflation) ** (-float(periods) / 12.0))
         if inflation_paths is None
         else 1.0
     )
+    full_terminal_deflator = (
+        np.asarray(wealth.attrs["terminal_deflators"], dtype=float)
+        if compact_reporting and wealth.attrs.get("terminal_deflators") is not None
+        else sampled_terminal_deflator
+    )
     full_active_terminal = (
-        np.asarray(compact_terminal, dtype=float) * terminal_deflator
+        np.asarray(compact_terminal, dtype=float) * full_terminal_deflator
         if compact_reporting and compact_terminal is not None
         else reporting_wealth.iloc[-1].to_numpy(dtype=float)
     )
     full_gross_terminal = (
-        np.asarray(compact_gross_terminal, dtype=float) * terminal_deflator
+        np.asarray(compact_gross_terminal, dtype=float) * full_terminal_deflator
         if compact_reporting and compact_gross_terminal is not None
         else gross_reporting_wealth.iloc[-1].to_numpy(dtype=float)
     )
@@ -1665,8 +1998,7 @@ def run_scenario(
         reporting_wealth.attrs["full_terminal_values"] = full_active_terminal
         gross_reporting_wealth.attrs["full_terminal_values"] = full_gross_terminal
     funded_withdrawal_paths = wealth.attrs.get("withdrawal_funded")
-    summary = summarize_wealth_risk(
-        wealth,
+    summary_options = dict(
         initial_value=initial_value,
         risk_free_rate=risk_free_rate,
         annual_inflation=annual_inflation,
@@ -1681,31 +2013,52 @@ def run_scenario(
         inflation_paths=inflation_paths,
         risk_free_paths=risk_free_paths,
     )
-    summary = summary.copy()
+    native_summary = (
+        _compact_risk_summary(wealth, periods=int(periods), contribution=float(contribution))
+        if compact_reporting and compact_terminal is not None
+        and not withdrawal and funded_withdrawal_paths is None
+        else None
+    )
+    if native_summary is None:
+        summary = summarize_wealth_risk(wealth, **summary_options).copy()
+    else:
+        # Validate without constructing returns/drawdown matrices that the
+        # exact C++ reductions have already replaced.
+        _validate_wealth_risk_inputs(wealth, **summary_options)
+        summary = pd.Series(native_summary)
     if compact_reporting:
-        tail_probability = 0.05
-        lower_tail = float(np.quantile(full_active_terminal, tail_probability))
+        lower_tail, median, upper_tail = np.quantile(full_active_terminal, (0.05, 0.50, 0.95))
         tail_values = full_active_terminal[full_active_terminal <= lower_tail]
         terminal_series = pd.Series(full_active_terminal)
-        summary.update(
-            {
-                "mean": float(full_active_terminal.mean()),
-                "std": float(full_active_terminal.std(ddof=0)),
-                "p05": lower_tail,
-                "p50": float(np.quantile(full_active_terminal, 0.50)),
-                "p95": float(np.quantile(full_active_terminal, 0.95)),
-                "probability_of_loss": float(
-                    np.mean(full_active_terminal < float(initial_value))
-                ),
-                "var_95": float(initial_value) - lower_tail,
-                "expected_shortfall_95": float(initial_value)
-                - float(tail_values.mean()),
-                "terminal_skewness": float(terminal_series.skew()),
-                "terminal_kurtosis": float(terminal_series.kurt()),
-            }
-        )
+        terminal_metrics = {
+            "mean": float(full_active_terminal.mean()),
+            "std": float(full_active_terminal.std(ddof=0)),
+            "p05": float(lower_tail),
+            "p50": float(median),
+            "p95": float(upper_tail),
+            "probability_of_loss": float(np.mean(full_active_terminal < float(initial_value))),
+            "var_95": float(initial_value) - lower_tail,
+            "expected_shortfall_95": float(initial_value) - float(tail_values.mean()),
+            "terminal_skewness": float(terminal_series.skew()),
+            "terminal_kurtosis": float(terminal_series.kurt()),
+        }
+        # Series.update cannot insert the terminal keys on the native path.
+        for key, value in terminal_metrics.items():
+            summary[key] = value
+        if native_summary is not None:
+            # Preserve the reference metric order used by CSV exports.
+            metric_order = [
+                "mean", "std", "p05", "p50", "p95", "annualized_return",
+                "effective_risk_free_rate", "annualized_volatility",
+                "geometric_annualized_return", "sharpe_ratio", "sortino_ratio",
+                "calmar_ratio", "probability_of_loss", "var_95",
+                "expected_shortfall_95", "max_drawdown_mean", "max_drawdown_p95",
+                "max_drawdown_worst", "ulcer_index_mean", "ulcer_index_p95",
+                "terminal_skewness", "terminal_kurtosis",
+            ]
+            summary = summary.reindex(metric_order + [key for key in summary.index if key not in metric_order])
         native_max_drawdowns = wealth.attrs.get("native_max_drawdowns")
-        if native_max_drawdowns is not None:
+        if native_summary is None and native_max_drawdowns is not None:
             exact_drawdowns = np.asarray(native_max_drawdowns, dtype=float)
             summary.update(
                 {
@@ -1802,7 +2155,10 @@ def run_scenario(
     if wrapper_available and wrapper_terminal is not None and wrapper_annualized is not None:
         wrapper_terminal = np.asarray(wrapper_terminal, dtype=float)
         wrapper_annualized = np.asarray(wrapper_annualized, dtype=float)
-        if inflation_paths is None:
+        if compact_reporting and wealth.attrs.get("terminal_deflators") is not None:
+            final_deflator = np.asarray(wealth.attrs["terminal_deflators"], dtype=float)
+            effective_inflation = np.power(final_deflator, -12.0 / len(wealth)) - 1.0
+        elif inflation_paths is None:
             final_deflator = float((1.0 + annual_inflation) ** (-len(wealth) / 12.0))
             effective_inflation = np.full(len(wrapper_terminal), float(annual_inflation))
         else:
@@ -1812,19 +2168,29 @@ def run_scenario(
             effective_inflation = np.power(cumulative_inflation, 12.0 / len(wealth)) - 1.0
         wrapper_reporting_terminal = wrapper_terminal * final_deflator
         wrapper_real_annualized = (1.0 + wrapper_annualized) / (1.0 + effective_inflation) - 1.0
-        diy_annualized = _cash_flow_adjusted_geometric_returns(
-            wealth,
-            initial_value=float(initial_value),
-            contribution=float(contribution),
-            withdrawal=float(withdrawal),
-            withdrawal_start_period=int(withdrawal_start_period),
-            annual_inflation=float(annual_inflation),
-            inflation_paths=inflation_paths,
-            withdrawal_paths=np.asarray(
-                wealth.attrs.get("withdrawal_funded", np.zeros(wealth.shape)),
-                dtype=float,
-            ),
-        )
+        native_statistics = wealth.attrs.get("native_risk_statistics")
+        if compact_reporting and native_statistics is not None:
+            stats = dict(zip(NATIVE_RISK_STAT_NAMES, native_statistics, strict=True))
+            counts = np.asarray(stats["log_return_count"])
+            average_log = np.divide(
+                stats["log_return_sum"], counts,
+                out=np.zeros_like(counts), where=counts > 0,
+            )
+            diy_annualized = np.expm1(average_log * 12.0)
+        else:
+            diy_annualized = _cash_flow_adjusted_geometric_returns(
+                wealth,
+                initial_value=float(initial_value),
+                contribution=float(contribution),
+                withdrawal=float(withdrawal),
+                withdrawal_start_period=int(withdrawal_start_period),
+                annual_inflation=float(annual_inflation),
+                inflation_paths=inflation_paths,
+                withdrawal_paths=np.asarray(
+                    wealth.attrs.get("withdrawal_funded", np.zeros(wealth.shape)),
+                    dtype=float,
+                ),
+            )
         wrapper_advantage = wrapper_reporting_terminal - active_terminal
         summary["wrapper_terminal_p05"] = float(np.quantile(wrapper_reporting_terminal, 0.05))
         summary["wrapper_terminal_median"] = float(np.median(wrapper_reporting_terminal))
@@ -1910,12 +2276,17 @@ def run_scenario(
     model.metadata["state_dependent_liquidity"] = bool(liquidity_multipliers)
     model.metadata["state_transaction_cost_multipliers"] = liquidity_multipliers or {}
     if parameter_summary is not None:
-        terminal_offset = 0
         real_terminal_metrics: list[dict[str, float]] = []
-        for draw_paths in model_path_counts:
-            terminal = reporting_wealth.iloc[
-                -1, terminal_offset:terminal_offset + draw_paths
-            ].to_numpy(dtype=float)
+        terminal_offset = 0
+        for draw, nominal_terminal in enumerate(terminal_groups):
+            draw_deflator = terminal_deflator_groups[draw]
+            terminal = (
+                nominal_terminal * np.asarray(draw_deflator, dtype=float)
+                if draw_deflator is not None
+                else reporting_wealth.iloc[
+                    -1, terminal_offset:terminal_offset + len(nominal_terminal)
+                ].to_numpy(dtype=float)
+            )
             real_terminal_metrics.append(
                 {
                     "terminal_p05": float(np.quantile(terminal, 0.05)),
@@ -1923,7 +2294,7 @@ def run_scenario(
                     "terminal_p95": float(np.quantile(terminal, 0.95)),
                 }
             )
-            terminal_offset += draw_paths
+            terminal_offset += len(nominal_terminal)
         for column in ("terminal_p05", "terminal_median", "terminal_p95"):
             parameter_summary[column] = [row[column] for row in real_terminal_metrics]
     return SimulationRun(

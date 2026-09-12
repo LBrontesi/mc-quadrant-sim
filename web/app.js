@@ -1275,6 +1275,8 @@ function gatherScenario() {
     duration_model: $("duration-model").value,
     min_regime_duration: Number($("min-regime-duration").value),
     garch: $("garch").checked,
+    calibrate_dependence: $("calibrate-dependence").checked,
+    select_hyperparameters: quadrantModel && $("walk-forward").checked && $("select-hyperparameters").checked,
     walk_forward: $("walk-forward").checked,
     probabilistic_regimes: quadrantModel && $("probabilistic-regimes").checked,
     regime_temperature: Number($("regime-temperature").value),
@@ -1825,7 +1827,14 @@ function renderMethodologyReport(data) {
     [Number(methodology.parameter_draws) > 0, `${Number(methodology.parameter_draws) || 0} parameter recalibrations`],
     [Boolean(methodology.joint_macro), "Joint macro/market paths"],
     [methodology.macro_model === "bvar_ensemble", "Bayesian VAR with rolling stability blend"],
-    [Boolean(methodology.macro_parameter_uncertainty), "Macro-parameter posterior draws"],
+    [["bootstrap", "per_path"].includes(methodology.macro_parameter_uncertainty_mode), methodology.macro_parameter_uncertainty_mode === "bootstrap"
+      ? "Macro parameters recalibrated once per bootstrap draw" : "Macro-parameter posterior draws"],
+    [methodology.calibrate_dependence && methodology.dependence_fit?.status === "fitted",
+      methodology.calibrate_dependence && methodology.dependence_fit?.status === "fitted"
+        ? "GARCH/ADCC estimated by constrained QML" : "Manual or short-history dependence coefficients"],
+    [Boolean(methodology.hyperparameter_selection), methodology.hyperparameter_selection
+      ? `Mean prior: ${methodology.hyperparameter_selection.selected_parameters.mean_prior_strength}; duration prior: ${methodology.hyperparameter_selection.selected_parameters.duration_prior_strength ?? methodology.duration_prior_strength ?? 8}; separate final holdout`
+      : "Hyperparameter selection not performed"],
     [Boolean(methodology.structural_returns), "Structural asset-class priors"],
     [Boolean(methodology.state_dependent_liquidity), "Regime-dependent trading costs"],
     [methodology.rate_model === "joint_macro_path", "Stochastic policy-rate paths"],
