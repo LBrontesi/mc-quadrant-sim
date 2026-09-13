@@ -5,7 +5,7 @@ planning. The production model combines four macroeconomic states with
 regime-specific multivariate normal tempered-stable returns, GARCH volatility,
 asymmetric dynamic correlation, and a native C++17 simulation backend.
 
-The four macro quadrants are:
+The main idea is to implement a four macro quadrants theory:
 
 | Regime | Growth | Inflation | Typical interpretation |
 | --- | --- | --- | --- |
