@@ -1092,3 +1092,9 @@ inflation above 3 percent.
 - ALFRED initial-release mode and custom `AvailableDate` values provide point-in-time macro alignment; the release lag remains the fallback for latest-revised FRED history.
 - Unit/integration, browser smoke, and Docker health checks run automatically
   through GitHub Actions.
+
+
+
+## Possible improvements
+
+- QARCH model usage instead of GARCH for assets' volatility [arXiv](https://arxiv.org/html/1206.2153v2) 
