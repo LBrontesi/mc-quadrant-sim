@@ -3,8 +3,7 @@
 A research-oriented, monthly Monte Carlo engine for long-horizon portfolio
 planning. The production model combines four macroeconomic states with
 regime-specific multivariate normal tempered-stable returns, GARCH volatility,
-asymmetric dynamic correlation, and a native C++17 simulation backend. New web
-sessions default to a 30-year horizon and 100,000 paths.
+asymmetric dynamic correlation, and a native C++17 simulation backend.
 
 The four macro quadrants are:
 
