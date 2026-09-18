@@ -1097,4 +1097,5 @@ inflation above 3 percent.
 
 ## Possible improvements
 
-- QARCH model usage instead of GARCH for assets' volatility -> [arXiv](https://arxiv.org/html/1206.2153v2) 
+- QARCH model usage instead of GARCH for assets' volatility -> [arXiv](https://arxiv.org/html/1206.2153v2)
+- Ziggurat algorithm to generate Normal random variables -> [Paper](https://www.jstatsoft.org/article/view/v005i08)) 
