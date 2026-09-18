@@ -309,21 +309,6 @@ function attachTooltip(container) {
   return { show, hide };
 }
 
-let revealObserver = null;
-
-function registerReveals(root = document) {
-  if (!revealObserver) return;
-  const selector = ".workspace-heading, .guide-mini, .settings-panel, .allocation-bar, .card, .metric";
-  const elements = [...(root.querySelectorAll?.(selector) || [])];
-  if (root.matches?.(selector)) elements.unshift(root);
-  elements.forEach((element) => {
-    if (element.dataset.revealReady) return;
-    element.dataset.revealReady = "true";
-    element.classList.add("reveal");
-    revealObserver.observe(element);
-  });
-}
-
 function setupExperience() {
   const progress = $("scroll-progress-bar");
   let scrollFrame = 0;
@@ -337,32 +322,17 @@ function setupExperience() {
   }, { passive: true });
   updateScrollProgress();
 
-  if (!(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches)) {
-    revealObserver = new IntersectionObserver((entries) => {
-      entries.forEach((entry) => {
-        if (!entry.isIntersecting) return;
-        entry.target.classList.add("is-visible");
-        revealObserver.unobserve(entry.target);
-      });
-    }, { threshold: 0.08, rootMargin: "0px 0px -6%" });
-    registerReveals();
-    new MutationObserver((mutations) => {
-      mutations.forEach((mutation) => mutation.addedNodes.forEach((node) => {
-        if (node.nodeType === Node.ELEMENT_NODE) registerReveals(node);
-      }));
-    }).observe($("workspace"), { childList: true, subtree: true });
-  }
-
-  const stage = $("quadrant-stage");
-  stage.addEventListener("pointermove", (event) => {
-    const bounds = stage.getBoundingClientRect();
-    stage.style.setProperty("--stage-x", `${((event.clientX - bounds.left) / bounds.width - 0.5) * 16}px`);
-    stage.style.setProperty("--stage-y", `${((event.clientY - bounds.top) / bounds.height - 0.5) * 16}px`);
-  });
-  stage.addEventListener("pointerleave", () => {
-    stage.style.setProperty("--stage-x", "0px");
-    stage.style.setProperty("--stage-y", "0px");
-  });
+  // Keep sticky navigation clear of the run bar even when status messages wrap.
+  const updateStickyOffsets = () => {
+    const headerHeight = document.querySelector(".app-header").offsetHeight;
+    const actionHeight = document.querySelector(".action-bar").offsetHeight;
+    document.documentElement.style.setProperty("--header-height", `${headerHeight}px`);
+    document.documentElement.style.setProperty("--results-top", `${headerHeight + actionHeight + 22}px`);
+  };
+  const layoutObserver = new ResizeObserver(updateStickyOffsets);
+  layoutObserver.observe(document.querySelector(".app-header"));
+  layoutObserver.observe(document.querySelector(".action-bar"));
+  updateStickyOffsets();
 
   document.querySelectorAll("details").forEach((details) => details.addEventListener("toggle", () => {
     if (!details.open) return;
@@ -1700,7 +1670,12 @@ function populatePresets(presets) {
 /* ---------- Tabs ---------- */
 
 function switchTab(tabId) {
-  document.querySelectorAll(".tab-btn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tabId));
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    const active = btn.dataset.tab === tabId;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+    btn.tabIndex = active ? 0 : -1;
+  });
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === tabId));
 }
 
@@ -3282,7 +3257,22 @@ function init() {
   $("csv-prices").addEventListener("change", syncCsvEnabled);
   $("csv-macro").addEventListener("change", syncCsvEnabled);
 
-  document.querySelectorAll(".tab-btn").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
+  const resultTabs = [...document.querySelectorAll(".tab-btn")];
+  resultTabs.forEach((btn, index) => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+    btn.addEventListener("keydown", (event) => {
+      const offsets = { ArrowRight: 1, ArrowLeft: -1 };
+      let next;
+      if (event.key in offsets) next = (index + offsets[event.key] + resultTabs.length) % resultTabs.length;
+      else if (event.key === "Home") next = 0;
+      else if (event.key === "End") next = resultTabs.length - 1;
+      else return;
+      event.preventDefault();
+      switchTab(resultTabs[next].dataset.tab);
+      resultTabs[next].focus({ preventScroll: true });
+      resultTabs[next].scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  });
 
   $("run-btn").addEventListener("click", onRun);
   $("safe-rate-btn").addEventListener("click", onSafeRate);

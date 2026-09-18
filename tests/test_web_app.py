@@ -20,8 +20,8 @@ def test_web_assets_are_served_from_expected_directory():
     assert (web_dir / "api-client.js").is_file()
     assert (web_dir / "resource-planner.js").is_file()
     assert (web_dir / "style.css").is_file()
-    assert 'src="logo.jpg"' in html
-    assert 'src="/logo.jpg"' not in html
+    assert 'rel="icon" href="logo.jpg"' in html
+    assert 'href="/logo.jpg"' not in html
 
 
 def test_web_ui_exposes_shared_methodology_controls():

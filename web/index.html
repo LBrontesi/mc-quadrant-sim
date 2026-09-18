@@ -4,16 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Four-Quadrant Monte Carlo Simulator</title>
-  <link rel="stylesheet" href="style.css?v=20260820">
+  <link rel="icon" href="logo.jpg">
+  <link rel="stylesheet" href="style.css?v=20260918">
 </head>
-<body class="light">
+<body class="light" id="top">
+  <a class="skip-link" href="#workspace">Skip to simulation studio</a>
   <div class="scroll-progress" aria-hidden="true"><span id="scroll-progress-bar"></span></div>
   <div class="bg-glow bg-glow-1"></div>
   <div class="bg-glow bg-glow-2"></div>
 
-  <header class="app-header" id="top">
+  <header class="app-header">
     <a class="brand brand-link" href="#top" aria-label="MC Quadrant — back to top">
-      <img class="brand-logo" src="logo.jpg" alt="MC Quadrant Simulator logo">
+      <span class="brand-symbol" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
       <div>
         <h1>MC / Quadrant</h1>
         <p class="subtitle">Research simulation studio</p>
@@ -32,25 +34,24 @@
 
   <section class="app-hero" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <span class="section-index">01 / Scenario engine</span>
-      <h2 id="hero-title">Model<br>uncertainty.<br><em>Not just<br>market paths.</em></h2>
-      <p>Explore how portfolios behave when macro regimes, parameters, inflation, and market dependence all move together.</p>
+      <span class="section-index">Portfolio research workspace</span>
+      <h2 id="hero-title">A clearer view<br>of <em>what comes next.</em></h2>
+      <p>Explore the range of possible futures for your portfolio. Build a scenario, test it across four economic regimes, and understand the risks along the way.</p>
       <div class="hero-actions">
         <a class="btn btn-primary btn-editorial" href="#workspace">Build a scenario <span>↓</span></a>
         <span class="hero-shortcut">⌘ / Ctrl + Enter to run</span>
       </div>
     </div>
     <div class="quadrant-stage" id="quadrant-stage" aria-label="Four macroeconomic regimes">
-      <div class="orbit orbit-outer"></div>
-      <div class="orbit orbit-inner"></div>
-      <div class="quadrant-core">
-        <img src="logo.jpg" alt="" aria-hidden="true">
-        <span>MC/Q</span>
+      <div class="regime-map-heading"><span>THE ECONOMIC CYCLE</span><span class="map-key">Four connected regimes</span></div>
+      <div class="regime-map">
+        <span class="map-axis axis-growth">Higher growth ↑</span>
+        <div class="quadrant-node node-goldilocks"><span>01 <b>↗</b></span><strong>Goldilocks</strong><small>Growth ↑ · Inflation ↓</small><p>Disinflationary expansion</p></div>
+        <div class="quadrant-node node-overheating"><span>02 <b>↗</b></span><strong>Overheating</strong><small>Growth ↑ · Inflation ↑</small><p>Inflationary expansion</p></div>
+        <div class="quadrant-node node-recession"><span>04 <b>↘</b></span><strong>Recession</strong><small>Growth ↓ · Inflation ↓</small><p>Deflationary slowdown</p></div>
+        <div class="quadrant-node node-stagflation"><span>03 <b>↘</b></span><strong>Stagflation</strong><small>Growth ↓ · Inflation ↑</small><p>Inflationary slowdown</p></div>
+        <span class="map-axis axis-inflation">Higher inflation →</span>
       </div>
-      <div class="quadrant-node node-goldilocks"><span>01</span><strong>Goldilocks</strong><small>Growth ↑ · Inflation ↓</small></div>
-      <div class="quadrant-node node-overheating"><span>02</span><strong>Overheating</strong><small>Growth ↑ · Inflation ↑</small></div>
-      <div class="quadrant-node node-stagflation"><span>03</span><strong>Stagflation</strong><small>Growth ↓ · Inflation ↑</small></div>
-      <div class="quadrant-node node-recession"><span>04</span><strong>Recession</strong><small>Growth ↓ · Inflation ↓</small></div>
     </div>
     <div class="hero-meta">
       <span><strong>04</strong> macro regimes</span>
@@ -59,20 +60,13 @@
     </div>
   </section>
 
-  <div class="regime-ticker" aria-hidden="true">
-    <div class="regime-ticker-track">
-      <span>Goldilocks</span><i>↗</i><span>Overheating</span><i>↗</i><span>Stagflation</span><i>↘</i><span>Recession</span><i>↘</i>
-      <span>Goldilocks</span><i>↗</i><span>Overheating</span><i>↗</i><span>Stagflation</span><i>↘</i><span>Recession</span><i>↘</i>
-    </div>
-  </div>
-
   <div class="layout">
     <div class="workspace-heading">
-      <span class="section-index">02 / Simulation studio</span>
-      <h2>Build the scenario.</h2>
-      <p>Start broad, then reveal the assumptions that matter. Every control remains auditable.</p>
+      <span class="section-index">01 / Configure</span>
+      <h2>Your simulation studio.</h2>
+      <p>Set your allocation and assumptions, then explore the outcomes.</p>
     </div>
-    <main class="panel" id="workspace">
+    <main class="panel" id="workspace" tabindex="-1">
       <details class="guide-mini">
         <summary>Getting started</summary>
         <p class="guide-intro">Run your first scenario in five steps. Real market data from Yahoo Finance / FRED is loaded by default.</p>
@@ -106,8 +100,8 @@
           <button id="run-btn" class="btn btn-primary btn-lg" disabled>Run analysis</button>
         </div>
         <div class="quick-start-copy">
-          <strong>One-click analysis</strong>
-          <span>Market data loads automatically with the recommended model.</span>
+          <strong>Ready when you are</strong>
+          <span>Run the recommended setup, or customize the assumptions below.</span>
         </div>
         <div class="action-bar-status">
           <p id="load-message" class="status inline-status"></p>
@@ -648,25 +642,27 @@
       <p id="scenario-status" class="status"></p>
 
       <div class="results-toolbar" id="results-workspace">
-      <div class="tabs" id="result-tabs">
-        <button class="tab-btn active" data-tab="tab-growth">Growth</button>
-        <button class="tab-btn" data-tab="tab-returns">Returns</button>
-        <button class="tab-btn" data-tab="tab-drawdowns">Drawdowns</button>
-        <button class="tab-btn" data-tab="tab-correlations">Correlations</button>
-        <button class="tab-btn" data-tab="tab-monthly">Monthly</button>
-        <button class="tab-btn" data-tab="tab-retirement">Retirement</button>
-        <button class="tab-btn" data-tab="tab-lab">Research Lab</button>
-        <button class="tab-btn" data-tab="tab-diagnostics">Diagnostics</button>
-        <button class="tab-btn" data-tab="tab-data">Data</button>
+      <div class="tabs" id="result-tabs" role="tablist" aria-label="Simulation results">
+        <button class="tab-btn active" data-tab="tab-growth" id="trigger-tab-growth" role="tab" aria-controls="tab-growth" aria-selected="true" tabindex="0">Growth</button>
+        <button class="tab-btn" data-tab="tab-returns" id="trigger-tab-returns" role="tab" aria-controls="tab-returns" aria-selected="false" tabindex="-1">Returns</button>
+        <button class="tab-btn" data-tab="tab-drawdowns" id="trigger-tab-drawdowns" role="tab" aria-controls="tab-drawdowns" aria-selected="false" tabindex="-1">Drawdowns</button>
+        <button class="tab-btn" data-tab="tab-correlations" id="trigger-tab-correlations" role="tab" aria-controls="tab-correlations" aria-selected="false" tabindex="-1">Correlations</button>
+        <button class="tab-btn" data-tab="tab-monthly" id="trigger-tab-monthly" role="tab" aria-controls="tab-monthly" aria-selected="false" tabindex="-1">Monthly</button>
+        <button class="tab-btn" data-tab="tab-retirement" id="trigger-tab-retirement" role="tab" aria-controls="tab-retirement" aria-selected="false" tabindex="-1">Retirement</button>
+        <button class="tab-btn" data-tab="tab-lab" id="trigger-tab-lab" role="tab" aria-controls="tab-lab" aria-selected="false" tabindex="-1">Research Lab</button>
+        <button class="tab-btn" data-tab="tab-diagnostics" id="trigger-tab-diagnostics" role="tab" aria-controls="tab-diagnostics" aria-selected="false" tabindex="-1">Diagnostics</button>
+        <button class="tab-btn" data-tab="tab-data" id="trigger-tab-data" role="tab" aria-controls="tab-data" aria-selected="false" tabindex="-1">Data</button>
       </div>
         <button id="edit-scenario" class="btn btn-ghost btn-sm" type="button">Edit scenario</button>
       </div>
 
-      <div id="tab-growth" class="tab-panel active">
+      <div id="tab-growth" class="tab-panel active" role="tabpanel" aria-labelledby="trigger-tab-growth" tabindex="0">
         <div id="intro" class="empty-state">
-          <h2>Welcome to the Four-Quadrant Simulator</h2>
-          <p>Click <strong>Run analysis</strong> to use the recommended setup. Market data loads automatically and the model runs in the same step.</p>
-          <p>Optional: open the settings only when you want to customize data, allocation, or methodology.</p>
+          <span class="empty-chart" aria-hidden="true">▂ ▃ ▂ ▄ ▃ ▅ ▆ ▄ ▇</span>
+          <span class="section-index">The next step</span>
+          <h2>Your portfolio’s possibilities, mapped.</h2>
+          <p>Run your first analysis to explore wealth ranges, drawdown risk, and the probability of reaching your goals.</p>
+          <a class="empty-link" href="#workspace">Review your setup <span aria-hidden="true">↑</span></a>
         </div>
         <div id="growth-content" class="hidden">
           <div id="scenario-chips" class="chips"></div>
@@ -758,7 +754,7 @@
         </div>
       </div>
 
-      <div id="tab-returns" class="tab-panel">
+      <div id="tab-returns" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-returns" tabindex="0">
         <div class="results-empty empty-state">Run a simulation to see return distributions.</div>
         <div id="returns-content" class="hidden">
           <div class="chart-grid">
@@ -775,7 +771,7 @@
         </div>
       </div>
 
-      <div id="tab-drawdowns" class="tab-panel">
+      <div id="tab-drawdowns" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-drawdowns" tabindex="0">
         <div class="results-empty empty-state">Run a simulation to see drawdown risk.</div>
         <div id="drawdowns-content" class="hidden">
           <div class="chart-grid">
@@ -799,7 +795,7 @@
         </div>
       </div>
 
-      <div id="tab-correlations" class="tab-panel">
+      <div id="tab-correlations" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-correlations" tabindex="0">
         <div class="results-empty empty-state">Run a simulation to see correlations.</div>
         <div id="correlations-content" class="hidden">
           <div class="chart-grid">
@@ -809,7 +805,7 @@
         </div>
       </div>
 
-      <div id="tab-monthly" class="tab-panel">
+      <div id="tab-monthly" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-monthly" tabindex="0">
         <div class="results-empty empty-state">Run a simulation to see monthly returns.</div>
         <div id="monthly-content" class="hidden">
           <div class="card card-wide">
@@ -820,7 +816,7 @@
         </div>
       </div>
 
-      <div id="tab-retirement" class="tab-panel">
+      <div id="tab-retirement" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-retirement" tabindex="0">
         <div id="retirement-empty" class="results-empty empty-state">Enable decumulation and run an analysis to see retirement outcomes.</div>
         <div id="retirement-content" class="hidden">
           <div class="card-heading-row retirement-heading">
@@ -847,7 +843,7 @@
         </div>
       </div>
 
-      <div id="tab-lab" class="tab-panel">
+      <div id="tab-lab" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-lab" tabindex="0">
         <div id="lab-empty" class="results-empty empty-state">Run a simulation to unlock paired portfolio research.</div>
         <div id="lab-content" class="hidden">
           <section class="card research-hero-card">
@@ -907,7 +903,7 @@
         </div>
       </div>
 
-      <div id="tab-diagnostics" class="tab-panel">
+      <div id="tab-diagnostics" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-diagnostics" tabindex="0">
         <div id="diagnostics-empty" class="empty-state">Run a simulation to see calibration diagnostics.</div>
         <div id="diagnostics-content" class="hidden">
           <section class="card">
@@ -934,7 +930,7 @@
         </div>
       </div>
 
-      <div id="tab-data" class="tab-panel">
+      <div id="tab-data" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-data" tabindex="0">
         <div id="data-empty" class="empty-state">Load data to preview it here.</div>
         <div id="data-content" class="hidden">
           <section class="card">
@@ -979,6 +975,6 @@
   </div>
   <div id="toast-container"></div>
 
-  <script type="module" src="app.js?v=20260821"></script>
+  <script type="module" src="app.js?v=20260918"></script>
 </body>
 </html>
