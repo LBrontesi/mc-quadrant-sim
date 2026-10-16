@@ -38,6 +38,11 @@ def normalize_withdrawal_start_period(value: Any, periods: int) -> int:
     return _integer(value, "withdrawal_start_period", minimum=1, maximum=periods)
 
 
+def empty_spending_paths(periods: int, paths: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    shape = (periods, paths)
+    return np.zeros(shape), np.zeros(shape), np.zeros(shape, dtype=np.int8)
+
+
 @dataclass(frozen=True)
 class WithdrawalPhase:
     """One inclusive, non-overlapping recurring spending interval."""
@@ -425,13 +430,7 @@ class SpendingController:
     """Path-aware fixed or Guyton-Klinger monthly spending request engine."""
 
     def __init__(
-        self,
-        plan: DecumulationPlan,
-        *,
-        paths: int,
-        initial_value: float,
-        cpi: np.ndarray,
-        safe_rate: float = 0.0,
+        self, plan: DecumulationPlan, paths: int, initial_value: float, cpi: np.ndarray, safe_rate: float = 0.0,
     ) -> None:  # Initialize the path-aware spending controller state.
         self.plan = plan
         self.paths = int(paths)

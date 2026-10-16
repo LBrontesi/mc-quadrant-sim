@@ -9,6 +9,7 @@ import pandas as pd
 from mc_quadrants.decumulation import (
     DecumulationPlan,
     SpendingController,
+    empty_spending_paths,
     inflation_index,
     normalize_decumulation,
     normalize_withdrawal_start_period,
@@ -555,13 +556,7 @@ def _simulate_wrapper_benchmark(
     stamp_mask, ivafe_mask = _wealth_tax_masks(profile, wealth_tax_mode)
     taxable_mask = stamp_mask | ivafe_mask
     declarative = tax_regime == "italy_declarative"
-    spending = SpendingController(
-        decumulation,
-        paths=paths,
-        initial_value=initial_value,
-        cpi=cpi,
-        safe_rate=safe_withdrawal_rate,
-    )
+    spending = SpendingController(decumulation, paths, initial_value, cpi, safe_withdrawal_rate)
 
     for period in range(periods):
         if period and years[period] != years[period - 1] and declarative:
@@ -1068,16 +1063,8 @@ def simulate_italian_portfolio_tax(
     year_start_value = np.full(paths, initial_value, dtype=float)
     year_contributions = np.zeros(paths, dtype=float)
     year_withdrawals = np.zeros(paths, dtype=float)
-    spending = SpendingController(
-        decumulation_plan,
-        paths=paths,
-        initial_value=initial_value,
-        cpi=cpi,
-        safe_rate=safe_withdrawal_rate,
-    )
-    requested_spending = np.zeros((periods, paths), dtype=float)
-    funded_spending = np.zeros((periods, paths), dtype=float)
-    guardrail_events = np.zeros((periods, paths), dtype=np.int8)
+    spending = SpendingController(decumulation_plan, paths, initial_value, cpi, safe_withdrawal_rate)
+    requested_spending, funded_spending, guardrail_events = empty_spending_paths(periods, paths)
 
     def record(year: int, name: str, amount: np.ndarray) -> None:  # Accumulate one named tax metric for a calendar year.
         bucket = tax_by_year.setdefault(str(int(year)), {})

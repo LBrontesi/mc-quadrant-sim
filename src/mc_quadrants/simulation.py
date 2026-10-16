@@ -9,6 +9,7 @@ import pandas as pd
 from mc_quadrants.decumulation import (
     DecumulationPlan,
     SpendingController,
+    empty_spending_paths,
     funded_amount,
     inflation_index,
     normalize_decumulation,
@@ -1436,16 +1437,8 @@ def _simulate_leveraged_portfolio_paths(
         annual_inflation=plan.annual_inflation_fallback,
         inflation_paths=withdrawal_inflation_paths,
     )
-    spending = SpendingController(
-        plan,
-        paths=paths,
-        initial_value=initial_value,
-        cpi=cpi,
-        safe_rate=safe_withdrawal_rate,
-    )
-    requested_spending = np.zeros((periods, paths), dtype=float)
-    funded_spending = np.zeros((periods, paths), dtype=float)
-    guardrail_events = np.zeros((periods, paths), dtype=np.int8)
+    spending = SpendingController(plan, paths, initial_value, cpi, safe_withdrawal_rate)
+    requested_spending, funded_spending, guardrail_events = empty_spending_paths(periods, paths)
     margin_calls = np.zeros(paths, dtype=bool)
     cost_rate = float(transaction_cost_bps) / 10_000.0
 
@@ -1773,15 +1766,9 @@ def simulate_portfolio_paths(
             value = np.full(paths, initial_value, dtype=float)
             wealth = np.empty((periods, paths), dtype=float)
             spending = SpendingController(
-                decumulation_plan,
-                paths=paths,
-                initial_value=initial_value,
-                cpi=cpi,
-                safe_rate=safe_withdrawal_rate,
+                decumulation_plan, paths, initial_value, cpi, safe_withdrawal_rate
             )
-            requested_spending = np.zeros((periods, paths), dtype=float)
-            funded_spending = np.zeros((periods, paths), dtype=float)
-            guardrail_events = np.zeros((periods, paths), dtype=np.int8)
+            requested_spending, funded_spending, guardrail_events = empty_spending_paths(periods, paths)
             for period in range(periods):
                 value = (value + contribution) * growth[period]
                 requested, policy_events = spending.request(period + 1, value)
@@ -1793,9 +1780,7 @@ def simulate_portfolio_paths(
                 wealth[period] = value
         else:
             paths = result.returns.shape[1]
-            requested_spending = np.zeros((periods, paths), dtype=float)
-            funded_spending = np.zeros((periods, paths), dtype=float)
-            guardrail_events = np.zeros((periods, paths), dtype=np.int8)
+            requested_spending, funded_spending, guardrail_events = empty_spending_paths(periods, paths)
         if not np.isfinite(wealth).all():
             raise ValueError("Portfolio wealth contains non-finite values.")
         frame = pd.DataFrame(wealth, columns=[f"path_{i}" for i in range(result.returns.shape[1])])
@@ -1923,13 +1908,7 @@ def simulate_portfolio_paths(
     wealth = np.empty((periods, paths), dtype=float)
     cost_rate = float(transaction_cost_bps) / 10_000.0
     transaction_cost_total = np.zeros(paths, dtype=float)
-    spending = SpendingController(
-        decumulation_plan,
-        paths=paths,
-        initial_value=initial_value,
-        cpi=cpi,
-        safe_rate=safe_withdrawal_rate,
-    )
+    spending = SpendingController(decumulation_plan, paths, initial_value, cpi, safe_withdrawal_rate)
     requested_spending = (
         np.zeros((periods, paths), dtype=float)
         if decumulation_plan.active
