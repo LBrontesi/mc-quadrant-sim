@@ -732,6 +732,8 @@ def italian_native_result_frame(
     frame_metadata: Mapping[str, object],
     *,
     fused: bool,
+    extra_attrs: Mapping[str, object] | None = None,
+    include_compact_metadata: bool = True,
 ) -> pd.DataFrame:
     """Convert native ledger arrays into the reference DataFrame contract."""
 
@@ -788,22 +790,28 @@ def italian_native_result_frame(
             "wrapper_terminal_values": native_result["wrapper_terminal_values"],
             "wrapper_annualized_returns": native_result["wrapper_annualized_returns"],
             "native_backend": True,
-            "native_fused_backend": bool(fused),
             "native_gross_wealth": np.asarray(native_result["gross_wealth"], dtype=float),
             "native_gross_transaction_cost_total": float(
                 native_result["gross_transaction_cost_total"]
             ),
-            "compact_reporting": bool(native_result.get("compact_reporting", False)),
-            "total_simulated_paths": int(native_result.get("total_paths", paths)),
-            "sample_indices": native_result.get("sample_indices"),
-            "terminal_values": native_result.get("terminal_values"),
-            "gross_terminal_values": native_result.get("gross_terminal_values"),
-            "native_max_drawdowns": native_result.get("max_drawdowns"),
-            "native_regime_counts": native_result.get("regime_counts"),
-            "terminal_deflators": native_result.get("terminal_deflators"),
-            "native_risk_statistics": native_result.get("risk_statistics"),
         }
     )
+    if include_compact_metadata:
+        frame.attrs.update(
+            {
+                "native_fused_backend": bool(fused),
+                "compact_reporting": bool(native_result.get("compact_reporting", False)),
+                "total_simulated_paths": int(native_result.get("total_paths", paths)),
+                "sample_indices": native_result.get("sample_indices"),
+                "terminal_values": native_result.get("terminal_values"),
+                "gross_terminal_values": native_result.get("gross_terminal_values"),
+                "native_max_drawdowns": native_result.get("max_drawdowns"),
+                "native_regime_counts": native_result.get("regime_counts"),
+                "terminal_deflators": native_result.get("terminal_deflators"),
+                "native_risk_statistics": native_result.get("risk_statistics"),
+            }
+        )
+    frame.attrs.update(extra_attrs or {})
     return frame
 
 
@@ -945,89 +953,43 @@ def simulate_italian_portfolio_tax(
         except (AttributeError, OSError, RuntimeError):
             native_result = None
         if native_result is not None:
-            year_metric_names = NATIVE_YEAR_STAT_NAMES
-            year_values = np.asarray(native_result["year_stats"], dtype=float)
-            tax_by_year = {
-                str(year): {
-                    name: float(year_values[index, metric])
-                    for metric, name in enumerate(year_metric_names)
-                }
-                for index, year in enumerate(ordered_years)
-            }
-            stats = native_result["tax_stats"]
-            if not isinstance(stats, Mapping):
-                raise RuntimeError("Native tax ledger returned invalid statistics.")
-            wrapper_terminal = native_result["wrapper_terminal_values"]
-            wrapper_annualized = native_result["wrapper_annualized_returns"]
-            frame = pd.DataFrame(
-                np.asarray(native_result["wealth"], dtype=float),
-                columns=[f"path_{index}" for index in range(paths)],
-            )
             categories = {asset: str(profile.metadata[asset]["category"]) for asset in assets}
-            frame.attrs.update(
+            withdrawal_schedule = np.broadcast_to(
+                (float(withdrawal) * (np.arange(1, periods + 1) >= withdrawal_start_period))[:, None],
+                (periods, paths),
+            )
+            frame = italian_native_result_frame(
+                native_result,
                 {
-                    "margin_calls": 0,
+                    "ordered_years": ordered_years,
+                    "wrapper_requested": bool(wrapper_benchmark),
+                    "wrapper_available": native_wrapper,
+                    "managed": managed,
+                    "declarative": declarative,
                     "tax_regime": tax_regime,
                     "asset_tax_categories": categories,
                     "asset_tax_metadata": profile.metadata,
-                    **{
-                        str(name): float(np.asarray(values, dtype=float).sum())
-                        for name, values in stats.items()
-                    },
-                    "annual_wealth_tax": float(annual_wealth_tax),
+                    "annual_wealth_tax": annual_wealth_tax,
                     "wealth_tax_mode": wealth_tax_mode,
-                    "tax_terminal_liquidation": bool(terminal_liquidation),
-                    "tax_by_year": tax_by_year,
-                    "tax_basis_method": (
-                        "average_cost" if not declarative else "average_cost_planning_proxy"
-                    ),
-                    "tax_timing": "annual" if declarative or managed else "transaction",
-                    "start_date": (
-                        str(pd.Timestamp(start_date).date()) if start_date is not None else None
-                    ),
+                    "terminal_liquidation": bool(terminal_liquidation),
+                    "start_date": str(pd.Timestamp(start_date).date()) if start_date is not None else None,
                     "contribution_allocation": contribution_allocation,
                     "withdrawal_start_period": withdrawal_start_period,
-                    "tax_wrapper_benchmark_requested": bool(wrapper_benchmark),
-                    "tax_wrapper_benchmark_available": native_wrapper,
-                    "tax_wrapper_unavailable_reason": (
-                        "managed_regime"
-                        if wrapper_benchmark and managed
-                        else "terminal_liquidation_required"
-                        if wrapper_benchmark and not terminal_liquidation
-                        else None
-                    ),
-                    "wrapper_terminal_values": wrapper_terminal,
-                    "wrapper_annualized_returns": wrapper_annualized,
-                    "native_backend": True,
-                    "native_gross_wealth": np.asarray(
-                        native_result["gross_wealth"], dtype=float
-                    ),
-                    "native_gross_transaction_cost_total": float(
-                        native_result["gross_transaction_cost_total"]
-                    ),
+                },
+                fused=False,
+                include_compact_metadata=False,
+                extra_attrs={
                     "decumulation": decumulation_plan.to_dict(),
                     "withdrawal_requested": (
                         np.asarray(native_result["withdrawal_requested"], dtype=float)
                         if native_result.get("withdrawal_requested") is not None
-                        else np.broadcast_to(
-                            (
-                                float(withdrawal)
-                                * (np.arange(1, periods + 1) >= withdrawal_start_period)
-                            )[:, None],
-                            (periods, paths),
-                        ).copy()
+                        else withdrawal_schedule.copy()
                     ),
                     "withdrawal_funded": (
                         np.asarray(native_result["withdrawal_funded"], dtype=float)
                         if native_result.get("withdrawal_funded") is not None
                         else np.minimum(
-                            np.broadcast_to(
-                                (
-                                    float(withdrawal)
-                                    * (np.arange(1, periods + 1) >= withdrawal_start_period)
-                                )[:, None],
-                                (periods, paths),
-                            ),
+                            withdrawal_schedule,
                             np.vstack(
                                 [
                                     np.full((1, paths), initial_value),
@@ -1042,7 +1004,7 @@ def simulate_italian_portfolio_tax(
                         else np.zeros((periods, paths), dtype=np.int8)
                     ),
                     "withdrawal_cpi": cpi,
-                }
+                },
             )
             return frame
 
