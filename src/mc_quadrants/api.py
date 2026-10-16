@@ -1810,13 +1810,17 @@ def _retirement_response(
             legacy_start_period=int(payload.get("withdrawal_start_period", 1)),
             annual_inflation_fallback=float(payload.get("annual_inflation", 0.0)) / 100.0,
         ).to_dict()
+    policy_values = plan.get("policy", {})
+    current_policy = (
+        str(policy_values.get("type", "fixed"))
+        if isinstance(policy_values, Mapping)
+        else str(policy_values)
+    )
+    tax_by_year = {
+        str(year): {str(name): float(value) for name, value in metrics.items()}
+        for year, metrics in (tax_by_year or {}).items()
+    }
     if not bool(plan.get("enabled", False)):
-        policy_values = plan.get("policy", {})
-        current_policy = (
-            str(policy_values.get("type", "fixed"))
-            if isinstance(policy_values, Mapping)
-            else str(policy_values)
-        )
         terminal = wealth.iloc[-1].to_numpy(dtype=float)
         terminal_quantiles = np.quantile(terminal, [0.05, 0.50, 0.95])
         zero_curve = [0.0] * periods
@@ -1863,10 +1867,7 @@ def _retirement_response(
                     "probability_of_increase": 0.0,
                 }
             ],
-            "tax_by_year": {
-                str(year): {str(name): float(value) for name, value in metrics.items()}
-                for year, metrics in (tax_by_year or {}).items()
-            },
+            "tax_by_year": tax_by_year,
             "safe_rate": None,
         }
     requested = np.asarray(
@@ -1949,12 +1950,6 @@ def _retirement_response(
             "probability_of_increase": float(np.mean(np.any(policy_events > 0, axis=0))),
         }
 
-    policy_values = plan.get("policy", {})
-    current_policy = (
-        str(policy_values.get("type", "fixed"))
-        if isinstance(policy_values, Mapping)
-        else str(policy_values)
-    )
     comparison = [policy_summary(current_policy, values, requested, funded, events)]
     paired_policy = wealth.attrs.get("paired_policy")
     paired_wealth = wealth.attrs.get("paired_wealth")
@@ -2005,10 +2000,7 @@ def _retirement_response(
             "terminal_p95": float(np.quantile(values[-1], 0.95)),
         },
         "paired_comparison": comparison,
-        "tax_by_year": {
-            str(year): {str(name): float(value) for name, value in metrics.items()}
-            for year, metrics in (tax_by_year or {}).items()
-        },
+        "tax_by_year": tax_by_year,
         "safe_rate": None,
     }
 
