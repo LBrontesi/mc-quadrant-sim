@@ -221,6 +221,31 @@ def _decode_regime_codes(codes: np.ndarray, states: list[str]) -> np.ndarray:
     return np.asarray(states, dtype=object)[codes]
 
 
+def _mnts_result(
+    returns: np.ndarray,
+    regimes: np.ndarray,
+    model: ScenarioModel,
+    assets: list[str],
+    return_codes: bool,
+    transition_concentration: float | None,
+    macro_paths: np.ndarray | None,
+    macro_dynamics: Mapping[str, Any] | None,
+    native_portfolio: dict[str, Any] | None = None,
+) -> SimulationResult:
+    return SimulationResult(
+        returns=returns,
+        regimes=regimes if return_codes else _decode_regime_codes(regimes, model.states),
+        assets=assets,
+        states=model.states.copy(),
+        frequency=model.frequency,
+        distribution="mnts",
+        transition_concentration=transition_concentration,
+        macro_paths=macro_paths,
+        macro_columns=list(macro_dynamics["columns"]) if isinstance(macro_dynamics, Mapping) else [],
+        native_portfolio=native_portfolio,
+    )
+
+
 def _batched_cholesky(values: np.ndarray, epsilon: float = 1e-10) -> np.ndarray:
     """Cholesky-factor a stack of small matrices across paths.
 
@@ -884,6 +909,25 @@ def simulate_returns(
         if random_seed is None
         else int(random_seed) + 1
     )
+    native_process_kwargs = dict(
+        means=state_means,
+        gaussian_correlation_cholesky=state_gaussian_correlation_cholesky,
+        gaussian_correlations=state_gaussian_correlations,
+        volatilities=state_volatilities,
+        tail_indexes=state_tail_indexes,
+        temperings=state_temperings,
+        skewness=state_skewness,
+        gaussian_scales=state_gaussian_scales,
+        random_seed=native_seed,
+        garch=garch,
+        garch_alpha=garch_alpha,
+        garch_beta=garch_beta,
+        dynamic_correlation=dynamic_correlation,
+        dcc_alpha=dcc_alpha,
+        dcc_beta=dcc_beta,
+        dcc_asymmetry=dcc_asymmetry,
+        workers=native_threads,
+    )
     native_kwargs: dict[str, Any] | None = None
     normalized_multipliers: dict[str, float] = {}
     state_cost_values: np.ndarray | None = None
@@ -1067,27 +1111,12 @@ def simulate_returns(
                     start_state_age_probabilities=start_state_age_probabilities,
                     macro_process=macro_process,
                     state_transaction_cost_multipliers=state_cost_values,
-                    means=state_means,
-                    gaussian_correlation_cholesky=state_gaussian_correlation_cholesky,
-                    gaussian_correlations=state_gaussian_correlations,
-                    volatilities=state_volatilities,
-                    tail_indexes=state_tail_indexes,
-                    temperings=state_temperings,
-                    skewness=state_skewness,
-                    gaussian_scales=state_gaussian_scales,
-                    random_seed=native_seed,
+                    **native_process_kwargs,
                     regime_random_seed=(
                         int(np.random.SeedSequence().generate_state(1, dtype=np.uint64)[0])
                         if random_seed is None
                         else int(random_seed)
                     ),
-                    garch=garch,
-                    garch_alpha=garch_alpha,
-                    garch_beta=garch_beta,
-                    dynamic_correlation=dynamic_correlation,
-                    dcc_alpha=dcc_alpha,
-                    dcc_beta=dcc_beta,
-                    dcc_asymmetry=dcc_asymmetry,
                     monthly_fee_log=monthly_fee_log,
                     return_kind=str(native_portfolio_config["return_kind"]),
                     reporting_paths=int(
@@ -1099,7 +1128,6 @@ def simulate_returns(
                     annual_risk_free_rate=float(
                         native_portfolio_config.get("annual_risk_free_rate", 0.0)
                     ),
-                    workers=native_threads,
                     **compact_kwargs,
                 )
                 if compact_portfolio is not None:
@@ -1108,29 +1136,16 @@ def simulate_returns(
                     )
                     compact_regimes = np.asarray(compact_portfolio["regimes"], dtype=np.uint8)
                     compact_macro_paths = compact_portfolio.get("macro_paths")
-                    return SimulationResult(
-                        returns=np.empty((periods, 0, len(assets)), dtype=float),
-                        regimes=(
-                            compact_regimes
-                            if return_regime_codes
-                            else _decode_regime_codes(compact_regimes, model.states)
-                        ),
-                        assets=assets,
-                        states=model.states.copy(),
-                        frequency=model.frequency,
-                        distribution="mnts",
-                        transition_concentration=transition_concentration,
-                        macro_paths=(
-                            np.asarray(compact_macro_paths, dtype=float)
-                            if compact_macro_paths is not None
-                            else None
-                        ),
-                        macro_columns=(
-                            list(macro_dynamics["columns"])
-                            if isinstance(macro_dynamics, Mapping)
-                            else []
-                        ),
-                        native_portfolio=compact_portfolio,
+                    return _mnts_result(
+                        np.empty((periods, 0, len(assets))),
+                        compact_regimes,
+                        model,
+                        assets,
+                        return_regime_codes,
+                        transition_concentration,
+                        np.asarray(compact_macro_paths, dtype=float) if compact_macro_paths is not None else None,
+                        macro_dynamics,
+                        compact_portfolio,
                     )
 
     # Neutral accounting is supported only by the compact fused entry point.
@@ -1185,93 +1200,31 @@ def simulate_returns(
             )
         fused_portfolio = simulate_parametric_italian_portfolios_native(
             regime_codes=regime_paths,
-            means=state_means,
-            gaussian_correlation_cholesky=state_gaussian_correlation_cholesky,
-            gaussian_correlations=state_gaussian_correlations,
-            volatilities=state_volatilities,
-            tail_indexes=state_tail_indexes,
-            temperings=state_temperings,
-            skewness=state_skewness,
-            gaussian_scales=state_gaussian_scales,
-            random_seed=native_seed,
-            garch=garch,
-            garch_alpha=garch_alpha,
-            garch_beta=garch_beta,
-            dynamic_correlation=dynamic_correlation,
-            dcc_alpha=dcc_alpha,
-            dcc_beta=dcc_beta,
-            dcc_asymmetry=dcc_asymmetry,
+            **native_process_kwargs,
             monthly_fee_log=np.asarray(monthly_fee_log, dtype=float),
             return_kind=str(native_portfolio_config["return_kind"]),
             macro_shocks=macro_shocks,
             macro_betas=macro_betas,
-            workers=native_threads,
             **native_kwargs,
         )
         if fused_portfolio is not None:
             fused_portfolio["frame_metadata"] = dict(native_portfolio_config["frame_metadata"])
-            return SimulationResult(
-                returns=np.empty((periods, 0, len(assets)), dtype=float),
-                regimes=(
-                    regime_paths
-                    if return_regime_codes
-                    else _decode_regime_codes(regime_paths, model.states)
-                ),
-                assets=assets,
-                states=model.states.copy(),
-                frequency=model.frequency,
-                distribution="mnts",
-                transition_concentration=transition_concentration,
-                macro_paths=macro_paths,
-                macro_columns=(
-                    list(macro_dynamics["columns"])
-                    if isinstance(macro_dynamics, Mapping)
-                    else []
-                ),
-                native_portfolio=fused_portfolio,
+            return _mnts_result(
+                np.empty((periods, 0, len(assets))), regime_paths, model, assets,
+                return_regime_codes, transition_concentration, macro_paths, macro_dynamics,
+                fused_portfolio,
             )
 
     native_returns = None if use_qarch else simulate_parametric_native(
         regime_codes=regime_paths,
-        means=state_means,
-        gaussian_correlation_cholesky=state_gaussian_correlation_cholesky,
-        gaussian_correlations=state_gaussian_correlations,
-        volatilities=state_volatilities,
-        tail_indexes=state_tail_indexes,
-        temperings=state_temperings,
-        skewness=state_skewness,
-        gaussian_scales=state_gaussian_scales,
-        random_seed=native_seed,
-        garch=garch,
-        garch_alpha=garch_alpha,
-        garch_beta=garch_beta,
-        dynamic_correlation=dynamic_correlation,
-        dcc_alpha=dcc_alpha,
-        dcc_beta=dcc_beta,
-        dcc_asymmetry=dcc_asymmetry,
+        **native_process_kwargs,
         macro_shocks=macro_shocks,
         macro_betas=macro_betas,
-        workers=native_threads,
     )
     if native_returns is not None:
-        return SimulationResult(
-            returns=native_returns,
-            regimes=(
-                regime_paths
-                if return_regime_codes
-                else _decode_regime_codes(regime_paths, model.states)
-            ),
-            assets=assets,
-            states=model.states.copy(),
-            frequency=model.frequency,
-            distribution="mnts",
-            transition_concentration=transition_concentration,
-            macro_paths=macro_paths,
-            macro_columns=(
-                list(macro_dynamics["columns"])
-                if isinstance(macro_dynamics, Mapping)
-                else []
-            ),
+        return _mnts_result(
+            native_returns, regime_paths, model, assets, return_regime_codes,
+            transition_concentration, macro_paths, macro_dynamics,
         )
 
     returns = np.empty((periods, paths, len(assets)), dtype=float)
@@ -1373,20 +1326,9 @@ def simulate_returns(
             returns[period, mask, :] = draws
             previous_state_indices[path_indices] = state_index
 
-    return SimulationResult(
-        returns=returns,
-        regimes=(
-            regime_paths
-            if return_regime_codes
-            else _decode_regime_codes(regime_paths, model.states)
-        ),
-        assets=assets,
-        states=model.states.copy(),
-        frequency=model.frequency,
-        distribution="mnts",
-        transition_concentration=transition_concentration,
-        macro_paths=macro_paths,
-        macro_columns=(list(macro_dynamics["columns"]) if isinstance(macro_dynamics, Mapping) else []),
+    return _mnts_result(
+        returns, regime_paths, model, assets, return_regime_codes,
+        transition_concentration, macro_paths, macro_dynamics,
     )
 
 
