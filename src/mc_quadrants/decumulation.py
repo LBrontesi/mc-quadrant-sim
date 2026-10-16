@@ -13,7 +13,7 @@ DECUMULATION_TARGETS = {"survival", "preserve_initial", "minimum_bequest"}
 FREQUENCY_MONTHS = {"monthly": 1, "quarterly": 3, "annual": 12}
 
 
-def _finite_float(value: Any, name: str, *, minimum: float | None = None) -> float:
+def _finite_float(value: Any, name: str, *, minimum: float | None = None) -> float:  # Validate and convert an input to a finite float.
     try:
         result = float(value)
     except (TypeError, ValueError, OverflowError) as exc:
@@ -24,7 +24,7 @@ def _finite_float(value: Any, name: str, *, minimum: float | None = None) -> flo
     return result
 
 
-def _integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
+def _integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:  # Validate and convert an input to a bounded integer.
     numeric = _finite_float(value, name)
     integer = int(numeric)
     if not np.isclose(numeric, integer):
@@ -32,6 +32,10 @@ def _integer(value: Any, name: str, *, minimum: int, maximum: int) -> int:
     if not minimum <= integer <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}.")
     return integer
+
+
+def normalize_withdrawal_start_period(value: Any, periods: int) -> int:
+    return _integer(value, "withdrawal_start_period", minimum=1, maximum=periods)
 
 
 @dataclass(frozen=True)
@@ -45,21 +49,21 @@ class WithdrawalPhase:
     spending_multiplier: float = 1.0
 
     @property
-    def frequency_months(self) -> int:
+    def frequency_months(self) -> int:  # Return the number of months represented by this frequency.
         return FREQUENCY_MONTHS[self.frequency]
 
-    def due(self, month: int) -> bool:
+    def due(self, month: int) -> bool:  # Report whether this spending phase pays in the requested month.
         return (
             self.start_month <= month <= self.end_month
             and (month - self.start_month) % self.frequency_months == 0
         )
 
-    def annual_amount(self, *, safe_rate: float, initial_value: float, mode: str) -> float:
+    def annual_amount(self, *, safe_rate: float, initial_value: float, mode: str) -> float:  # Calculate the phase's annual spending base.
         if mode == "safe_rate":
             return initial_value * safe_rate * self.spending_multiplier
         return self.annual_real_amount
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:  # Serialize this configuration object for API metadata.
         return {
             "start_month": self.start_month,
             "end_month": self.end_month,
@@ -74,7 +78,7 @@ class OneTimeExpense:
     month: int
     real_amount: float
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:  # Serialize this configuration object for API metadata.
         return {"month": self.month, "real_amount": self.real_amount}
 
 
@@ -89,7 +93,7 @@ class GuardrailSettings:
     ceiling: float = 1.30
     skip_inflation_after_negative_real_return: bool = True
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:  # Serialize this configuration object for API metadata.
         return {
             "type": self.policy,
             "review_months": self.review_months,
@@ -112,7 +116,7 @@ class SafeRateSettings:
     maximum_rate: float = 0.25
     precision: float = 0.0005
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:  # Serialize this configuration object for API metadata.
         return {
             "objective": self.objective,
             "target_probability": self.target_probability,
@@ -136,14 +140,14 @@ class DecumulationPlan:
     legacy_nominal: bool = False
 
     @property
-    def policy(self) -> str:
+    def policy(self) -> str:  # Return the selected decumulation policy name.
         return self.guardrails.policy
 
     @property
-    def active(self) -> bool:
+    def active(self) -> bool:  # Report whether this plan has any effective spending activity.
         return self.enabled and bool(self.phases or self.one_time_expenses)
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:  # Serialize this configuration object for API metadata.
         return {
             "enabled": self.enabled,
             "mode": self.mode,
@@ -156,7 +160,7 @@ class DecumulationPlan:
         }
 
 
-def _parse_policy(raw: Any) -> GuardrailSettings:
+def _parse_policy(raw: Any) -> GuardrailSettings:  # Parse and validate decumulation guardrail settings.
     values: Mapping[str, Any]
     if isinstance(raw, Mapping):
         values = raw
@@ -213,7 +217,7 @@ def _parse_policy(raw: Any) -> GuardrailSettings:
     )
 
 
-def _parse_safe_rate(raw: Any, top_level: Mapping[str, Any]) -> SafeRateSettings:
+def _parse_safe_rate(raw: Any, top_level: Mapping[str, Any]) -> SafeRateSettings:  # Parse and validate safe-rate objective settings.
     values = raw if isinstance(raw, Mapping) else {}
     objective = str(
         values.get("objective", top_level.get("objective", "survival"))
@@ -275,12 +279,7 @@ def normalize_decumulation(
         return raw
     if raw is None:
         legacy = _finite_float(legacy_withdrawal, "withdrawal", minimum=0.0)
-        start = _integer(
-            legacy_start_period,
-            "withdrawal_start_period",
-            minimum=1,
-            maximum=periods,
-        )
+        start = normalize_withdrawal_start_period(legacy_start_period, periods)
         if np.isclose(legacy, 0.0):
             return DecumulationPlan(
                 annual_inflation_fallback=float(annual_inflation_fallback),
@@ -433,7 +432,7 @@ class SpendingController:
         initial_value: float,
         cpi: np.ndarray,
         safe_rate: float = 0.0,
-    ) -> None:
+    ) -> None:  # Initialize the path-aware spending controller state.
         self.plan = plan
         self.paths = int(paths)
         self.initial_value = float(initial_value)
@@ -447,13 +446,13 @@ class SpendingController:
         self.last_review_wealth = np.full(paths, initial_value, dtype=float)
         self.last_review_cpi = np.ones(paths, dtype=float)
 
-    def _phase_index(self, month: int) -> int:
+    def _phase_index(self, month: int) -> int:  # Find the spending phase active in a given month.
         for index, phase in enumerate(self.plan.phases):
             if phase.start_month <= month <= phase.end_month:
                 return index
         return -1
 
-    def request(self, month: int, wealth: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def request(self, month: int, wealth: np.ndarray) -> tuple[np.ndarray, np.ndarray]:  # Calculate path-specific withdrawal requests and guardrail events.
         wealth = np.asarray(wealth, dtype=float)
         if wealth.shape != (self.paths,):
             raise ValueError("wealth must have one value for every path.")
@@ -533,7 +532,7 @@ class SpendingController:
         return np.maximum(requested, 0.0), events
 
 
-def funded_amount(requested: np.ndarray, available: np.ndarray) -> np.ndarray:
+def funded_amount(requested: np.ndarray, available: np.ndarray) -> np.ndarray:  # Cap requested withdrawals at the cash available on each path.
     return np.minimum(np.maximum(requested, 0.0), np.maximum(available, 0.0))
 
 

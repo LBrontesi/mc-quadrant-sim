@@ -1,0 +1,16 @@
+alpha=0.5 lambda=0.5 Qu envelope=4
+Devroye round=-1 samples=1000000 ms=526.670542 mean=0.00211126376 variance=1.35817592
+Qu round=-1 samples=1000000 ms=134.741875 mean=0.000883396997 variance=1.35214879
+Qu round=0 samples=1000000 ms=134.65625 mean=0.000484356123 variance=1.34919949
+Devroye round=0 samples=1000000 ms=516.378917 mean=-0.000937600506 variance=1.34669504
+Devroye round=1 samples=1000000 ms=517.757541 mean=1.97858947e-05 variance=1.34976892
+Qu round=1 samples=1000000 ms=134.653708 mean=0.000271848825 variance=1.35948458
+Qu round=2 samples=1000000 ms=134.308292 mean=-0.000343903658 variance=1.35783049
+Devroye round=2 samples=1000000 ms=523.946625 mean=-0.0010334281 variance=1.35162804
+Devroye round=3 samples=1000000 ms=518.9075 mean=0.000603821153 variance=1.35495326
+Qu round=3 samples=1000000 ms=134.247209 mean=0.001207888 variance=1.35744208
+Qu round=4 samples=1000000 ms=134.733458 mean=-0.000793337431 variance=1.3491159
+Devroye round=4 samples=1000000 ms=520.844791 mean=-0.00274559905 variance=1.35388361
+Devroye median_ms=518.9075
+Qu median_ms=134.653708
+Expected NTS mean=0 variance=1.35355339

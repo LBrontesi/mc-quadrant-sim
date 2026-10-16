@@ -61,7 +61,7 @@ def _regularized_duration_hazards(exits, risk, min_duration, prior_strength, age
     return hazards
 
 
-def _contiguous_slices(index: pd.Index) -> list[slice]:
+def _contiguous_slices(index: pd.Index) -> list[slice]:  # Return contiguous slices for runs of equal labels.
     if len(index) == 0:
         return []
     if len(index) == 1 or not isinstance(index, pd.DatetimeIndex):
@@ -76,7 +76,7 @@ def _contiguous_slices(index: pd.Index) -> list[slice]:
     return [slice(int(start), int(stop)) for start, stop in zip(bounds[:-1], bounds[1:])]
 
 
-def _quadrant_signs(state: str) -> np.ndarray:
+def _quadrant_signs(state: str) -> np.ndarray:  # Return the growth and inflation signs encoded by a regime.
     growth = 1.0 if state.startswith("high_growth") else -1.0
     inflation = 1.0 if state.endswith("high_inflation") else -1.0
     return np.array([growth, inflation], dtype=float)
@@ -87,7 +87,7 @@ def _estimate_emissions(
     labels: pd.Series,
     states: list[str],
     prior_strength: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:  # Estimate state emission means and covariances with priors.
     dimensions = values.shape[1]
     global_mean = np.mean(values, axis=0)
     global_covariance = np.atleast_2d(np.cov(values, rowvar=False, ddof=1))
@@ -202,7 +202,7 @@ def _emission_log_densities(
     values: np.ndarray,
     means: np.ndarray,
     covariances: np.ndarray,
-) -> np.ndarray:
+) -> np.ndarray:  # Compute log emission densities for every observation and state.
     periods, dimensions = values.shape
     densities = np.empty((periods, len(means)), dtype=float)
     constant = dimensions * np.log(2.0 * np.pi)
@@ -219,7 +219,7 @@ def _emission_log_densities(
     return densities
 
 
-def _initial_exit_matrix(labels: pd.Series, states: list[str], smoothing: float) -> np.ndarray:
+def _initial_exit_matrix(labels: pd.Series, states: list[str], smoothing: float) -> np.ndarray:  # Estimate smoothed state exit destinations from observed labels.
     counts = np.full((len(states), len(states)), float(smoothing), dtype=float)
     np.fill_diagonal(counts, 0.0)
     clean = labels.dropna().astype(str)
@@ -256,7 +256,7 @@ def _forward_backward(
     np.ndarray,
     np.ndarray,
     np.ndarray,
-]:
+]:  # Run the hidden semi-Markov forward-backward recursion.
     periods, state_count = log_densities.shape
     duration_count = hazards.shape[1]
     offsets = np.max(log_densities, axis=1)
@@ -322,7 +322,7 @@ def _viterbi(
     hazards: np.ndarray,
     exit_matrix: np.ndarray,
     initial: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:  # Decode the most likely hidden semi-Markov state sequence.
     periods, state_count = log_densities.shape
     duration_count = hazards.shape[1]
     size = state_count * duration_count
@@ -367,7 +367,7 @@ def _summary_transition_matrix(
     hazards: dict[str, np.ndarray],
     exit_matrix: np.ndarray,
     min_duration: int,
-) -> tuple[pd.DataFrame, dict[str, float]]:
+) -> tuple[pd.DataFrame, dict[str, float]]:  # Convert duration hazards and exits into an ordinary transition matrix.
     expected = {
         state: expected_duration_from_hazards(hazards[state], min_duration=min_duration)
         for state in states

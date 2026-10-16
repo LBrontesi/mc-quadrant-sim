@@ -13,6 +13,19 @@ from mc_quadrants.types import SimulationResult
 ASSET_TICKERS = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
 
 
+@pytest.mark.parametrize("seed", [-1, 2**32, 1.5, True, "17"])
+def test_parameter_seed_rejects_invalid_values(seed):
+    with pytest.raises(ValueError, match="parameter_seed"):
+        api.scenario_kwargs({"weights": {"SPY": 1}, "parameter_seed": seed})
+
+
+def test_parameter_seed_and_larger_bank_pass_through_api():
+    kwargs = api.scenario_kwargs({"weights": {"SPY": 1}, "parameter_seed": 17, "parameter_draws": 128})
+    assert kwargs["parameter_seed"] == 17
+    assert kwargs["parameter_draws"] == 128
+    assert api.scenario_kwargs({"weights": {"SPY": 1}})["parameter_seed"] is None
+
+
 @pytest.mark.parametrize("separate_gross", [False, True])
 @pytest.mark.parametrize("macro_dimensions", [0, 2, 3, 5])
 def test_parallel_reporting_bands_match_serial_without_mutating_inputs(

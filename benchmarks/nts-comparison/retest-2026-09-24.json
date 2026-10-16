@@ -1,0 +1,86 @@
+[
+  {
+    "round": 0,
+    "implementation": "user",
+    "ms": 184.8,
+    "output": "Devroye -> Number of RVs generated 1000000 in 271.872 ms\nmean=-0.00123271 variance=1.34838\nQu -> Number of RVs generated 1000000 in 184.8 ms\n"
+  },
+  {
+    "round": 0,
+    "implementation": "monte_carlo",
+    "ms": 132.696,
+    "output": "132.696 ms, checksum 350.942\n"
+  },
+  {
+    "round": 1,
+    "implementation": "monte_carlo",
+    "ms": 133.231,
+    "output": "133.231 ms, checksum 350.942\n"
+  },
+  {
+    "round": 1,
+    "implementation": "user",
+    "ms": 201.844,
+    "output": "Devroye -> Number of RVs generated 1000000 in 277.386 ms\nmean=-0.00123271 variance=1.34838\nQu -> Number of RVs generated 1000000 in 201.844 ms\n"
+  },
+  {
+    "round": 2,
+    "implementation": "user",
+    "ms": 185.287,
+    "output": "Devroye -> Number of RVs generated 1000000 in 275.27 ms\nmean=-0.00123271 variance=1.34838\nQu -> Number of RVs generated 1000000 in 185.287 ms\n"
+  },
+  {
+    "round": 2,
+    "implementation": "monte_carlo",
+    "ms": 148.377,
+    "output": "148.377 ms, checksum 350.942\n"
+  },
+  {
+    "round": 3,
+    "implementation": "monte_carlo",
+    "ms": 133.947,
+    "output": "133.947 ms, checksum 350.942\n"
+  },
+  {
+    "round": 3,
+    "implementation": "user",
+    "ms": 185.179,
+    "output": "Devroye -> Number of RVs generated 1000000 in 278.658 ms\nmean=-0.00123271 variance=1.34838\nQu -> Number of RVs generated 1000000 in 185.179 ms\n"
+  },
+  {
+    "round": 4,
+    "implementation": "user",
+    "ms": 184.283,
+    "output": "Devroye -> Number of RVs generated 1000000 in 282.493 ms\nmean=-0.00123271 variance=1.34838\nQu -> Number of RVs generated 1000000 in 184.283 ms\n"
+  },
+  {
+    "round": 4,
+    "implementation": "monte_carlo",
+    "ms": 141.238,
+    "output": "141.238 ms, checksum 350.942\n"
+  },
+  {
+    "round": 5,
+    "implementation": "monte_carlo",
+    "ms": 189.321,
+    "output": "189.321 ms, checksum 350.942\n"
+  },
+  {
+    "round": 5,
+    "implementation": "user",
+    "ms": 188.289,
+    "output": "Devroye -> Number of RVs generated 1000000 in 287.423 ms\nmean=-0.00123271 variance=1.34838\nQu -> Number of RVs generated 1000000 in 188.289 ms\n"
+  },
+  {
+    "round": 6,
+    "implementation": "user",
+    "ms": 186.977,
+    "output": "Devroye -> Number of RVs generated 1000000 in 283.116 ms\nmean=-0.00123271 variance=1.34838\nQu -> Number of RVs generated 1000000 in 186.977 ms\n"
+  },
+  {
+    "round": 6,
+    "implementation": "monte_carlo",
+    "ms": 138.524,
+    "output": "138.524 ms, checksum 350.942\n"
+  }
+]

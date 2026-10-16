@@ -1,6 +1,6 @@
 "use strict";
 
-export function estimateSimulationResources({ periods, paths, assets }) {
+export function estimateSimulationResources({ periods, paths, assets }) { // Estimate memory and work for a simulation.
   const safePeriods = Math.max(1, Number(periods) || 1);
   const safePaths = Math.max(1, Number(paths) || 1);
   const safeAssets = Math.max(1, Number(assets) || 1);
@@ -12,7 +12,7 @@ export function estimateSimulationResources({ periods, paths, assets }) {
   };
 }
 
-export function formatWorkUnits(value) {
+export function formatWorkUnits(value) { // Format resource work units for display.
   if (value >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
   if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;

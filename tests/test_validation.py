@@ -160,7 +160,7 @@ def test_walk_forward_tail_validation_uses_selected_portfolio_weights():
 
     first_date = pd.Timestamp(result.splits.iloc[0]["date"])
     assert result.splits.iloc[0]["portfolio_return"] == pytest.approx(
-        returns.loc[first_date, "Stocks"]
+        np.expm1(returns.loc[first_date, "Stocks"])
     )
 
 
@@ -191,7 +191,7 @@ def test_walk_forward_bounds_default_refits(monkeypatch):
     def counted(*args, **kwargs):
         nonlocal calls
         calls += 1
-        assert kwargs["hsmm_max_iterations"] == 5
+        assert kwargs["hsmm_max_iterations"] == 30
         return original(*args, **kwargs)
 
     monkeypatch.setattr(validation, "calibrate_quadrant_model", counted)

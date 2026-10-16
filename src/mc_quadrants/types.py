@@ -17,7 +17,7 @@ class MNTSParameters:
     gaussian_correlation: pd.DataFrame
     estimation: dict[str, Any] = field(default_factory=dict)
 
-    def validate(self, assets: list[str]) -> None:
+    def validate(self, assets: list[str]) -> None:  # Validate this tax-policy contract and its portfolio constraints.
         if not np.isfinite(self.tail_index) or not 0 < self.tail_index < 2:
             raise ValueError("MNTS tail_index must be finite and between 0 and 2.")
         if not np.isfinite(self.tempering) or self.tempering <= 0:
@@ -64,13 +64,13 @@ class ScenarioModel:
     historical_returns: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     @property
-    def assets(self) -> list[str]:
+    def assets(self) -> list[str]:  # Return the asset names shared by the scenario states.
         if not self.states:
             raise ValueError("ScenarioModel must define at least one state.")
         first_state = self.states[0]
         return list(self.moments[first_state].mean.index)
 
-    def validate(self) -> None:
+    def validate(self) -> None:  # Validate this tax-policy contract and its portfolio constraints.
         if not self.states:
             raise ValueError("ScenarioModel must define at least one state.")
         if len(set(self.states)) != len(self.states):
@@ -140,7 +140,7 @@ class SimulationResult:
     macro_columns: list[str] = field(default_factory=list)
     native_portfolio: dict[str, Any] | None = None
 
-    def returns_frame(self) -> pd.DataFrame:
+    def returns_frame(self) -> pd.DataFrame:  # Return simulated asset returns as a labeled data frame.
         periods, paths, _ = self.returns.shape
         index = pd.MultiIndex.from_product(
             [range(periods), range(paths)],
@@ -149,5 +149,5 @@ class SimulationResult:
         flattened = self.returns.reshape(periods * paths, len(self.assets))
         return pd.DataFrame(flattened, index=index, columns=self.assets)
 
-    def regimes_frame(self) -> pd.DataFrame:
+    def regimes_frame(self) -> pd.DataFrame:  # Return simulated regime codes as a labeled data frame.
         return pd.DataFrame(self.regimes, columns=[f"path_{i}" for i in range(self.regimes.shape[1])])

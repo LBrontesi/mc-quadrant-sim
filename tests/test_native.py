@@ -132,6 +132,28 @@ def test_native_sampler_selection_rejects_unknown_algorithm():
         sample_mnts_subordinators_native(10, 1.5, 0.5, algorithm="unknown")
 
 
+@pytest.mark.parametrize("tail_index,tempering", [(1.0, 0.5), (1.5, 0.5), (1.9, 0.04), (1.1, 20.0)])
+def test_native_mnts_matches_joint_characteristic_function(tail_index, tempering):
+    inputs = _inputs(periods=1, paths=160_000)
+    inputs.update(
+        means=np.zeros((1, 2)),
+        volatilities=np.ones((1, 2)),
+        skewness=np.array([[-0.25, 0.15]]),
+        tail_indexes=np.array([tail_index]),
+        temperings=np.array([tempering]),
+    )
+    draws = simulate_parametric_native(**inputs)[0]
+    alpha = tail_index / 2.0
+    scale = np.exp(((1.0 - alpha) * np.log(tempering) - np.log(alpha)) / alpha)
+    tilt = tempering * scale
+    for argument in (np.array([0.2, 0.7]), np.array([1.0, -1.0]), np.array([-2.0, 0.5])):
+        drift = argument @ inputs["skewness"][0]
+        variance = argument @ inputs["gaussian_correlations"][0] @ argument
+        expected = np.exp(-1j * drift + tilt**alpha - (tilt + scale * (0.5 * variance - 1j * drift)) ** alpha)
+        observed = np.exp(1j * (draws @ argument)).mean()
+        assert abs(observed - expected) < 0.01
+
+
 def test_native_mnts_innovations_have_asymmetric_fat_tails():
     inputs = _inputs(periods=1, paths=250_000)
     inputs["skewness"] = np.array([[-0.65, 0.30]])

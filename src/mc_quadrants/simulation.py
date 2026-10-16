@@ -12,6 +12,7 @@ from mc_quadrants.decumulation import (
     funded_amount,
     inflation_index,
     normalize_decumulation,
+    normalize_withdrawal_start_period,
 )
 from mc_quadrants.matrix import nearest_correlation, nearest_psd
 from mc_quadrants.mnts import resolved_mnts_parameters, sample_mnts_subordinators
@@ -70,7 +71,7 @@ def stationary_distribution(transition_matrix: pd.DataFrame) -> pd.Series:
     return pd.Series(vector, index=states)
 
 
-def _rng(random_seed: int | None = None) -> np.random.Generator:
+def _rng(random_seed: int | None = None) -> np.random.Generator:  # Create the simulator's seeded random-number generator.
     return np.random.default_rng(random_seed)
 
 
@@ -239,14 +240,10 @@ def _batched_cholesky(values: np.ndarray, epsilon: float = 1e-10) -> np.ndarray:
         factors[:, column, column] = np.sqrt(np.maximum(diagonal, epsilon))
         if column + 1 >= dimension:
             continue
-        if column:
-            cross = np.einsum(
-                "ni,nki->nk",
-                previous,
-                factors[:, column + 1 :, :column],
-            )
-        else:
-            cross = 0.0
+        cross = (
+            np.einsum("ni,nki->nk", previous, factors[:, column + 1 :, :column])
+            if column else 0.0
+        )
         factors[:, column + 1 :, column] = (
             matrices[:, column + 1 :, column] - cross
         ) / factors[:, column, column, None]
@@ -257,7 +254,7 @@ def _transaction_cost_rate_paths(
     result: SimulationResult,
     transaction_cost_bps: float,
     multipliers: Mapping[str, float] | None,
-) -> np.ndarray | None:
+) -> np.ndarray | None:  # Build pathwise transaction-cost rates from regime states.
     if not multipliers:
         return None
     normalized = {str(state): float(value) for state, value in multipliers.items()}
@@ -524,7 +521,7 @@ def simulate_joint_regime_macro_paths(
         _prepare_macro_emissions(states, model.metadata.get("hsmm_emission_means"), model.metadata.get("hsmm_emission_covariances"))
         if model.metadata.get("macro_membership_model", "joint_emission") == "joint_emission" else None
     )
-    native_paths = simulate_regime_macro_native(
+    native_paths = None if dynamics.get("yield_dynamics") or dynamics.get("log_columns") or dynamics.get("stress_dynamics") else simulate_regime_macro_native(
         model, transition, starts, posterior, periods=periods, paths=paths, start_state=start_state,
         random_seed=random_seed, duration_model=duration_model, min_regime_duration=min_regime_duration,
         macro_dynamics=dynamics, emission_coefficients=emissions,
@@ -614,9 +611,21 @@ def simulate_joint_regime_macro_paths(
         else None
     )
 
+    cpi_dynamics = dynamics.get("cpi_dynamics")
+    cpi_history = model.metadata.get("cpi_process", {}).get("monthly_log_history")
+    cpi_ring = np.broadcast_to(np.asarray(cpi_history)[:, None], (12, paths)).copy() if cpi_dynamics else None
+    last_cpi = np.full(paths, cpi_dynamics["latest_monthly_log"]) if cpi_dynamics else None
+    yield_specifications = dynamics.get("yield_dynamics", {})
+    yield_drifts = {column: np.full(paths, specification["latest_drift"]) for column, specification in yield_specifications.items()}
+    stress = dynamics.get("stress_dynamics")
+    if stress:
+        from mc_quadrants.macro_stress import news_correction, update_stress
+        news = np.broadcast_to(stress["latest_news"], (paths, current_macro.shape[1])).copy()
+        stress_variance = np.full(paths, stress["latest_variance"])
     for period in range(periods):
         regime_paths[period] = current
         next_macro = np.empty_like(current_macro)
+        correction = news_correction(news, stress) if stress else np.zeros_like(current_macro)
         for state_index, state in enumerate(states):
             mask = current == state_index
             if not mask.any():
@@ -626,6 +635,8 @@ def simulate_joint_regime_macro_paths(
                 covariances[state],
                 size=int(mask.sum()),
             )
+            if stress:
+                shocks *= np.sqrt(stress_variance[mask, None])
             center = centers[state]
             centered_macro = current_macro[mask] - center
             if coefficient_paths is None:
@@ -636,7 +647,29 @@ def simulate_joint_regime_macro_paths(
                     centered_macro,
                     coefficient_paths[mask],
                 ) + shocks
+            if yield_specifications:
+                from mc_quadrants.yield_forecasts import step_yields
+                conditional = step_yields(current_macro[mask], next_macro[mask] - shocks,
+                    {column: drift[mask] for column, drift in yield_drifts.items()}, yield_specifications)
+                next_macro[mask] = conditional + shocks
+            next_macro[mask] += correction[mask]
+            if cpi_dynamics:
+                index = cpi_dynamics["index"]
+                mean = cpi_dynamics["state_centers"][state]
+                change = (mean + cpi_dynamics["persistence"] * (100 * last_cpi[mask] - mean) + correction[mask, index] + shocks[:, index]) / 100
+                slot = period % 12
+                annual_log = cpi_ring[:, mask].sum(axis=0) - cpi_ring[slot, mask] + change
+                next_macro[mask, index] = np.expm1(annual_log) / cpi_dynamics["yoy_scale"]
+                cpi_ring[slot, mask] = change
+                last_cpi[mask] = change
             macro_shocks[period, mask] = shocks
+        if stress:
+            news, stress_variance = update_stress(news, stress_variance, correction, macro_shocks[period], stress, current)
+        for column, specification in yield_specifications.items():
+            index = specification["index"]
+            change = next_macro[:, index] - current_macro[:, index]
+            alpha = specification["update_weight"]
+            yield_drifts[column] = (1 - alpha) * specification["damping"] * yield_drifts[column] + alpha * change
         if rate_index is not None and rate_bounds is not None:
             next_macro[:, rate_index] = np.clip(
                 next_macro[:, rate_index],
@@ -684,6 +717,9 @@ def simulate_joint_regime_macro_paths(
                 )
         current = following
     public_regimes = regime_paths if return_codes else _decode_regime_codes(regime_paths, states)
+    for column in dynamics.get("log_columns", []):
+        index = dynamics["columns"].index(column)
+        macro_paths[..., index] = np.exp(macro_paths[..., index])
     return public_regimes, macro_paths, macro_shocks
 
 
@@ -710,13 +746,16 @@ def simulate_returns(
     return_regime_codes: bool = False,
     native_threads: int = 1,
     native_portfolio_config: Mapping[str, object] | None = None,
+    volatility_model: str = "garch",
 ) -> SimulationResult:
     """Simulate four-state, regime-switching MNTS-GARCH asset returns.
 
     Every quadrant has its own multivariate normal tempered-stable parameters.
     A common tempered-stable subordinator creates joint tail dependence, while
     asset-specific skew parameters and a latent correlation matrix preserve the
-    calibrated first two moments. GARCH(1,1) is enabled by default.
+    calibrated first two moments. GARCH(1,1) is enabled by default. With
+    ``volatility_model="qarch"``, use a constrained 12-lag monthly quadratic
+    kernel on regime-normalized residuals, preserving memory across regimes.
 
     ``duration_model="semi_markov"`` draws regime run lengths from regularized
     state-specific duration hazards instead of the geometric lengths implied by
@@ -724,8 +763,8 @@ def simulate_returns(
 
     Conditional variance is re-anchored to a quadrant's calibrated level when
     a path changes state, preventing stale volatility from leaking across
-    macro regimes. The C++ backend is the production path; the Python sampler
-    is an exact but intentionally slower reference implementation.
+    macro regimes for GARCH. QARCH currently uses the slower Python return
+    sampler; native portfolio accounting remains available for both models.
     """
 
     distribution = str(distribution).lower().replace("-", "_")
@@ -742,7 +781,27 @@ def simulate_returns(
     if dcc_alpha + dcc_beta + dcc_asymmetry >= 1:
         raise ValueError("dcc_alpha + dcc_beta + dcc_asymmetry must be less than 1.")
 
+    volatility_model = str(volatility_model).strip().lower()
+    if volatility_model not in {"garch", "qarch"}:
+        raise ValueError("volatility_model must be 'garch' or 'qarch'.")
+    use_qarch = garch and volatility_model == "qarch"
+    if use_qarch:
+        if model.frequency not in {"M", "ME"}:
+            raise ValueError("This QARCH implementation requires monthly return data.")
+        # Native fused return kernels currently implement GARCH only. Portfolio
+        # accounting can still use its native backend after QARCH draws exist.
+        native_portfolio_config = None
+
     assets = model.assets
+
+    economic_metadata = model.metadata.get("economic_returns")
+    economic_stress = bool(economic_metadata and economic_metadata["assumptions"]["rate_stress"])
+    if economic_stress:
+        if not joint_macro:
+            raise ValueError("This model requires joint macro paths for its economic rate channel.")
+        # The compact fused kernel has no stateful yield/carry channel. Use the
+        # native return sampler plus the ordinary portfolio ledger instead.
+        native_portfolio_config = None
 
     macro_dynamics = model.metadata.get("macro_dynamics") if joint_macro else None
     macro_betas = (
@@ -751,7 +810,7 @@ def simulate_returns(
         else None
     )
 
-    def resolve_state_covariance(state: str) -> np.ndarray:
+    def resolve_state_covariance(state: str) -> np.ndarray:  # Resolve and validate one state's covariance matrix.
         if isinstance(macro_dynamics, Mapping):
             residuals = macro_dynamics.get("return_residual_covariances")
             if isinstance(residuals, Mapping) and state in residuals:
@@ -989,6 +1048,8 @@ def simulate_returns(
                             if model.metadata.get("inflation_col", "inflation") in macro_columns else -1
                         ),
                         "inflation_scale": 0.01 if macro_dynamics.get("inflation_is_percent", False) else 1.0,
+                        "cpi_monthly_log_history": model.metadata.get("cpi_process", {}).get("monthly_log_history"),
+                        "cpi_dynamics": macro_dynamics.get("cpi_dynamics"),
                         "rate_scale": 0.01 if macro_dynamics.get("rate_is_percent", False) else 1.0,
                     }
             if compact_requested:
@@ -1094,6 +1155,11 @@ def simulate_returns(
             return_codes=True,
             native_threads=native_threads,
         )
+        if economic_stress:
+            from mc_quadrants.economic_returns import economic_path_adjustment
+            adjustment = economic_path_adjustment(model, macro_paths)
+            macro_shocks = np.concatenate([macro_shocks, adjustment], axis=2)
+            macro_betas = np.vstack([macro_betas, np.eye(len(assets))])
     else:
         regime_paths = simulate_regime_paths(
             model,
@@ -1164,7 +1230,7 @@ def simulate_returns(
                 native_portfolio=fused_portfolio,
             )
 
-    native_returns = simulate_parametric_native(
+    native_returns = None if use_qarch else simulate_parametric_native(
         regime_codes=regime_paths,
         means=state_means,
         gaussian_correlation_cholesky=state_gaussian_correlation_cholesky,
@@ -1213,6 +1279,14 @@ def simulate_returns(
     if garch:
         conditional_variance = np.empty((paths, len(assets)), dtype=float)
 
+    if use_qarch:
+        from mc_quadrants.qarch import DEFAULT_WEIGHTS, LAGS, initial_history, kernel, variance_ratio
+        qarch_fit = model.metadata.get("dependence_fit", {}).get("qarch", {})
+        fitted_weights = qarch_fit.get("weights", DEFAULT_WEIGHTS)
+        qarch_kernel = kernel(fitted_weights if model.metadata.get("calibrate_dependence", True) else DEFAULT_WEIGHTS)
+        initial, qarch_observed = initial_history(qarch_fit, len(assets))
+        qarch_history = np.broadcast_to(initial, (paths, *initial.shape)).copy()
+
     dcc_q: np.ndarray | None = None
     previous_standardized: np.ndarray | None = None
     if dynamic_correlation:
@@ -1220,6 +1294,8 @@ def simulate_returns(
         previous_standardized = np.zeros((paths, len(assets)), dtype=float)
 
     for period in range(periods):
+        if use_qarch and period:
+            qarch_observed = min(qarch_observed + 1, LAGS)
         for state_index, state in enumerate(model.states):
             mask = regime_paths[period] == state_index
             if not mask.any():
@@ -1271,7 +1347,13 @@ def simulate_returns(
                 * state_gaussian_scales[state_index]
                 * gaussian_draws
             )
-            if garch:
+            if use_qarch:
+                ratios = variance_ratio(qarch_history[path_indices], qarch_kernel, qarch_observed)
+                normalized_residuals = standardized * np.sqrt(ratios)
+                residual_draws = normalized_residuals * state_volatilities[state_index]
+                qarch_history[path_indices, :, 1:] = qarch_history[path_indices, :, :-1]
+                qarch_history[path_indices, :, 0] = normalized_residuals
+            elif garch:
                 levels = state_volatilities[state_index] ** 2
                 if reanchored.any():
                     conditional_variance[path_indices[reanchored]] = levels
@@ -1534,19 +1616,9 @@ def simulate_portfolio_paths(
     if not np.isfinite(withdrawal) or withdrawal < 0:
         raise ValueError("withdrawal must be a finite, non-negative number.")
     periods = int(result.returns.shape[0])
-    try:
-        withdrawal_start_value = float(withdrawal_start_period)
-        withdrawal_start_period = int(withdrawal_start_value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("withdrawal_start_period must be an integer.") from exc
-    if not np.isfinite(withdrawal_start_value) or not np.isclose(
-        withdrawal_start_value, withdrawal_start_period
-    ):
-        raise ValueError("withdrawal_start_period must be an integer.")
-    if not 1 <= withdrawal_start_period <= periods:
-        raise ValueError(
-            "withdrawal_start_period must be between 1 and the simulation periods."
-        )
+    withdrawal_start_period = normalize_withdrawal_start_period(
+        withdrawal_start_period, periods
+    )
     decumulation_plan = normalize_decumulation(
         decumulation,
         periods=periods,
@@ -2027,19 +2099,7 @@ def _validate_wealth_risk_inputs(
         raise ValueError("wealth must contain only finite values.")
 
     periods, paths = wealth_values.shape
-    try:
-        withdrawal_start_value = float(withdrawal_start_period)
-        withdrawal_start_period = int(withdrawal_start_value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("withdrawal_start_period must be an integer.") from exc
-    if not np.isfinite(withdrawal_start_value) or not np.isclose(
-        withdrawal_start_value, withdrawal_start_period
-    ):
-        raise ValueError("withdrawal_start_period must be an integer.")
-    if not 1 <= withdrawal_start_period <= periods:
-        raise ValueError(
-            "withdrawal_start_period must be between 1 and the available periods."
-        )
+    withdrawal_start_period = normalize_withdrawal_start_period(withdrawal_start_period, periods)
     for name, rate_paths in (
         ("inflation_paths", inflation_paths), ("risk_free_paths", risk_free_paths),
     ):
@@ -2154,7 +2214,7 @@ def summarize_wealth_risk(
     log_return_count = 0
     downside_sum = 0.0
     downside_count = 0
-    block = max(1, int(4096))
+    block = 4096
     native_statistics = risk_path_statistics_native(
         wealth_values, real_contributions, real_withdrawals, periodic_risk_free, initial_value,
     )

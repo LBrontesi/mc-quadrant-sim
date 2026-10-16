@@ -1,6 +1,7 @@
 "use strict";
 
 import { postJSON } from "./api-client.js";
+import { setupDynamicExperience, refreshScenarioPreview, refreshAllocationPreview } from "./experience.js";
 
 /* ---------- Constants ---------- */
 
@@ -131,18 +132,18 @@ const state = {
 
 /* ---------- Helpers ---------- */
 
-const $ = (id) => document.getElementById(id);
+const $ = (id) => document.getElementById(id); // Select a DOM element by id.
 
-function fmt(value, digits = 2) {
+function fmt(value, digits = 2) { // Format a numeric value for display.
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "-";
   return Number(value).toFixed(digits);
 }
 
-function pct(value, digits = 1) {
+function pct(value, digits = 1) { // Format a decimal as a percentage.
   return fmt(value * 100, digits) + "%";
 }
 
-function quantileFromSorted(sorted, probability) {
+function quantileFromSorted(sorted, probability) { // Interpolate a quantile from sorted values.
   if (!sorted.length) return 0;
   const position = Math.max(0, Math.min(sorted.length - 1, probability * (sorted.length - 1)));
   const lower = Math.floor(position);
@@ -151,11 +152,11 @@ function quantileFromSorted(sorted, probability) {
   return sorted[lower] * (1 - weight) + sorted[upper] * weight;
 }
 
-function sampleQuantile(values, probability) {
+function sampleQuantile(values, probability) { // Compute a quantile from an unsorted sample.
   return quantileFromSorted([...values].sort((a, b) => a - b), probability);
 }
 
-function readFile(file) {
+function readFile(file) { // Read an uploaded file as text.
   return new Promise((resolve, reject) => {
     if (!file) return resolve(null);
     const reader = new FileReader();
@@ -165,7 +166,7 @@ function readFile(file) {
   });
 }
 
-function setStatus(el, message, isError = false) {
+function setStatus(el, message, isError = false) { // Update status text and error styling.
   el.textContent = message || "";
   el.style.color = isError ? "var(--danger)" : "var(--muted)";
 }
@@ -173,11 +174,11 @@ function setStatus(el, message, isError = false) {
 let overlayStartedAt = 0;
 let overlayTimer = null;
 
-function showOverlay(message, stage = "Preparing data and model inputs") {
+function showOverlay(message, stage = "Preparing data and model inputs") { // Show the simulation progress overlay.
   $("overlay-text").textContent = message || "Working...";
   $("overlay-stage").textContent = stage;
   overlayStartedAt = performance.now();
-  const updateElapsed = () => {
+  const updateElapsed = () => { // Update elapsed.
     const seconds = Math.max(0, Math.round((performance.now() - overlayStartedAt) / 1000));
     $("overlay-elapsed").textContent = `${seconds}s elapsed`;
   };
@@ -187,13 +188,13 @@ function showOverlay(message, stage = "Preparing data and model inputs") {
   $("overlay").classList.remove("hidden");
 }
 
-function hideOverlay() {
+function hideOverlay() { // Hide the simulation progress overlay.
   clearInterval(overlayTimer);
   overlayTimer = null;
   $("overlay").classList.add("hidden");
 }
 
-function notify(message, type = "info") {
+function notify(message, type = "info") { // Display a transient toast notification.
   const box = $("toast-container");
   const el = document.createElement("div");
   el.className = `toast toast-${type}`;
@@ -206,7 +207,7 @@ function notify(message, type = "info") {
   }, 4200);
 }
 
-function formatMetricValue(key, value, currency = "USD") {
+function formatMetricValue(key, value, currency = "USD") { // Format metric value for display.
   if (value === null || value === undefined || !Number.isFinite(Number(value))) return "-";
   const numeric = Number(value);
   if (key === "leverage_multiple") return `${numeric.toFixed(1)}x`;
@@ -220,7 +221,7 @@ function formatMetricValue(key, value, currency = "USD") {
   return numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function compactCurrency(value, currency = "USD") {
+function compactCurrency(value, currency = "USD") { // Format compact currency for display.
   try {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
@@ -233,7 +234,7 @@ function compactCurrency(value, currency = "USD") {
   }
 }
 
-function formatCurrency(value, currency = "USD") {
+function formatCurrency(value, currency = "USD") { // Format currency for display.
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return "-";
   try {
@@ -247,14 +248,18 @@ function formatCurrency(value, currency = "USD") {
   }
 }
 
-function animateMetric(el, target, key, currency) {
+function animateMetric(el, target, key, currency) { // Animate a metric from zero to its target.
   if (!Number.isFinite(Number(target))) {
     el.textContent = "-";
     return;
   }
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    el.textContent = formatMetricValue(key, target, currency);
+    return;
+  }
   const start = performance.now();
   const duration = 750;
-  function frame(now) {
+  function frame(now) { // Render one animation frame for a metric.
     const t = Math.min((now - start) / duration, 1);
     const eased = 1 - Math.pow(1 - t, 3);
     el.textContent = formatMetricValue(key, target * eased, currency);
@@ -263,16 +268,16 @@ function animateMetric(el, target, key, currency) {
   requestAnimationFrame(frame);
 }
 
-function defaultWeight(ticker) {
+function defaultWeight(ticker) { // Return the default weight for a ticker.
   const base = ticker.endsWith("_SIM") ? ticker.slice(0, -4) : ticker.endsWith("SIM") ? ticker.slice(0, -3) : ticker;
   return DEFAULT_WEIGHTS[base] ?? 0;
 }
 
-function downloadCSV(filename, text) {
+function downloadCSV(filename, text) { // Download text as a CSV file.
   downloadFile(filename, text, "text/csv;charset=utf-8");
 }
 
-function downloadFile(filename, text, mime) {
+function downloadFile(filename, text, mime) { // Create a browser download for text content.
   const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -282,22 +287,22 @@ function downloadFile(filename, text, mime) {
   URL.revokeObjectURL(url);
 }
 
-function toCSV(columns, rows) {
-  const escape = (value) => {
+function toCSV(columns, rows) { // Serialize table columns and rows as CSV.
+  const escape = (value) => { // Escape one CSV field when needed.
     const text = value === null || value === undefined ? "" : String(value);
     return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
   return [columns.join(","), ...rows.map((row) => row.map(escape).join(","))].join("\n");
 }
 
-function attachTooltip(container) {
+function attachTooltip(container) { // Attach reusable tooltip behavior to a chart.
   let tip = container.querySelector(".tooltip");
   if (!tip) {
     tip = document.createElement("div");
     tip.className = "tooltip hidden";
     container.appendChild(tip);
   }
-  const show = (x, y, html) => {
+  const show = (x, y, html) => { // Show a chart tooltip at a pointer position.
     tip.innerHTML = html;
     const maxX = container.clientWidth - 40;
     const left = Math.min(Math.max(x, 60), Math.max(maxX, 60));
@@ -305,14 +310,14 @@ function attachTooltip(container) {
     tip.style.top = Math.max(y, 8) + "px";
     tip.classList.remove("hidden");
   };
-  const hide = () => tip.classList.add("hidden");
+  const hide = () => tip.classList.add("hidden"); // Hide the chart tooltip.
   return { show, hide };
 }
 
-function setupExperience() {
+function setupExperience() { // Initialize setup experience.
   const progress = $("scroll-progress-bar");
   let scrollFrame = 0;
-  const updateScrollProgress = () => {
+  const updateScrollProgress = () => { // Update scroll progress.
     scrollFrame = 0;
     const available = Math.max(document.documentElement.scrollHeight - window.innerHeight, 1);
     progress.style.transform = `scaleX(${Math.min(Math.max(window.scrollY / available, 0), 1)})`;
@@ -344,7 +349,7 @@ function setupExperience() {
     switchTab(link.dataset.tabTarget);
   }));
 
-  const updateHeroPaths = () => {
+  const updateHeroPaths = () => { // Update hero paths.
     $("hero-path-count").textContent = Math.max(0, Number($("paths").value) || 0).toLocaleString();
   };
   $("paths").addEventListener("input", updateHeroPaths);
@@ -356,7 +361,7 @@ function setupExperience() {
 const SVG_NS = "http://www.w3.org/2000/svg";
 const MARGIN = { top: 12, right: 12, bottom: 26, left: 46 };
 
-function createSvg(width, height) {
+function createSvg(width, height) { // Create an SVG chart surface.
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("width", "100%");
@@ -365,7 +370,7 @@ function createSvg(width, height) {
   return svg;
 }
 
-function svgText(parent, x, y, text, cls = "", anchor = "middle") {
+function svgText(parent, x, y, text, cls = "", anchor = "middle") { // Append a labeled SVG text element.
   const el = document.createElementNS(SVG_NS, "text");
   el.setAttribute("x", x);
   el.setAttribute("y", y);
@@ -376,7 +381,7 @@ function svgText(parent, x, y, text, cls = "", anchor = "middle") {
   return el;
 }
 
-function drawAxes(svg, width, height, xTicks, yTicks, xLabel, yLabel) {
+function drawAxes(svg, width, height, xTicks, yTicks, xLabel, yLabel) { // Draw chart axes, gridlines, and labels.
   const grid = document.createElementNS(SVG_NS, "g");
   xTicks.forEach(([x, label]) => {
     const line = document.createElementNS(SVG_NS, "line");
@@ -404,7 +409,7 @@ function drawAxes(svg, width, height, xTicks, yTicks, xLabel, yLabel) {
   svg.appendChild(grid);
 }
 
-function niceTicks(min, max, count = 5) {
+function niceTicks(min, max, count = 5) { // Choose readable numeric chart ticks.
   const span = max - min || 1;
   const step = Math.pow(10, Math.floor(Math.log10(span / count)));
   const ticks = [];
@@ -413,60 +418,82 @@ function niceTicks(min, max, count = 5) {
   return ticks.length ? ticks : [min];
 }
 
-function lineChart(container, labels, series, options = {}) {
-  container.innerHTML = "";
-  if (!labels.length || !series.length) {
-    container.innerHTML = "<p class='status'>No values to chart.</p>";
-    return;
-  }
+function chartFrame(labels, min, max, options, {
+  yLabel, yFormatter, uniqueCategoryTicks = false, crosshairOpacity = 0,
+}) {
   const width = 560, height = 300;
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
-  let min = Infinity, max = -Infinity;
-  series.forEach((s) => s.values.forEach((v) => { if (v < min) min = v; if (v > max) max = v; }));
-  const pad = (max - min) * 0.08 || 1;
-  min -= pad; max += pad;
   const numericX = Boolean(options.numericX) && labels.every((value) => Number.isFinite(Number(value)));
   const xMin = numericX ? Number(labels[0]) : 0;
   const xMax = numericX ? Number(labels.at(-1)) : labels.length - 1;
-  const xScale = (i) => {
-    const value = numericX ? Number(labels[i]) : i;
-    return MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW;
-  };
-  const yScale = (v) => MARGIN.top + (1 - (v - min) / (max - min)) * plotH;
-  const svg = createSvg(width, height);
-  const xTicks = numericX
-    ? niceTicks(xMin, xMax, 5).map((value) => [MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW, value])
-    : niceTicks(0, labels.length - 1, 5).map((t) => [xScale(Math.round(t)), labels[Math.round(t)] ?? ""]);
-  const yFormatter = options.yFormatter || ((value) => value.toFixed(0));
+  const xScale = (index) => MARGIN.left + (
+    ((numericX ? Number(labels[index]) : index) - xMin) / Math.max(xMax - xMin, 1)
+  ) * plotW;
+  const yScale = (value) => MARGIN.top + (1 - (value - min) / (max - min)) * plotH;
   const xFormatter = options.xFormatter || ((value) => String(value));
-  const formattedXTicks = xTicks.map(([x, label]) => [x, xFormatter(label)]);
-  const yTicks = niceTicks(min, max, 5).map((v) => [yScale(v), yFormatter(v)]);
-  drawAxes(
-    svg,
-    plotW,
-    plotH,
-    formattedXTicks,
-    yTicks,
-    options.xLabel || "Period",
-    options.yLabel || "Wealth",
-  );
+  const categoryTicks = niceTicks(0, labels.length - 1, 5).map(Math.round);
+  const xTicks = numericX
+    ? niceTicks(xMin, xMax, 5).map((value) => [
+      MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW,
+      xFormatter(value),
+    ])
+    : (uniqueCategoryTicks ? [...new Set(categoryTicks)] : categoryTicks)
+        .map((index) => [xScale(index), xFormatter(labels[index] ?? "")]);
+  const yTicks = niceTicks(min, max, 5).map((value) => [yScale(value), yFormatter(value)]);
+  const svg = createSvg(width, height);
+  drawAxes(svg, plotW, plotH, xTicks, yTicks, options.xLabel || "Period", yLabel);
   const crosshair = document.createElementNS(SVG_NS, "line");
   crosshair.setAttribute("y1", 0);
   crosshair.setAttribute("y2", plotH);
   crosshair.setAttribute("stroke", "var(--crosshair)");
   crosshair.setAttribute("stroke-dasharray", "4 4");
-  crosshair.setAttribute("opacity", "0.5");
-  crosshair.setAttribute("x1", 0);
-  crosshair.setAttribute("x2", 0);
+  crosshair.setAttribute("opacity", String(crosshairOpacity));
   svg.appendChild(crosshair);
+
+  return {
+    width, height, plotW, plotH, xScale, yScale, xFormatter, svg, crosshair,
+    pointer(event) {
+      const rect = svg.getBoundingClientRect();
+      return {
+        x: (event.clientX - rect.left) * (width / rect.width),
+        px: event.clientX - rect.left,
+        py: event.clientY - rect.top,
+      };
+    },
+    indexAt(x) {
+      const ratio = (x - MARGIN.left) / plotW;
+      if (!numericX) return Math.max(0, Math.min(labels.length - 1, Math.round(ratio * (labels.length - 1))));
+      const target = xMin + ratio * (xMax - xMin);
+      return labels.reduce((best, value, index) => (
+        Math.abs(Number(value) - target) < Math.abs(Number(labels[best]) - target) ? index : best
+      ), 0);
+    },
+  };
+}
+
+function lineChart(container, labels, series, options = {}) { // Draw a line chart with hover details.
+  container.innerHTML = "";
+  if (!labels.length || !series.length) {
+    container.innerHTML = "<p class='status'>No values to chart.</p>";
+    return;
+  }
+  let min = Infinity, max = -Infinity;
+  series.forEach((s) => s.values.forEach((v) => { if (v < min) min = v; if (v > max) max = v; }));
+  const pad = (max - min) * 0.08 || 1;
+  min -= pad; max += pad;
+  const yFormatter = options.yFormatter || ((value) => value.toFixed(0));
+  const frame = chartFrame(labels, min, max, options, {
+    yLabel: options.yLabel || "Wealth", yFormatter, crosshairOpacity: 0.5,
+  });
+  const { xScale, yScale, svg, crosshair } = frame;
   series.forEach((s) => {
     const points = s.values.map((v, i) => `${xScale(i)},${yScale(v)}`).join(" ");
     const path = document.createElementNS(SVG_NS, "polyline");
     path.setAttribute("points", points);
     path.setAttribute("fill", "none");
     path.setAttribute("stroke", s.color);
-    path.setAttribute("stroke-width", "2.2");
+    path.setAttribute("stroke-width", String(s.width || 2.2));
     path.setAttribute("stroke-linejoin", "round");
     if (s.dash) path.setAttribute("stroke-dasharray", s.dash);
     svg.appendChild(path);
@@ -481,29 +508,15 @@ function lineChart(container, labels, series, options = {}) {
   });
   container.appendChild(legend);
   const tooltip = attachTooltip(container);
-  const pointerPosition = (e) => {
-    const rect = svg.getBoundingClientRect();
-    return {
-      x: (e.clientX - rect.left) * (width / rect.width),
-      y: (e.clientY - rect.top) * (height / rect.height),
-      px: e.clientX - rect.left,
-      py: e.clientY - rect.top,
-    };
-  };
   svg.addEventListener("mousemove", (e) => {
-    const { x, px, py } = pointerPosition(e);
-    const ratio = (x - MARGIN.left) / plotW;
-    const index = numericX
-      ? labels.reduce((best, value, candidate) => (
-        Math.abs(Number(value) - (xMin + ratio * (xMax - xMin))) < Math.abs(Number(labels[best]) - (xMin + ratio * (xMax - xMin))) ? candidate : best
-      ), 0)
-      : Math.max(0, Math.min(labels.length - 1, Math.round(ratio * (labels.length - 1))));
+    const { x, px, py } = frame.pointer(e);
+    const index = frame.indexAt(x);
     crosshair.setAttribute("x1", xScale(index));
     crosshair.setAttribute("x2", xScale(index));
     crosshair.setAttribute("opacity", "1");
     const title = options.tooltipTitle
       ? options.tooltipTitle(labels[index])
-      : `${options.xLabel || "Period"} ${xFormatter(labels[index])}`;
+      : `${options.xLabel || "Period"} ${frame.xFormatter(labels[index])}`;
     const valueFormatter = options.valueFormatter || ((value) => fmt(value));
     const lines = [`<b>${escapeHtml(title)}</b>`];
     series.forEach((s) => lines.push(`<span style="color:${s.color}">${s.name}:</span> ${escapeHtml(valueFormatter(s.values[index]))}`));
@@ -512,15 +525,12 @@ function lineChart(container, labels, series, options = {}) {
   svg.addEventListener("mouseleave", () => { crosshair.setAttribute("opacity", "0"); tooltip.hide(); });
 }
 
-function bandChart(container, labels, band, options = {}) {
+function bandChart(container, labels, band, options = {}) { // Draw a percentile-band chart with hover details.
   container.innerHTML = "";
   if (!labels.length || !band.low?.length || !band.median?.length || !band.high?.length) {
     container.innerHTML = "<p class='status'>No values to chart.</p>";
     return;
   }
-  const width = 560, height = 300;
-  const plotW = width - MARGIN.left - MARGIN.right;
-  const plotH = height - MARGIN.top - MARGIN.bottom;
   const allValues = [...band.low, ...band.median, ...band.high].filter(Number.isFinite);
   let min = Math.min(...allValues), max = Math.max(...allValues);
   if (options.includeZero !== false) {
@@ -530,23 +540,11 @@ function bandChart(container, labels, band, options = {}) {
   const pad = (max - min) * 0.08 || 0.01;
   min -= pad;
   max += pad;
-  const numericX = Boolean(options.numericX) && labels.every((value) => Number.isFinite(Number(value)));
-  const xMin = numericX ? Number(labels[0]) : 0;
-  const xMax = numericX ? Number(labels.at(-1)) : labels.length - 1;
-  const xScale = (index) => {
-    const value = numericX ? Number(labels[index]) : index;
-    return MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW;
-  };
-  const yScale = (value) => MARGIN.top + (1 - (value - min) / (max - min)) * plotH;
   const yFormatter = options.yFormatter || ((value) => value.toFixed(2));
-  const xFormatter = options.xFormatter || ((value) => String(value));
-  const svg = createSvg(width, height);
-  const xTicks = numericX
-    ? niceTicks(xMin, xMax, 5).map((value) => [MARGIN.left + ((value - xMin) / Math.max(xMax - xMin, 1)) * plotW, xFormatter(value)])
-    : [...new Set(niceTicks(0, labels.length - 1, 5).map(Math.round))]
-        .map((index) => [xScale(index), xFormatter(labels[index])]);
-  const yTicks = niceTicks(min, max, 5).map((value) => [yScale(value), yFormatter(value)]);
-  drawAxes(svg, plotW, plotH, xTicks, yTicks, options.xLabel || "Period", options.yLabel || "Value");
+  const frame = chartFrame(labels, min, max, options, {
+    yLabel: options.yLabel || "Value", yFormatter, uniqueCategoryTicks: true,
+  });
+  const { xScale, yScale, svg, crosshair } = frame;
 
   const area = document.createElementNS(SVG_NS, "polygon");
   const upper = band.high.map((value, index) => `${xScale(index)},${yScale(value)}`);
@@ -569,13 +567,6 @@ function bandChart(container, labels, band, options = {}) {
     path.setAttribute("stroke-linejoin", "round");
     svg.appendChild(path);
   });
-  const crosshair = document.createElementNS(SVG_NS, "line");
-  crosshair.setAttribute("y1", 0);
-  crosshair.setAttribute("y2", plotH);
-  crosshair.setAttribute("stroke", "var(--crosshair)");
-  crosshair.setAttribute("stroke-dasharray", "4 4");
-  crosshair.setAttribute("opacity", "0");
-  svg.appendChild(crosshair);
   container.appendChild(svg);
 
   const legend = document.createElement("div");
@@ -587,30 +578,24 @@ function bandChart(container, labels, band, options = {}) {
   const tooltip = attachTooltip(container);
   const valueFormatter = options.valueFormatter || yFormatter;
   svg.addEventListener("mousemove", (event) => {
-    const rect = svg.getBoundingClientRect();
-    const x = (event.clientX - rect.left) * (width / rect.width);
-    const ratio = (x - MARGIN.left) / plotW;
-    const index = numericX
-      ? labels.reduce((best, value, candidate) => (
-        Math.abs(Number(value) - (xMin + ratio * (xMax - xMin))) < Math.abs(Number(labels[best]) - (xMin + ratio * (xMax - xMin))) ? candidate : best
-      ), 0)
-      : Math.max(0, Math.min(labels.length - 1, Math.round(ratio * (labels.length - 1))));
+    const { x, px, py } = frame.pointer(event);
+    const index = frame.indexAt(x);
     crosshair.setAttribute("x1", xScale(index));
     crosshair.setAttribute("x2", xScale(index));
     crosshair.setAttribute("opacity", "1");
     const title = options.tooltipTitle
       ? options.tooltipTitle(labels[index])
-      : `${options.xLabel || "Period"} ${xFormatter(labels[index])}`;
+      : `${options.xLabel || "Period"} ${frame.xFormatter(labels[index])}`;
     tooltip.show(
-      event.clientX - rect.left,
-      event.clientY - rect.top,
+      px,
+      py,
       `<b>${escapeHtml(title)}</b><br>${escapeHtml(labelsForBand[0])}: ${escapeHtml(valueFormatter(band.low[index]))}<br>${escapeHtml(labelsForBand[1])}: ${escapeHtml(valueFormatter(band.median[index]))}<br>${escapeHtml(labelsForBand[2])}: ${escapeHtml(valueFormatter(band.high[index]))}`,
     );
   });
   svg.addEventListener("mouseleave", () => { crosshair.setAttribute("opacity", "0"); tooltip.hide(); });
 }
 
-function barChart(container, items, options = {}) {
+function barChart(container, items, options = {}) { // Draw a bar chart with hover details.
   container.innerHTML = "";
   const width = 560, height = 280;
   const plotW = width - MARGIN.left - MARGIN.right;
@@ -646,14 +631,14 @@ function barChart(container, items, options = {}) {
   container.appendChild(svg);
 }
 
-function heatmap(container, labels, values, domain, title) {
+function heatmap(container, labels, values, domain, title) { // Draw a correlation-style heatmap.
   container.innerHTML = "";
   const n = labels.length;
   const width = 460, height = 460;
   const size = Math.min((width - 60) / n, (height - 60) / n);
   const svg = createSvg(width, height);
   const x0 = 56, y0 = 10;
-  const colorFor = (value) => {
+  const colorFor = (value) => { // Handle color for.
     const t = (value - domain[0]) / (domain[1] - domain[0]);
     if (t <= 0.5) {
       const k = t / 0.5;
@@ -696,7 +681,7 @@ function heatmap(container, labels, values, domain, title) {
   container.appendChild(svg);
 }
 
-function scatterChart(container, points, xLabel, yLabel, legend = null, options = {}) {
+function scatterChart(container, points, xLabel, yLabel, legend = null, options = {}) { // Draw a scatter chart with optional legend entries.
   container.innerHTML = "";
   if (!points.length) {
     container.innerHTML = "<p class='status'>No drawdown episodes to chart.</p>";
@@ -712,8 +697,8 @@ function scatterChart(container, points, xLabel, yLabel, legend = null, options 
   const xPad = (xMax - xMin) * 0.1 || 1;
   const yPad = (yMax - yMin) * 0.1 || 1;
   xMin -= xPad; xMax += xPad; yMin -= yPad; yMax += yPad;
-  const xScale = (v) => MARGIN.left + ((v - xMin) / (xMax - xMin)) * plotW;
-  const yScale = (v) => MARGIN.top + (1 - (v - yMin) / (yMax - yMin)) * plotH;
+  const xScale = (v) => MARGIN.left + ((v - xMin) / (xMax - xMin)) * plotW; // Handle x scale.
+  const yScale = (v) => MARGIN.top + (1 - (v - yMin) / (yMax - yMin)) * plotH; // Handle y scale.
   const svg = createSvg(width, height);
   const xFormatter = options.xFormatter || ((value) => value.toFixed(1));
   const yFormatter = options.yFormatter || ((value) => value.toFixed(1));
@@ -758,7 +743,7 @@ function scatterChart(container, points, xLabel, yLabel, legend = null, options 
   }
 }
 
-function histChart(container, values, bins = 45, label = "Terminal wealth", color = "#3b82f6") {
+function histChart(container, values, bins = 45, label = "Terminal wealth", color = "#3b82f6") { // Draw a histogram of sampled values.
   container.innerHTML = "";
   let min = Infinity;
   let max = -Infinity;
@@ -807,7 +792,7 @@ function histChart(container, values, bins = 45, label = "Terminal wealth", colo
   container.appendChild(svg);
 }
 
-function timelineChart(container, timelines) {
+function timelineChart(container, timelines) { // Draw regime timelines across simulated periods.
   container.innerHTML = "";
   const width = 560;
   const rowHeight = 26;
@@ -864,23 +849,23 @@ function timelineChart(container, timelines) {
 
 /* ---------- Inputs ---------- */
 
-function activeSource() {
+function activeSource() { // Handle active source.
   return $("csv-enabled").checked ? "csv" : "yahoo";
 }
 
-function parseMarketTickers() {
+function parseMarketTickers() { // Parse market tickers.
   return [...new Set(String($("yahoo-tickers").value || "")
     .split(/[,;\s]+/)
     .map((ticker) => ticker.trim().toUpperCase())
     .filter(Boolean))];
 }
 
-function setMarketTickers(tickers) {
+function setMarketTickers(tickers) { // Handle set market tickers.
   $("yahoo-tickers").value = [...new Set(tickers.map((ticker) => String(ticker).trim().toUpperCase()).filter(Boolean))].join(", ");
   $("yahoo-tickers").dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-function syncUniversePreset() {
+function syncUniversePreset() { // Update the interface for sync universe preset.
   const current = parseMarketTickers().join(",");
   document.querySelectorAll(".universe-preset").forEach((button) => {
     const selected = String(button.dataset.tickers || "").replaceAll(" ", "") === current;
@@ -889,7 +874,7 @@ function syncUniversePreset() {
   });
 }
 
-function renderTickerComposer() {
+function renderTickerComposer() { // Render ticker composer.
   const tickers = parseMarketTickers();
   const container = $("market-ticker-chips");
   container.innerHTML = "";
@@ -911,7 +896,7 @@ function renderTickerComposer() {
   syncUniversePreset();
 }
 
-function syncHistoryRange() {
+function syncHistoryRange() { // Update the interface for sync history range.
   const start = $("yahoo-start").value;
   const end = $("yahoo-end").value;
   const endDate = end ? new Date(`${end}T12:00:00`) : new Date();
@@ -934,14 +919,14 @@ function syncHistoryRange() {
   }
 }
 
-function syncMacroVintageExplainer() {
+function syncMacroVintageExplainer() { // Update the interface for sync macro vintage explainer.
   const pointInTime = $("macro-vintage").value === "initial_release";
   $("macro-vintage-explainer").innerHTML = pointInTime
     ? "Most realistic research mode. Uses historical releases to remove revision look-ahead and requires <code>FRED_API_KEY</code> on the server."
     : "Fastest setup. Release lags reduce timing bias, but revised observations still contain information unavailable at the time.";
 }
 
-function syncDataSourceUI() {
+function syncDataSourceUI() { // Update the interface for sync data source ui.
   const custom = activeSource() === "csv";
   const liveButton = $("data-source-live");
   const csvButton = $("data-source-csv");
@@ -959,7 +944,7 @@ function syncDataSourceUI() {
   else syncHistoryRange();
 }
 
-function enhanceSelects(root = document) {
+function enhanceSelects(root = document) { // Initialize enhance selects.
   root.querySelectorAll("select:not([data-enhanced])").forEach((select) => {
     const wrapper = document.createElement("span");
     wrapper.className = "select-control";
@@ -973,7 +958,7 @@ function enhanceSelects(root = document) {
   });
 }
 
-function setupMarketDataExperience() {
+function setupMarketDataExperience() { // Initialize setup market data experience.
   enhanceSelects();
   $("yahoo-tickers").addEventListener("input", renderTickerComposer);
   [$("yahoo-start"), $("yahoo-end")].forEach((input) => input.addEventListener("input", syncHistoryRange));
@@ -981,7 +966,7 @@ function setupMarketDataExperience() {
   document.querySelectorAll(".universe-preset").forEach((button) => button.addEventListener("click", () => {
     setMarketTickers(String(button.dataset.tickers || "").split(","));
   }));
-  const addTicker = () => {
+  const addTicker = () => { // Handle add ticker.
     const input = $("ticker-add");
     const additions = input.value.split(/[,;\s]+/).filter(Boolean);
     if (!additions.length) return;
@@ -1004,7 +989,7 @@ function setupMarketDataExperience() {
     }
     $("yahoo-start").dispatchEvent(new Event("input", { bubbles: true }));
   }));
-  const chooseSource = (custom) => {
+  const chooseSource = (custom) => { // Handle choose source.
     $("csv-enabled").checked = custom;
     $("custom-data-toggle").open = custom;
     syncDataSourceUI();
@@ -1020,7 +1005,7 @@ function setupMarketDataExperience() {
   syncDataSourceUI();
 }
 
-function resetResultsView() {
+function resetResultsView() { // Handle reset results view.
   ["growth", "returns", "drawdowns", "correlations", "monthly", "lab", "compare", "diagnostics", "data"]
     .forEach((name) => {
       const content = $(`${name}-content`);
@@ -1032,7 +1017,7 @@ function resetResultsView() {
   $("intro").classList.remove("hidden");
 }
 
-function toggleSourceGroups() {
+function toggleSourceGroups() { // Update the interface for toggle source groups.
   if (state.loadResult) {
     state.loadResult = null;
     state.results = null;
@@ -1040,19 +1025,19 @@ function toggleSourceGroups() {
     state.diagnostics = null;
     $("ticker-list").innerHTML = "";
     renderWeightEditor();
-    $("preset-apply").disabled = true;
+    $("preset-select").disabled = true;
     $("portfolio-status").textContent = "Data source changed — run the simulation again to refresh.";
     resetResultsView();
   }
   updateRunAvailability();
 }
 
-function thresholdPayload(selectId, fixedId) {
+function thresholdPayload(selectId, fixedId) { // Handle threshold payload.
   const mode = $(selectId).value;
   return mode === "fixed" ? `fixed:${$(fixedId).value}` : mode;
 }
 
-function gatherLoadPayload() {
+function gatherLoadPayload() { // Collect load payload.
   const source = activeSource();
   const payload = { source };
   if (source === "yahoo") {
@@ -1077,14 +1062,14 @@ function gatherLoadPayload() {
   return payload;
 }
 
-async function fillCsvPayload(payload) {
+async function fillCsvPayload(payload) { // Load fill csv payload.
   if (payload.source === "csv") {
     payload.csv_prices = await readFile($("csv-prices").files[0]);
     payload.csv_macro = await readFile($("csv-macro").files[0]);
   }
 }
 
-function defaultDecumulationPhase() {
+function defaultDecumulationPhase() { // Handle default decumulation phase.
   const periods = Math.max(1, Math.round(Number($("periods").value) || 120));
   const initial = Math.max(0, Number($("initial-value").value) || 100);
   return {
@@ -1096,7 +1081,7 @@ function defaultDecumulationPhase() {
   };
 }
 
-function syncDecumulationFromRows() {
+function syncDecumulationFromRows() { // Update the interface for sync decumulation from rows.
   if (!document.querySelector(".phase-row") && !document.querySelector(".event-row")) return;
   state.decumulation.phases = Array.from(document.querySelectorAll(".phase-row")).map((row, index) => {
     const prior = state.decumulation.phases[index] || {};
@@ -1116,7 +1101,7 @@ function syncDecumulationFromRows() {
   }));
 }
 
-function renderDecumulationEditor() {
+function renderDecumulationEditor() { // Render decumulation editor.
   const periods = Math.max(1, Math.round(Number($("periods").value) || 120));
   const mode = $("decumulation-mode").value;
   if (!state.decumulation.initialized) {
@@ -1165,7 +1150,7 @@ function renderDecumulationEditor() {
   }));
 }
 
-function gatherDecumulation() {
+function gatherDecumulation() { // Collect decumulation.
   syncDecumulationFromRows();
   const enabled = $("decumulation-enabled").checked;
   return {
@@ -1194,7 +1179,7 @@ function gatherDecumulation() {
   };
 }
 
-function gatherScenario() {
+function gatherScenario() { // Collect scenario.
   const quadrantModel = $("model-kind").value === "quadrant";
   const taxCountry = $("tax-country").value;
   const decumulationEnabled = $("decumulation-enabled").checked;
@@ -1245,6 +1230,7 @@ function gatherScenario() {
     duration_model: $("duration-model").value,
     min_regime_duration: Number($("min-regime-duration").value),
     garch: $("garch").checked,
+    volatility_model: $("volatility-model").value,
     calibrate_dependence: $("calibrate-dependence").checked,
     select_hyperparameters: quadrantModel && $("walk-forward").checked && $("select-hyperparameters").checked,
     walk_forward: $("walk-forward").checked,
@@ -1257,10 +1243,30 @@ function gatherScenario() {
     mean_prior_strength: Number($("mean-prior-strength").value),
     parameter_draws: quadrantModel ? Number($("parameter-draws").value) : 0,
     parameter_block_size: Number($("parameter-block-size").value),
+    parameter_seed: $("parameter-seed").value.trim() === "" ? null : Number($("parameter-seed").value),
     joint_macro: quadrantModel && $("joint-macro").checked,
     macro_model: $("macro-model").value,
     macro_parameter_uncertainty: $("macro-parameter-uncertainty").checked,
     structural_returns: $("structural-returns").checked,
+    economic_returns: quadrantModel && $("economic-returns").checked ? {
+      ...(() => {
+        const extra = JSON.parse($("economic-extra").value.trim() || "{}");
+        if (!extra || Array.isArray(extra) || typeof extra !== "object") {
+          throw new Error("Advanced economic assumptions must be a JSON object.");
+        }
+        return extra;
+      })(),
+      yield_model: $("economic-yield-model").value,
+      equity_rate_mode: $("economic-equity-mode").value,
+      macro_stress: $("economic-macro-stress").value,
+      return_anchors: $("economic-anchors").checked,
+      rate_stress: $("economic-rate-stress").checked,
+      equity_real_return: Number($("equity-real-anchor").value) / 100,
+      inflation_anchor: Number($("economic-inflation-anchor").value) / 100,
+      anchor_strength: Number($("economic-anchor-strength").value),
+      equity_rate_duration: Number($("equity-rate-duration").value),
+      bond_yield_col: $("economic-yield-column").value.trim(),
+    } : null,
     asset_classes: $("asset-classes").value,
     asset_durations: $("asset-durations").value,
     asset_income_yields: $("asset-income-yields").value,
@@ -1272,11 +1278,11 @@ function gatherScenario() {
   };
 }
 
-function updateResourceEstimate() {
+function updateResourceEstimate() { // Update resource estimate.
   $("run-btn").textContent = "Run analysis";
 }
 
-function validateScenario() {
+function validateScenario() { // Validate validate scenario.
   const errors = [];
   if (activeSource() === "csv" && (!$('csv-prices').files.length || !$('csv-macro').files.length)) {
     errors.push("Attach both asset and macro CSV files to use custom data.");
@@ -1356,7 +1362,7 @@ function validateScenario() {
   return errors;
 }
 
-function updateMethodologyControls() {
+function updateMethodologyControls() { // Update methodology controls.
   const isHMM = $("model-kind").value === "hmm";
   const legacy = ["legacy", "buy_hold"].includes($("rebalance").value);
   const italianTaxes = $("tax-country").value === "IT";
@@ -1381,12 +1387,15 @@ function updateMethodologyControls() {
   $("dynamic-correlation").disabled = false;
   $("parameter-draws").disabled = isHMM;
   $("transition-uncertainty").disabled = Number($("parameter-draws").value) > 0;
-  $("garch-hint").textContent = "GARCH is applied to the calibrated MNTS innovations in each macro quadrant.";
+  $("volatility-model").disabled = !$("garch").checked;
+  $("garch-hint").textContent = $("volatility-model").value === "qarch"
+    ? "Experimental QARCH uses 12 months of return history, including interactions across months. Slower than GARCH; improved forecasts are not yet established."
+    : "GARCH is applied to the calibrated MNTS innovations in each macro quadrant.";
   updateWithdrawalStartControl();
   updateRunAvailability();
 }
 
-function updateWithdrawalStartControl() {
+function updateWithdrawalStartControl() { // Update withdrawal start control.
   const fields = $("decumulation-fields");
   const hint = $("withdrawal-start-hint");
   const periods = Math.max(1, Math.round(Number($("periods").value) || 1));
@@ -1406,7 +1415,7 @@ function updateWithdrawalStartControl() {
   }
 }
 
-function gatherCorrelationTargets() {
+function gatherCorrelationTargets() { // Collect correlation targets.
   const targets = {};
   document.querySelectorAll("#corr-sliders input[type='range']").forEach((slider) => {
     targets[slider.dataset.state] = Number(slider.value);
@@ -1416,7 +1425,7 @@ function gatherCorrelationTargets() {
 
 /* ---------- Portfolio editor ---------- */
 
-function renderTickerChecklist(tickers, defaults) {
+function renderTickerChecklist(tickers, defaults) { // Render ticker checklist.
   const container = $("ticker-list");
   container.innerHTML = "";
   tickers.forEach((ticker) => {
@@ -1432,11 +1441,11 @@ function renderTickerChecklist(tickers, defaults) {
   });
 }
 
-function selectedTickers() {
+function selectedTickers() { // Handle selected tickers.
   return Array.from(document.querySelectorAll('#ticker-list input[type="checkbox"]:checked')).map((el) => el.value);
 }
 
-function defaultTaxMetadata(ticker) {
+function defaultTaxMetadata(ticker) { // Handle default tax metadata.
   const base = String(ticker).replace(/_SIM$/, "").replace(/SIM$/, "");
   const government = ["IEF", "TLT", "SHY", "TIP"].includes(base);
   return {
@@ -1450,7 +1459,7 @@ function defaultTaxMetadata(ticker) {
   };
 }
 
-function gatherTaxMetadata() {
+function gatherTaxMetadata() { // Collect tax metadata.
   const metadata = {};
   selectedTickers().forEach((ticker) => {
     metadata[ticker] = { ...(state.taxMetadata[ticker] || defaultTaxMetadata(ticker)) };
@@ -1458,7 +1467,7 @@ function gatherTaxMetadata() {
   return metadata;
 }
 
-function renderTaxInstrumentEditor() {
+function renderTaxInstrumentEditor() { // Render tax instrument editor.
   const container = $("tax-instrument-editor");
   if (!container) return;
   container.innerHTML = "";
@@ -1471,7 +1480,7 @@ function renderTaxInstrumentEditor() {
     symbol.textContent = ticker;
     row.appendChild(symbol);
 
-    const addSelect = (labelText, key, options) => {
+    const addSelect = (labelText, key, options) => { // Handle add select.
       const label = document.createElement("label");
       label.appendChild(document.createTextNode(labelText));
       const select = document.createElement("select");
@@ -1483,7 +1492,7 @@ function renderTaxInstrumentEditor() {
       select.addEventListener("change", () => { metadata[key] = select.value; updateRunAvailability(); });
       label.appendChild(select); row.appendChild(label);
     };
-    const addPercent = (labelText, key, max = 100) => {
+    const addPercent = (labelText, key, max = 100) => { // Handle add percent.
       const label = document.createElement("label");
       label.appendChild(document.createTextNode(labelText));
       const input = document.createElement("input");
@@ -1506,7 +1515,7 @@ function renderTaxInstrumentEditor() {
 
 let assetColors = {};
 
-function assetColor(ticker) {
+function assetColor(ticker) { // Handle asset color.
   if (!assetColors[ticker] && state.loadResult) {
     const index = state.loadResult.tickers.indexOf(ticker);
     assetColors[ticker] = STATE_PALETTE[Math.max(index, 0) % STATE_PALETTE.length];
@@ -1514,7 +1523,7 @@ function assetColor(ticker) {
   return assetColors[ticker] || "#3b82f6";
 }
 
-function renderWeightEditor() {
+function renderWeightEditor() { // Render weight editor.
   const selected = selectedTickers();
   const container = $("allocation-list");
   container.innerHTML = "";
@@ -1566,16 +1575,18 @@ function renderWeightEditor() {
   renderTaxInstrumentEditor();
 }
 
-function updateWeightTotal() {
+function updateWeightTotal() { // Update weight total.
   const selected = selectedTickers();
   const total = selected.reduce((sum, ticker) => sum + (Number(state.weights[ticker]) || 0), 0);
+  refreshAllocationPreview(selected.map((ticker) => ({ ticker, weight: Number(state.weights[ticker]) || 0, color: assetColor(ticker) })));
   const el = $("weight-total");
   el.textContent = `Total: ${total.toFixed(1)}% — the simulation normalizes this to 100%.`;
   el.style.color = total <= 0 ? "var(--danger)" : "var(--muted)";
   updateRunAvailability();
 }
 
-function updateRunAvailability() {
+function updateRunAvailability() { // Update run availability.
+  refreshScenarioPreview();
   updateResourceEstimate();
   const selected = selectedTickers();
   const total = selected.reduce((sum, ticker) => sum + (Number(state.weights[ticker]) || 0), 0);
@@ -1598,7 +1609,7 @@ function updateRunAvailability() {
   updateGuide();
 }
 
-function updateGuide() {
+function updateGuide() { // Update guide.
   const guideStatus = $("guide-status");
   if (!guideStatus) return;
   const selected = selectedTickers();
@@ -1622,41 +1633,72 @@ function updateGuide() {
   else guideStatus.textContent = "Scenario ready: inspect Results, Diagnostics, or Data.";
 }
 
-function gatherWeights() {
+function gatherWeights() { // Collect weights.
   const weights = {};
   selectedTickers().forEach((ticker) => { weights[ticker] = Number(state.weights[ticker]) || 0; });
   return weights;
 }
 
-function applyPreset() {
+function resolvePreset(preset, tickers) {
+  const weights = {};
+  const missing = [];
+  Object.entries(preset.weights).forEach(([base, weight]) => {
+    const ticker = tickers.find((candidate) => candidate === base)
+      || tickers.find((candidate) => tickerBase(candidate) === base);
+    if (ticker) weights[ticker] = weight;
+    else missing.push(base);
+  });
+  return { selected: Object.keys(weights), weights, missing };
+}
+
+function setPortfolio(portfolio) {
+  const selected = new Set(portfolio.selected);
+  document.querySelectorAll("#ticker-list input[type='checkbox']").forEach((checkbox) => {
+    checkbox.checked = selected.has(checkbox.value);
+  });
+  state.weights = { ...portfolio.weights };
+  renderWeightEditor();
+}
+
+async function applyPreset() {
   const name = $("preset-select").value;
   if (!name || !state.loadResult) return;
   const preset = state.loadResult.presets.find((p) => p.name === name);
   if (!preset) return;
-  const selected = selectedTickers();
-  const matched = {};
-  let total = 0;
-  selected.forEach((ticker) => {
-    const base = ticker.endsWith("_SIM") ? ticker.slice(0, -4) : ticker.endsWith("SIM") ? ticker.slice(0, -3) : ticker;
-    if (preset.weights[base] !== undefined) {
-      matched[ticker] = preset.weights[base];
-      total += preset.weights[base];
+  const select = $("preset-select");
+  const previousTickers = $("yahoo-tickers").value;
+  let expandedUniverse = false;
+  select.disabled = true;
+  try {
+    const portfolio = resolvePreset(preset, state.loadResult.tickers);
+    if (portfolio.missing.length) {
+      if (activeSource() === "csv") {
+        throw new Error(`${name} needs ${portfolio.missing.join(", ")}. Include these tickers in your CSV to use this portfolio.`);
+      }
+      setMarketTickers([...parseMarketTickers(), ...Object.keys(preset.weights)]);
+      expandedUniverse = true;
+      if (!await onLoad({ preset })) throw new Error(`Could not load all assets for ${name}. Your allocation was kept.`);
+    } else {
+      setPortfolio(portfolio);
     }
-  });
-  if (total <= 0) {
-    notify("Preset assets are not selected. Select matching tickers first.", "error");
-    return;
+    saveControls();
+    notify(`Applied ${name}`, "success");
+  } catch (error) {
+    if (expandedUniverse) {
+      $("yahoo-tickers").value = previousTickers;
+      $("yahoo-tickers").dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    select.value = "";
+    notify(error.message, "error");
+  } finally {
+    select.disabled = !state.loadResult;
   }
-  const factor = 100 / total;
-  selected.forEach((ticker) => { state.weights[ticker] = matched[ticker] !== undefined ? matched[ticker] * factor : 0; });
-  renderWeightEditor();
-  notify(`Applied ${name}`, "success");
 }
 
-function populatePresets(presets) {
+function populatePresets(presets) { // Handle populate presets.
   const select = $("preset-select");
   const current = select.value;
-  select.innerHTML = '<option value="">— choose —</option>';
+  select.innerHTML = '<option value="">Choose a portfolio…</option>';
   (presets || []).forEach((preset) => {
     const option = document.createElement("option");
     option.value = preset.name;
@@ -1664,12 +1706,12 @@ function populatePresets(presets) {
     select.appendChild(option);
   });
   select.value = current && presets.some((p) => p.name === current) ? current : "";
-  $("preset-apply").disabled = !select.value;
+  select.disabled = !(presets || []).length;
 }
 
 /* ---------- Tabs ---------- */
 
-function switchTab(tabId) {
+function switchTab(tabId) { // Update the interface for switch tab.
   document.querySelectorAll(".tab-btn").forEach((btn) => {
     const active = btn.dataset.tab === tabId;
     btn.classList.toggle("active", active);
@@ -1679,14 +1721,14 @@ function switchTab(tabId) {
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === tabId));
 }
 
-function focusResults() {
+function focusResults() { // Handle focus results.
   document.querySelectorAll(".settings-panel > details").forEach((details) => { details.open = false; });
   const tabs = $("result-tabs");
   tabs.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
   document.querySelector(`#result-tabs .tab-btn.active`)?.focus({ preventScroll: true });
 }
 
-function editScenario() {
+function editScenario() { // Handle edit scenario.
   const settings = $("simulation-settings");
   settings.open = true;
   settings.scrollIntoView({ behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" });
@@ -1695,12 +1737,12 @@ function editScenario() {
 
 /* ---------- Results rendering ---------- */
 
-function renderTables(preview) {
+function renderTables(preview) { // Render tables.
   renderTable("macro-preview", preview.macro);
   renderTable("returns-preview", preview.returns);
 }
 
-function renderTable(elementId, data) {
+function renderTable(elementId, data) { // Render table.
   const el = $(elementId);
   if (!data || !data.rows.length) { el.innerHTML = "<p class='status'>No data.</p>"; return; }
   el.innerHTML = "<table><thead><tr>" + data.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
@@ -1708,7 +1750,7 @@ function renderTable(elementId, data) {
     "</tbody></table>";
 }
 
-function renderCoverage(coverage) {
+function renderCoverage(coverage) { // Render coverage.
   const rows = Object.entries(coverage || {}).map(([ticker, range]) => [ticker, range.first, range.last]);
   $("coverage-table").innerHTML = rows.length
     ? "<table><thead><tr><th>Ticker</th><th>First</th><th>Last</th></tr></thead><tbody>" +
@@ -1720,7 +1762,7 @@ function renderCoverage(coverage) {
 const GRADE_LABELS = { A: "High confidence", B: "Moderate confidence", C: "Proxy / weak", X: "Not feasible" };
 const GRADE_COLORS = { A: "#10b981", B: "#f59e0b", C: "#f97316", X: "#ef4444" };
 
-function renderSyntheticReport(report) {
+function renderSyntheticReport(report) { // Render synthetic report.
   const container = $("synthetic-report");
   const entries = Object.entries(report || {});
   $("synthetic-card").classList.toggle("hidden", entries.length === 0);
@@ -1751,7 +1793,7 @@ const DISTRIBUTION_LABELS = {
   mnts: "MNTS-GARCH",
 };
 
-function renderScenarioChips(payload, data) {
+function renderScenarioChips(payload, data) { // Render scenario chips.
   const el = $("scenario-chips");
   if (!payload) { el.innerHTML = ""; return; }
   const chips = [];
@@ -1772,7 +1814,8 @@ function renderScenarioChips(payload, data) {
   if (payload.tax_country === "IT") chips.push(`Italy · ${String(payload.tax_regime).replace("italy_", "")}`);
   chips.push(data.terms === "real" ? "Real terms" : "Nominal");
   chips.push(data.currency);
-  chips.push(DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
+  chips.push(payload.garch && payload.volatility_model === "qarch"
+    ? "MNTS-QARCH" : DISTRIBUTION_LABELS[payload.distribution] || payload.distribution);
   chips.push(payload.model === "hmm" ? `HMM · ${payload.hmm_states} states` : "Quadrant model");
   chips.push(payload.duration_model === "semi_markov" ? "HSMM explicit durations" : "Markov durations");
   if (payload.probabilistic_regimes) chips.push("HSMM-filtered moment weights");
@@ -1785,7 +1828,7 @@ function renderScenarioChips(payload, data) {
   el.innerHTML = chips.map((text) => `<span class="chip">${escapeHtml(text)}</span>`).join("");
 }
 
-function renderMethodologyReport(data) {
+function renderMethodologyReport(data) { // Render methodology report.
   const methodology = data.methodology || {};
   const validation = data.validation?.summary || {};
   const validationAvailable = Boolean(data.validation?.summary);
@@ -1806,11 +1849,12 @@ function renderMethodologyReport(data) {
       ? "Macro parameters recalibrated once per bootstrap draw" : "Macro-parameter posterior draws"],
     [methodology.calibrate_dependence && methodology.dependence_fit?.status === "fitted",
       methodology.calibrate_dependence && methodology.dependence_fit?.status === "fitted"
-        ? "GARCH/ADCC estimated by constrained QML" : "Manual or short-history dependence coefficients"],
+        ? `${(methodology.volatility_model || "garch").toUpperCase()}/ADCC estimated by constrained QML` : "Manual or short-history dependence coefficients"],
     [Boolean(methodology.hyperparameter_selection), methodology.hyperparameter_selection
       ? `Mean prior: ${methodology.hyperparameter_selection.selected_parameters.mean_prior_strength}; duration prior: ${methodology.hyperparameter_selection.selected_parameters.duration_prior_strength ?? methodology.duration_prior_strength ?? 8}; separate final holdout`
       : "Hyperparameter selection not performed"],
     [Boolean(methodology.structural_returns), "Structural asset-class priors"],
+    [Boolean(methodology.economic_returns), "Experimental economic return anchors / yield channel"],
     [Boolean(methodology.state_dependent_liquidity), "Regime-dependent trading costs"],
     [methodology.rate_model === "joint_macro_path", "Stochastic policy-rate paths"],
     [Boolean(methodology.dynamic_correlation), "Asymmetric dynamic dependence"],
@@ -1827,7 +1871,7 @@ function renderMethodologyReport(data) {
   ).join("");
 }
 
-function renderPersistence(data) {
+function renderPersistence(data) { // Render persistence.
   const persistence = data.persistence;
   $("persistence-panel").classList.toggle("hidden", !persistence);
   if (!persistence) return;
@@ -1864,10 +1908,25 @@ function renderPersistence(data) {
     : "";
 }
 
-function renderParameterUncertainty(data) {
+function renderParameterUncertainty(data) { // Render parameter uncertainty.
   const uncertainty = data.parameter_uncertainty;
   $("parameter-uncertainty-card").classList.toggle("hidden", !uncertainty);
   if (!uncertainty) return;
+  const convergence = data.parameter_convergence;
+  const statusLabels = {
+    insufficient_models: "Too few parameter models to assess precision",
+    insufficient_paths: "Too few paths per parameter model to assess precision",
+    unstable: "Parameter sampling error exceeds the precision targets",
+    within_tolerance: "Outer parameter sampling error is within the tested tolerances",
+  };
+  const precision = convergence?.metrics;
+  $("parameter-convergence").textContent = convergence
+    ? `${statusLabels[convergence.status] || "Precision not assessed"}. ` +
+      `${convergence.parameter_models} models. ` +
+      `95% Monte Carlo interval for terminal median: ${formatMetricValue("p50", precision.terminal_median.mc_interval_95[0], data.currency)}–${formatMetricValue("p50", precision.terminal_median.mc_interval_95[1], data.currency)}; ` +
+      `for the drawdown P95: ${pct(precision.drawdown_p95.mc_interval_95[0], 1)}–${pct(precision.drawdown_p95.mc_interval_95[1], 1)}. ` +
+      "These measure simulation precision, not the range of investment outcomes. Check other parameter and path seeds too."
+    : "Parameter-ensemble precision has not been assessed.";
   const definitions = [
     ["annualized_return", "Annualized return", "percent"],
     ["annualized_volatility", "Annualized volatility", "percent"],
@@ -1885,7 +1944,7 @@ function renderParameterUncertainty(data) {
   }).join("");
 }
 
-function renderMacroPaths(data) {
+function renderMacroPaths(data) { // Render macro paths.
   const macro = data.macro_paths;
   $("macro-path-card").classList.toggle("hidden", !macro);
   const grid = $("macro-path-grid");
@@ -1908,7 +1967,7 @@ function renderMacroPaths(data) {
   });
 }
 
-function renderRegimeProbabilities(data) {
+function renderRegimeProbabilities(data) { // Render regime probabilities.
   const probabilities = (data.regime_probabilities || []).filter((item) => item.probability > 0);
   $("probability-panel").classList.toggle("hidden", probabilities.length === 0);
   if (!probabilities.length) return;
@@ -1919,35 +1978,35 @@ function renderRegimeProbabilities(data) {
   })), { digits: 3 });
 }
 
-function escapeHtml(text) {
+function escapeHtml(text) { // Handle escape html.
   return String(text).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 }
 
-function fmtNumber(value) {
+function fmtNumber(value) { // Format fmt number for display.
   return typeof value === "number" ? (Math.abs(value) >= 1000 ? value.toFixed(0) : value.toFixed(4)) : value;
 }
 
 const STATE_PALETTE = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899", "#84cc16"];
 
-function labelForState(state) {
+function labelForState(state) { // Handle label for state.
   if (REGIME_NAMES[state]) return REGIME_NAMES[state];
   if (String(state).startsWith("state_")) return `Regime ${String(state).slice(6)}`;
   return String(state);
 }
 
-function regimeNameToState(name) {
+function regimeNameToState(name) { // Handle regime name to state.
   return REGIME_ORDER.find((state) => REGIME_NAMES[state] === name) || null;
 }
 
-function colorForState(state, index = 0) {
+function colorForState(state, index = 0) { // Handle color for state.
   return REGIME_COLORS[state] || STATE_PALETTE[index % STATE_PALETTE.length];
 }
 
-function colorForLabel(label, index = 0) {
+function colorForLabel(label, index = 0) { // Handle color for label.
   return colorForState(regimeNameToState(label), index);
 }
 
-function renderMetricGrid(containerId, fields, data) {
+function renderMetricGrid(containerId, fields, data) { // Render metric grid.
   const grid = $(containerId);
   grid.innerHTML = "";
   fields.forEach(([key, label]) => {
@@ -1964,14 +2023,14 @@ function renderMetricGrid(containerId, fields, data) {
 
 const MONTH_ABBREV = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-function monthlyReturnColor(returnValue, maxAbs) {
+function monthlyReturnColor(returnValue, maxAbs) { // Handle monthly return color.
   const intensity = Math.min(Math.abs(returnValue) / maxAbs, 1);
   const alpha = 0.10 + intensity * 0.72;
   if (returnValue >= 0) return `rgba(16, 185, 129, ${alpha.toFixed(3)})`;
   return `rgba(239, 68, 68, ${alpha.toFixed(3)})`;
 }
 
-function renderMonthlyCalendar(data) {
+function renderMonthlyCalendar(data) { // Render monthly calendar.
   const container = $("chart-monthly");
   container.innerHTML = "";
   const returns = data.monthly_returns || [];
@@ -2028,22 +2087,22 @@ function renderMonthlyCalendar(data) {
 
 const METRIC_EXPLORER_META = {
   terminal_wealth: { label: "Terminal wealth", kind: "currency", color: "#b8d0d6" },
-  max_drawdown: { label: "Maximum drawdown", kind: "percent", color: "#d97706" },
+  max_drawdown: { label: "Maximum monthly-close drawdown", kind: "percent", color: "#d97706" },
   annualized_return: { label: "Annualized return", kind: "percent", color: "#a8b79b" },
   geometric_annualized_return: { label: "CAGR", kind: "percent", color: "#8ca4aa" },
   annualized_volatility: { label: "Annualized volatility", kind: "percent", color: "#8ca4aa" },
   sharpe_ratio: { label: "Sharpe ratio", kind: "number", color: "#b8d0d6" },
 };
 
-function formatExplorerValue(value, kind, currency) {
+function formatExplorerValue(value, kind, currency) { // Format explorer value for display.
   if (kind === "currency") return formatMetricValue("p50", value, currency);
   if (kind === "percent") return pct(value, 1);
   return fmt(value, 2);
 }
 
-function renderMetricExplorer(data) {
+function renderMetricExplorer(data) { // Render metric explorer.
   const select = $("metric-explorer-select");
-  const render = () => {
+  const render = () => { // Render the metric explorer.
     const key = select.value;
     const metric = data.metric_distributions?.[key];
     if (!metric) return;
@@ -2058,11 +2117,11 @@ function renderMetricExplorer(data) {
   render();
 }
 
-function renderRepresentativeScenarios(data) {
+function renderRepresentativeScenarios(data) { // Render representative scenarios.
   const scenarios = data.representative_scenarios || [];
   const selector = $("path-selector");
   selector.innerHTML = "";
-  const render = (scenario) => {
+  const render = (scenario) => { // Render one representative scenario.
     selector.querySelectorAll("button").forEach((button) => {
       const selected = button.dataset.scenario === scenario.label;
       button.classList.toggle("active", selected);
@@ -2088,7 +2147,7 @@ function renderRepresentativeScenarios(data) {
   if (initial) render(initial);
 }
 
-function renderPlanningCharts(data) {
+function renderPlanningCharts(data) { // Render planning charts.
   const goal = data.goal_curve;
   if (goal?.targets?.length) {
     lineChart(
@@ -2195,7 +2254,7 @@ function renderPlanningCharts(data) {
   }
 }
 
-function renderDecisionAnalytics(data) {
+function renderDecisionAnalytics(data) { // Render decision analytics.
   if (data.success) {
     lineChart($("chart-success"), data.success.periods, [
       { name: "Survival", color: "#a8b79b", values: data.success.survival },
@@ -2227,7 +2286,7 @@ function renderDecisionAnalytics(data) {
   }
 }
 
-function renderTaxYearReport(data) {
+function renderTaxYearReport(data) { // Render tax year report.
   const report = $("tax-year-report");
   const table = $("tax-year-table");
   if (!report || !table) return;
@@ -2257,7 +2316,7 @@ function renderTaxYearReport(data) {
   }).join("")}</tbody></table>`;
 }
 
-function renderRetirement(retirement, currency = state.results?.currency || "USD") {
+function renderRetirement(retirement, currency = state.results?.currency || "USD") { // Render retirement.
   if (!retirement?.enabled) {
     $("retirement-empty").classList.remove("hidden");
     $("retirement-content").classList.add("hidden");
@@ -2331,7 +2390,34 @@ function renderRetirement(retirement, currency = state.results?.currency || "USD
   }
 }
 
-function renderResults(data) {
+function renderReturnLaws(comparison) {
+  const card = $("return-law-card");
+  card.classList.toggle("hidden", !comparison?.rows?.length);
+  if (!comparison?.rows?.length) return;
+  const asset = $("return-law-asset"), regime = $("return-law-state"), view = $("return-law-view");
+  for (const [select, choices] of [[asset, comparison.assets], [regime, comparison.states]]) {
+    const previous = select.value;
+    select.replaceChildren(...choices.map((value) => new Option(value, value)));
+    if (choices.includes(previous)) select.value = previous;
+  }
+  const draw = () => {
+    const row = comparison.rows.find((r) => r.asset === asset.value && r.state === regime.value);
+    if (!row) return;
+    const cumulative = view.value === "cdf";
+    const frequency = {M: "monthly", ME: "monthly", D: "daily", W: "weekly", Q: "quarterly", Y: "annual"}[comparison.frequency] || comparison.frequency;
+    $("return-law-caption").textContent = `${comparison.samples.toLocaleString()} draws per law; ${frequency} log returns (%). Central 99.8% range of each law combined; full samples used for percentiles and cumulative probabilities.`;
+    lineChart($("chart-return-laws"), cumulative ? row.cdf_x : row.x, [
+      {name: "MNTS", values: row.mnts[view.value], color: "#3b82f6"},
+      {name: "Student’s t (df = 5)", values: row.student_t[view.value], color: "#f97316"},
+    ], {numericX: true, xLabel: "Log return (%)", yLabel: cumulative ? "Probability (%)" : "Density per percentage point",
+        xFormatter: (v) => Number(v).toFixed(1), yFormatter: (v) => v.toFixed(cumulative ? 1 : 3)});
+    $("return-law-stats").innerHTML = `<table><thead><tr><th>Law</th><th>P01</th><th>P05</th><th>Median</th><th>P95</th><th>P99</th><th>Chance of loss</th></tr></thead><tbody>${[["MNTS", row.mnts], ["Student’s t (df = 5)", row.student_t]].map(([label, law]) => `<tr><th>${label}</th>${[...law.quantiles, law.loss_probability].map((v) => `<td>${v.toFixed(2)}%</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  };
+  asset.onchange = draw; regime.onchange = draw; view.onchange = draw;
+  draw();
+}
+
+function renderResults(data) { // Render results.
   $("intro").classList.add("hidden");
   ["growth", "returns", "drawdowns", "correlations", "monthly"].forEach((name) => {
     const content = $(`${name}-content`);
@@ -2343,6 +2429,7 @@ function renderResults(data) {
   renderParameterUncertainty(data);
   renderPersistence(data);
   $("macro-chart-title").textContent = data.model_kind === "hmm" ? "HMM states / macro history" : "Macro quadrants";
+  renderReturnLaws(data.return_law_comparison);
   renderMetricGrid("metric-grid", METRIC_FIELDS, data);
   renderMetricGrid("goal-metric-grid", GOAL_METRIC_FIELDS, data);
   const hasCashFlows = Number(data.summary.periodic_contribution || 0) > 0
@@ -2391,12 +2478,22 @@ function renderResults(data) {
     { name: data.taxes?.enabled ? "After-tax median" : "Median", color: "#3b82f6", values: data.wealth.median },
     { name: "P95", color: "#10b981", values: data.wealth.p95 },
   ];
+  const representativeMedian = data.representative_scenarios?.find((scenario) => scenario.label === "median");
+  if (representativeMedian?.wealth?.length === data.wealth.periods.length) {
+    wealthSeries.push({
+      name: "One simulated path (median terminal)",
+      color: "#7c3aed",
+      values: representativeMedian.wealth,
+      dash: "5 4",
+      width: 1.8,
+    });
+  }
   if (data.taxes?.enabled && data.gross_wealth?.median) {
     wealthSeries.push({ name: "Before-tax median", color: "#94a3b8", values: data.gross_wealth.median, dash: "6 4" });
   }
   lineChart($("chart-wealth"), data.wealth.periods, wealthSeries);
   histChart($("chart-terminal"), data.terminal);
-  histChart($("chart-drawdowns"), data.drawdowns, 45, "Maximum drawdown", "#f97316");
+  histChart($("chart-drawdowns"), data.drawdowns, 45, "Maximum monthly-close drawdown", "#f97316");
   timelineChart($("chart-timeline"), [
     { label: "P05", color: "#f97316", states: data.regime_timelines.p05 },
     { label: "Median", color: "#3b82f6", states: data.regime_timelines.median },
@@ -2436,10 +2533,12 @@ function renderResults(data) {
     option.textContent = label;
     regimeSelect.appendChild(option);
   });
-  const drawCorrelation = () => {
+  const drawCorrelation = () => { // Draw the correlation matrix chart.
     const label = regimeSelect.value;
     const corr = data.correlations[label];
-    heatmap($("chart-correlation"), corr.labels, corr.values, [-1, 1], label);
+    const correlationLabel = data.methodology?.economic_returns?.assumptions?.rate_stress
+      ? `${label} — residual return correlations (yield effects excluded)` : label;
+    heatmap($("chart-correlation"), corr.labels, corr.values, [-1, 1], correlationLabel);
   };
   regimeSelect.addEventListener("change", drawCorrelation);
   drawCorrelation();
@@ -2467,6 +2566,38 @@ function renderResults(data) {
       `Switches/decade: ${fmt(summary.predicted_switches_per_decade, 1)} predicted vs ${fmt(summary.actual_switches_per_decade, 1)} observed · ` +
       `Duration log score: ${fmt(summary.duration_log_score_mean, 3)} · ` +
       `VaR breaches: ${pct(summary.var_95_breach_rate)} · ${summary.splits} splits.`;
+    const pathMetadata = validation.metadata || {};
+    $("validation-path-summary").textContent = pathMetadata.forecast_engine
+      ? `${pathMetadata.paths_per_origin} production paths per historical origin. ` +
+        "Lower CRPS, energy and variogram scores are better; positive advantage beats the iid MNTS benchmark. " +
+        "90% coverage should approach 90% across many origins. Windows overlap; non-overlapping counts show the limited horizon evidence. " +
+        (pathMetadata.real_wealth_outcome_basis === "observed_price_index"
+          ? "Real wealth is checked against observed CPI where complete."
+          : "Real-wealth checks need observed CPI levels; they are unavailable for this input.")
+      : "";
+    const horizonTable = validation.horizon_summary || { columns: [], rows: [] };
+    const horizonColumns = [
+      "horizon_months", "origins", "nonoverlapping_origins", "energy_advantage",
+      "marginal_crps", "variogram_score", "portfolio_crps_advantage",
+      "portfolio_return_coverage_90", "wealth_crps", "wealth_coverage_90",
+      "drawdown_crps", "joint_loss_brier", "inflation_crps", "cumulative_inflation_crps", "real_wealth_crps",
+      "real_wealth_coverage_90", "real_wealth_crps_count",
+    ];
+    const horizonIndexes = horizonColumns.map((column) => horizonTable.columns.indexOf(column)).filter((i) => i >= 0);
+    const horizonLabels = {
+      horizon_months: "Months", origins: "Origins", nonoverlapping_origins: "Non-overlapping windows",
+      energy_advantage: "Energy advantage", marginal_crps: "Asset CRPS", variogram_score: "Variogram score",
+      portfolio_crps_advantage: "Return CRPS advantage", portfolio_return_coverage_90: "Return 90% coverage",
+      wealth_crps: "Wealth CRPS", wealth_coverage_90: "Wealth 90% coverage", drawdown_crps: "Drawdown CRPS",
+      joint_loss_brier: "Joint loss Brier", inflation_crps: "Annual inflation CRPS",
+      cumulative_inflation_crps: "Cumulative inflation CRPS", real_wealth_crps: "Real wealth CRPS",
+      real_wealth_coverage_90: "Real wealth 90% coverage", real_wealth_crps_count: "CPI-complete origins",
+    };
+    renderTable("validation-horizons", {
+      columns: horizonIndexes.map((i) => horizonLabels[horizonTable.columns[i]]),
+      rows: horizonTable.rows.map((row) => horizonIndexes.map((i) =>
+        row[i] != null && horizonTable.columns[i].endsWith("_coverage_90") ? pct(row[i]) : row[i])),
+    });
     const preferredColumns = [
       "date", "actual_state", "predicted_state", "actual_switch",
       "predicted_switch_probability", "transition_brier_score",
@@ -2488,26 +2619,31 @@ function renderResults(data) {
 
 /* ---------- Handlers ---------- */
 
-async function onLoad() {
+async function onLoad({ preset = null } = {}) { // Handle load.
   const message = $("load-message");
   showOverlay("Loading market data...");
   try {
     const payload = await gatherLoadPayload();
     await fillCsvPayload(payload);
+    const data = await postJSON("/api/load", payload);
+    const portfolio = preset ? resolvePreset(preset, data.tickers) : state.pendingPortfolio
+      || (state.loadResult ? { selected: selectedTickers(), weights: gatherWeights() } : null);
+    if (portfolio?.missing?.length) {
+      throw new Error(`Missing portfolio assets: ${portfolio.missing.join(", ")}.`);
+    }
     state.loadPayload = payload;
     state.results = null;
     state.lastSimPayload = null;
-    const data = await postJSON("/api/load", payload);
     state.loadResult = data;
     setStatus(message, data.message);
     renderTickerChecklist(data.tickers, data.default_tickers);
     state.weights = {};
-    if (state.pendingPortfolio) {
-      const selected = new Set(state.pendingPortfolio.selected || []);
+    if (portfolio) {
+      const selected = new Set(portfolio.selected || []);
       document.querySelectorAll("#ticker-list input[type='checkbox']").forEach((checkbox) => {
         checkbox.checked = selected.has(checkbox.value);
       });
-      state.weights = { ...state.pendingPortfolio.weights };
+      state.weights = { ...portfolio.weights };
       state.pendingPortfolio = null;
     }
     assetColors = {};
@@ -2538,14 +2674,16 @@ async function onLoad() {
     $("data-content").classList.remove("hidden");
     switchTab("tab-data");
     updateGuide();
+    return data;
   } catch (error) {
     setStatus(message, error.message, true);
+    return null;
   } finally {
     hideOverlay();
   }
 }
 
-function gatherSimPayload() {
+function gatherSimPayload() { // Collect sim payload.
   return {
     ...state.loadPayload,
     ...gatherScenario(),
@@ -2554,7 +2692,7 @@ function gatherSimPayload() {
   };
 }
 
-async function onRun() {
+async function onRun() { // Handle run.
   const message = $("run-message");
   const button = $("run-btn");
   button.disabled = true;
@@ -2570,8 +2708,7 @@ async function onRun() {
     await fillCsvPayload(currentLoadPayload);
     const dataInputsChanged = JSON.stringify(currentLoadPayload) !== JSON.stringify(state.loadPayload);
     if (!state.loadResult || dataInputsChanged) {
-      await onLoad();
-      if (!state.loadResult) return;
+      if (!await onLoad()) return;
       showOverlay(
         "Running analysis...",
         `${Number($("paths").value).toLocaleString()} paths · ${Number($("periods").value)} months`,
@@ -2596,7 +2733,7 @@ async function onRun() {
   }
 }
 
-async function onSafeRate() {
+async function onSafeRate() { // Handle safe rate.
   const message = $("run-message");
   const button = $("safe-rate-btn");
   button.disabled = true;
@@ -2614,8 +2751,7 @@ async function onSafeRate() {
     await fillCsvPayload(currentLoadPayload);
     const dataInputsChanged = JSON.stringify(currentLoadPayload) !== JSON.stringify(state.loadPayload);
     if (!state.loadResult || dataInputsChanged) {
-      await onLoad();
-      if (!state.loadResult) return;
+      if (!await onLoad()) return;
       showOverlay("Calculating safe rate...", "Reusing one calibrated set of market paths for both policies");
     }
     const payload = gatherSimPayload();
@@ -2637,7 +2773,7 @@ async function onSafeRate() {
   }
 }
 
-function onDownloadSummary() {
+function onDownloadSummary() { // Handle download summary.
   if (!state.results) {
     notify("Run a simulation first.", "error");
     return;
@@ -2652,7 +2788,7 @@ function onDownloadSummary() {
   notify("Risk summary downloaded", "success");
 }
 
-function onDownloadDiagnostics() {
+function onDownloadDiagnostics() { // Handle download diagnostics.
   if (!state.diagnostics) {
     notify("Run a simulation first.", "error");
     return;
@@ -2665,7 +2801,7 @@ function onDownloadDiagnostics() {
   notify("Diagnostics downloaded", "success");
 }
 
-async function onDownloadWealth() {
+async function onDownloadWealth() { // Handle download wealth.
   if (!state.lastSimPayload) {
     notify("Run a simulation first.", "error");
     return;
@@ -2704,15 +2840,16 @@ const CONTROL_IDS = [
   "financing-inflation-sensitivity", "maintenance-margin",
   "tax-country", "tax-regime", "italy-wealth-tax",
   "italy-wealth-tax-mode", "tax-start-date",
-  "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
+  "volatility-model", "model-kind", "hmm-states", "threshold-window", "duration-model", "min-regime-duration",
   "regime-temperature", "regime-smoothing-window", "regime-hysteresis",
   "regime-confirmation-periods", "duration-prior-strength", "mean-prior-strength",
-  "parameter-draws", "parameter-block-size",
+  "parameter-draws", "parameter-block-size", "parameter-seed",
+  "economic-extra", "economic-yield-model", "economic-equity-mode", "economic-macro-stress", "equity-real-anchor", "economic-inflation-anchor", "economic-anchor-strength", "equity-rate-duration", "economic-yield-column",
   "macro-transition-weight", "macro-model", "asset-classes", "asset-durations", "asset-income-yields",
   "dcc-alpha", "dcc-beta", "dcc-asymmetry",
 ];
 
-function saveControls() {
+function saveControls() { // Handle save controls.
   syncDecumulationFromRows();
   const data = { schemaVersion: 14 };
   CONTROL_IDS.forEach((id) => {
@@ -2732,6 +2869,9 @@ function saveControls() {
   data.taxWrapperBenchmark = $("tax-wrapper-benchmark").checked;
   data.macroParameterUncertainty = $("macro-parameter-uncertainty").checked;
   data.structuralReturns = $("structural-returns").checked;
+  data.economicReturns = $("economic-returns").checked;
+  data.economicAnchors = $("economic-anchors").checked;
+  data.economicRateStress = $("economic-rate-stress").checked;
   data.stateDependentLiquidity = $("state-dependent-liquidity").checked;
   data.decumulationEnabled = $("decumulation-enabled").checked;
   data.decumulation = JSON.parse(JSON.stringify(state.decumulation));
@@ -2741,7 +2881,7 @@ function saveControls() {
   localStorage.setItem("mcq-controls", JSON.stringify(data));
 }
 
-function applyControlSnapshot(data) {
+function applyControlSnapshot(data) { // Handle apply control snapshot.
   CONTROL_IDS.forEach((id) => {
     const el = $(id);
     if (el && data[id] !== undefined) el.value = data[id];
@@ -2761,6 +2901,9 @@ function applyControlSnapshot(data) {
   if (data.taxWrapperBenchmark !== undefined) $("tax-wrapper-benchmark").checked = data.taxWrapperBenchmark;
   if (data.macroParameterUncertainty !== undefined) $("macro-parameter-uncertainty").checked = data.macroParameterUncertainty;
   if (data.structuralReturns !== undefined) $("structural-returns").checked = data.structuralReturns;
+  if (data.economicReturns !== undefined) $("economic-returns").checked = data.economicReturns;
+  if (data.economicAnchors !== undefined) $("economic-anchors").checked = data.economicAnchors;
+  if (data.economicRateStress !== undefined) $("economic-rate-stress").checked = data.economicRateStress;
   if (data.stateDependentLiquidity !== undefined) $("state-dependent-liquidity").checked = data.stateDependentLiquidity;
   if (data.decumulationEnabled !== undefined) $("decumulation-enabled").checked = data.decumulationEnabled;
   if (data.decumulation) state.decumulation = data.decumulation;
@@ -2774,7 +2917,7 @@ function applyControlSnapshot(data) {
   }
 }
 
-function restoreControls() {
+function restoreControls() { // Handle restore controls.
   try {
     const raw = localStorage.getItem("mcq-controls");
     if (raw) {
@@ -2833,20 +2976,20 @@ function restoreControls() {
 
 /* ---------- Theme ---------- */
 
-function applyTheme(theme) {
+function applyTheme(theme) { // Handle apply theme.
   document.body.classList.toggle("light", theme === "light");
   $("theme-toggle").textContent = theme === "light" ? "Dark theme" : "Light theme";
   localStorage.setItem("mcq-theme", theme);
 }
 
-function toggleTheme() {
+function toggleTheme() { // Update the interface for toggle theme.
   const next = document.body.classList.contains("light") ? "dark" : "light";
   applyTheme(next);
 }
 
 /* ---------- Convenience actions ---------- */
 
-function equalizeWeights() {
+function equalizeWeights() { // Handle equalize weights.
   const selected = selectedTickers();
   if (!selected.length) {
     notify("Select at least one ticker first.", "error");
@@ -2858,12 +3001,12 @@ function equalizeWeights() {
   notify("Weights equalized", "success");
 }
 
-function resetControls() {
+function resetControls() { // Handle reset controls.
   localStorage.removeItem("mcq-controls");
   location.reload();
 }
 
-function onDownloadJson() {
+function onDownloadJson() { // Handle download json.
   if (!state.results) {
     notify("Run a simulation first.", "error");
     return;
@@ -2884,11 +3027,11 @@ const LAB_PRESETS = {
   growth: { SPY: 80, IEF: 10, GLD: 10 },
 };
 
-function tickerBase(ticker) {
+function tickerBase(ticker) { // Handle ticker base.
   return String(ticker).replace(/_SIM$/, "").replace(/SIM$/, "");
 }
 
-function setLabPreset(name) {
+function setLabPreset(name) { // Handle set lab preset.
   const tickers = selectedTickers();
   const weights = {};
   if (name === "equal") {
@@ -2907,7 +3050,7 @@ function setLabPreset(name) {
   renderLabWeights();
 }
 
-function renderLabWeights() {
+function renderLabWeights() { // Render lab weights.
   const container = $("lab-weights");
   if (!container) return;
   const tickers = selectedTickers();
@@ -2933,14 +3076,14 @@ function renderLabWeights() {
   updateLabWeightTotal();
 }
 
-function updateLabWeightTotal() {
+function updateLabWeightTotal() { // Update lab weight total.
   const total = Object.values(state.labWeights).reduce((sum, value) => sum + (Number(value) || 0), 0);
   $("lab-weight-total").textContent = `${total.toFixed(1)}%`;
   $("lab-weight-total").style.color = total > 0 ? "var(--accent)" : "var(--danger)";
   $("portfolio-compare-btn").disabled = total <= 0;
 }
 
-function initializeResearchLab() {
+function initializeResearchLab() { // Initialize research lab.
   if (!$("lab-weights")) return;
   const tickers = selectedTickers();
   const sameUniverse = tickers.length && tickers.every((ticker) => Object.hasOwn(state.labWeights, ticker));
@@ -2948,7 +3091,7 @@ function initializeResearchLab() {
   else renderLabWeights();
 }
 
-function pairedSummaryRows(portfolioA, portfolioB) {
+function pairedSummaryRows(portfolioA, portfolioB) { // Handle paired summary rows.
   return [
     ["Median terminal wealth", "p50", true],
     ["Annualized return", "annualized_return", true],
@@ -2964,7 +3107,7 @@ function pairedSummaryRows(portfolioA, portfolioB) {
   ].map(([label, key, higherIsBetter]) => [label, portfolioA.summary[key], portfolioB.summary[key], portfolioB.summary[key] - portfolioA.summary[key], key, higherIsBetter]);
 }
 
-function renderPairedComparison(portfolioB) {
+function renderPairedComparison(portfolioB) { // Render paired comparison.
   const portfolioA = state.results;
   const count = Math.min(portfolioA.terminal.length, portfolioB.terminal.length);
   const differences = portfolioB.terminal.slice(0, count).map((value, index) => value - portfolioA.terminal[index]);
@@ -3038,7 +3181,7 @@ function renderPairedComparison(portfolioB) {
   state.pairedResults = portfolioB;
 }
 
-async function onPortfolioCompare() {
+async function onPortfolioCompare() { // Handle portfolio compare.
   if (!state.results || !state.lastSimPayload) return;
   const button = $("portfolio-compare-btn");
   const status = $("portfolio-compare-status");
@@ -3059,7 +3202,7 @@ async function onPortfolioCompare() {
   }
 }
 
-async function onRebalancingSensitivity() {
+async function onRebalancingSensitivity() { // Handle rebalancing sensitivity.
   if (!state.lastSimPayload) return;
   const button = $("rebalance-sensitivity-btn");
   const status = $("rebalance-status");
@@ -3094,12 +3237,12 @@ async function onRebalancingSensitivity() {
   }
 }
 
-function scenarioLibrary() {
+function scenarioLibrary() { // Handle scenario library.
   try { return JSON.parse(localStorage.getItem("mcq-scenario-library") || "[]"); }
   catch (error) { return []; }
 }
 
-function captureScenarioSnapshot() {
+function captureScenarioSnapshot() { // Handle capture scenario snapshot.
   saveControls();
   const controls = JSON.parse(localStorage.getItem("mcq-controls") || "{}");
   controls.csvEnabled = false;
@@ -3109,7 +3252,7 @@ function captureScenarioSnapshot() {
   return controls;
 }
 
-function refreshScenarioLibrary() {
+function refreshScenarioLibrary() { // Handle refresh scenario library.
   const select = $("saved-scenario-select");
   const selected = select.value;
   select.innerHTML = '<option value="">Choose a saved scenario</option>';
@@ -3122,7 +3265,7 @@ function refreshScenarioLibrary() {
   select.value = selected;
 }
 
-function saveScenarioToLibrary() {
+function saveScenarioToLibrary() { // Handle save scenario to library.
   const name = $("scenario-name").value.trim() || `Scenario ${new Date().toLocaleDateString()}`;
   const library = scenarioLibrary();
   library.unshift({ id: String(Date.now()), name, data: captureScenarioSnapshot() });
@@ -3132,20 +3275,20 @@ function saveScenarioToLibrary() {
   notify(`Saved “${name}” locally`, "success");
 }
 
-function encodeScenario(data) {
+function encodeScenario(data) { // Convert encode scenario.
   const bytes = new TextEncoder().encode(JSON.stringify(data));
   let binary = "";
   bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
 
-function decodeScenario(encoded) {
+function decodeScenario(encoded) { // Convert decode scenario.
   const normalized = encoded.replaceAll("-", "+").replaceAll("_", "/");
   const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="));
   return JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0))));
 }
 
-function applyScenarioSnapshot(data, reload = true) {
+function applyScenarioSnapshot(data, reload = true) { // Handle apply scenario snapshot.
   applyControlSnapshot(data);
   $("csv-enabled").checked = false;
   renderDecumulationEditor();
@@ -3156,7 +3299,7 @@ function applyScenarioSnapshot(data, reload = true) {
   if (reload) onLoad();
 }
 
-async function shareScenario() {
+async function shareScenario() { // Handle share scenario.
   const encoded = encodeScenario(captureScenarioSnapshot());
   const url = `${location.href.split("?")[0]}?scenario=${encoded}`;
   try {
@@ -3167,7 +3310,7 @@ async function shareScenario() {
   }
 }
 
-function loadSavedScenario() {
+function loadSavedScenario() { // Load saved scenario.
   const id = $("saved-scenario-select").value;
   const entry = scenarioLibrary().find((item) => item.id === id);
   if (!entry) return notify("Choose a saved scenario first.", "error");
@@ -3175,7 +3318,7 @@ function loadSavedScenario() {
   notify(`Loaded “${entry.name}”`, "success");
 }
 
-function deleteSavedScenario() {
+function deleteSavedScenario() { // Handle delete saved scenario.
   const id = $("saved-scenario-select").value;
   if (!id) return;
   localStorage.setItem("mcq-scenario-library", JSON.stringify(scenarioLibrary().filter((item) => item.id !== id)));
@@ -3183,7 +3326,7 @@ function deleteSavedScenario() {
   notify("Saved scenario deleted", "success");
 }
 
-function restoreScenarioFromUrl() {
+function restoreScenarioFromUrl() { // Handle restore scenario from url.
   const encoded = new URLSearchParams(location.search).get("scenario");
   if (!encoded) return;
   try {
@@ -3196,7 +3339,7 @@ function restoreScenarioFromUrl() {
 
 /* ---------- Init ---------- */
 
-function init() {
+function init() { // Initialize init.
   const today = new Date().toISOString().slice(0, 10);
   $("yahoo-end").value = today;
 
@@ -3234,7 +3377,7 @@ function init() {
     slider.value = DEFAULT_CORRELATIONS[state];
     slider.dataset.state = state;
     const output = document.createElement("output");
-    const update = () => { output.textContent = Number(slider.value).toFixed(2); };
+    const update = () => { output.textContent = Number(slider.value).toFixed(2); }; // Update the slider value label.
     slider.addEventListener("input", update);
     update();
     label.appendChild(document.createTextNode(REGIME_NAMES[state]));
@@ -3243,7 +3386,7 @@ function init() {
     sliderBox.appendChild(label);
   });
 
-  function syncCsvEnabled() {
+  function syncCsvEnabled() { // Update the interface for sync csv enabled.
     const hasFiles = $("csv-prices").files.length > 0 || $("csv-macro").files.length > 0;
     if (hasFiles) $("csv-enabled").checked = true;
     syncDataSourceUI();
@@ -3280,8 +3423,7 @@ function init() {
   $("download-diagnostics").addEventListener("click", onDownloadDiagnostics);
   $("download-wealth").addEventListener("click", onDownloadWealth);
   $("download-json").addEventListener("click", onDownloadJson);
-  $("preset-apply").addEventListener("click", applyPreset);
-  $("preset-select").addEventListener("change", () => { $("preset-apply").disabled = !$("preset-select").value; });
+  $("preset-select").addEventListener("change", applyPreset);
   $("theme-toggle").addEventListener("click", toggleTheme);
   $("equalize-btn").addEventListener("click", equalizeWeights);
   $("reset-btn").addEventListener("click", resetControls);
@@ -3333,6 +3475,7 @@ function init() {
   restoreScenarioFromUrl();
   refreshScenarioLibrary();
   setupExperience();
+  setupDynamicExperience();
   $("transition-uncertainty-output").textContent = Number($("transition-uncertainty").value).toFixed(2);
   $("macro-transition-weight-output").textContent = Number($("macro-transition-weight").value).toFixed(2);
   toggleSourceGroups();

@@ -29,6 +29,7 @@ from mc_quadrants.decumulation import (
 )
 from mc_quadrants.decumulation import (
     normalize_decumulation,
+    normalize_withdrawal_start_period,
     success_mask,
     wilson_interval,
 )
@@ -36,6 +37,7 @@ from mc_quadrants.native import native_fused_available
 from mc_quadrants.native_metrics import money_weighted_returns_native
 from mc_quadrants.pipeline import run_scenario
 from mc_quadrants.regimes import REGIME_ORDER
+from mc_quadrants.return_comparison import build_return_comparison
 from mc_quadrants.simulation import simulate_portfolio_paths
 from mc_quadrants.tax_policy import available_tax_countries, resolve_tax_selection
 from mc_quadrants.taxes import (
@@ -192,31 +194,29 @@ DEFAULT_EXPORT_PATHS = 1_000
 MAX_EXPORT_PATHS = 5_000
 
 
-def parse_tickers(raw_tickers: str | list[str]) -> list[str]:
+def parse_tickers(raw_tickers: str | list[str]) -> list[str]:  # Parse ticker input into unique uppercase symbols.
     raw_values = (
         re.split(r"[,;\s]+", str(raw_tickers).strip().upper())
         if isinstance(raw_tickers, str)
         else [str(ticker).strip().upper() for ticker in raw_tickers]
     )
-    parsed: list[str] = []
-    for ticker in raw_values:
-        if ticker and ticker not in parsed:
-            parsed.append(ticker)
-    return parsed
+    return list(dict.fromkeys(ticker for ticker in raw_values if ticker))
 
 
-def parse_pair_map(raw: str, kind: str) -> dict[str, str]:
-    parsed: dict[str, str] = {}
+def _parse_pairs(raw: str, kind: str, example: str) -> dict[str, str]:
+    parsed = {}
     for pair in re.split(r"[,;\s]+", str(raw).strip().upper()):
         if not pair:
             continue
-        if ":" not in pair:
-            raise ValueError(f"Invalid {kind} '{pair}'. Use ASSET:{kind.upper()}.")
-        asset, value = pair.split(":", 1)
-        if not asset or not value:
-            raise ValueError(f"Invalid {kind} '{pair}'. Use ASSET:{kind.upper()}.")
+        asset, separator, value = pair.partition(":")
+        if not separator or not asset or not value:
+            raise ValueError(f"Invalid {kind} '{pair}'. Use {example}.")
         parsed[asset] = value
     return parsed
+
+
+def parse_pair_map(raw: str, kind: str) -> dict[str, str]:  # Parse ASSET:VALUE pairs into a normalized mapping.
+    return _parse_pairs(raw, kind, f"ASSET:{kind.upper()}")
 
 
 def parse_expense_ratios(raw: str | Mapping[str, Any] | None) -> dict[str, float]:
@@ -224,17 +224,11 @@ def parse_expense_ratios(raw: str | Mapping[str, Any] | None) -> dict[str, float
 
     if not raw:
         return {}
-    if isinstance(raw, Mapping):
-        items = raw.items()
-    else:
-        items = []
-        for pair in re.split(r"[,;\s]+", str(raw).strip().upper()):
-            if not pair:
-                continue
-            if ":" not in pair:
-                raise ValueError(f"Invalid expense ratio '{pair}'. Use ASSET:PERCENT.")
-            asset, value = pair.split(":", 1)
-            items.append((asset, value))
+    items = (
+        raw.items()
+        if isinstance(raw, Mapping)
+        else _parse_pairs(raw, "expense ratio", "ASSET:PERCENT").items()
+    )
     ratios: dict[str, float] = {}
     for asset, raw_value in items:
         normalized_asset = str(asset).strip().upper()
@@ -252,7 +246,7 @@ def parse_numeric_map(
     kind: str,
     *,
     scale: float = 1.0,
-) -> dict[str, float]:
+) -> dict[str, float]:  # Parse numeric asset options and apply the requested scale.
     if not raw:
         return {}
     items = raw.items() if isinstance(raw, Mapping) else parse_pair_map(str(raw), kind).items()
@@ -265,7 +259,7 @@ def parse_numeric_map(
     return parsed
 
 
-def _currency_for_asset(asset: str, asset_currencies: Mapping[str, str]) -> str:
+def _currency_for_asset(asset: str, asset_currencies: Mapping[str, str]) -> str:  # Resolve an asset currency, including stitched-symbol aliases.
     normalized = str(asset).strip().upper()
     base_asset = normalized.removesuffix("_SIM").removesuffix("SIM")
     return asset_currencies.get(normalized, asset_currencies.get(base_asset, "USD"))
@@ -276,7 +270,7 @@ def prepare_fx_rates(
     selected_tickers: list[str],
     base_currency: str,
     currency_map: Mapping[str, str],
-) -> tuple[dict[str, str], pd.DataFrame | None]:
+) -> tuple[dict[str, str], pd.DataFrame | None]:  # Load foreign-exchange rates needed to convert selected assets.
     foreign_currencies = sorted(
         {_currency_for_asset(ticker, currency_map) for ticker in selected_tickers} - {base_currency}
     )
@@ -292,7 +286,7 @@ def prepare_fx_rates(
     return dict(currency_map), fx_rates
 
 
-def default_weights(ticker: str) -> float:
+def default_weights(ticker: str) -> float:  # Return the default portfolio weight for one ticker.
     defaults = {
         "SPY": 40.0,
         "IEF": 20.0,
@@ -309,23 +303,16 @@ def default_weights(ticker: str) -> float:
     return defaults.get(base, 0.0)
 
 
-def default_selected_tickers(tickers: list[str]) -> list[str]:
+def default_selected_tickers(tickers: list[str]) -> list[str]:  # Choose the initial ticker selection for the interface.
+    stitched = [ticker for ticker in tickers if ticker.endswith("SIM") and not ticker.endswith("_SIM")]
     preferred = [
         f"{ticker}SIM" if f"{ticker}SIM" in tickers else ticker
         for ticker in DEFAULT_TICKER_ORDER
         if ticker in tickers or f"{ticker}SIM" in tickers
     ]
     if preferred:
-        preferred.extend(
-            ticker
-            for ticker in tickers
-            if ticker.endswith("SIM") and not ticker.endswith("_SIM") and ticker not in preferred
-        )
-        return preferred
-    stitched = [ticker for ticker in tickers if ticker.endswith("SIM") and not ticker.endswith("_SIM")]
-    if stitched:
-        return stitched
-    return tickers[: min(4, len(tickers))]
+        return preferred + [ticker for ticker in stitched if ticker not in preferred]
+    return stitched or tickers[: min(4, len(tickers))]
 
 
 def correlation_overrides(
@@ -353,7 +340,7 @@ def correlation_overrides(
     return overrides, blend
 
 
-def _read_csv_text(content: str | None) -> pd.DataFrame | None:
+def _read_csv_text(content: str | None) -> pd.DataFrame | None:  # Read uploaded CSV text into a sorted, date-indexed frame.
     if not content:
         return None
     data = pd.read_csv(io.StringIO(content))
@@ -363,7 +350,7 @@ def _read_csv_text(content: str | None) -> pd.DataFrame | None:
     return data.set_index("Date").sort_index()
 
 
-def _normalize_columns(data: pd.DataFrame) -> pd.DataFrame:
+def _normalize_columns(data: pd.DataFrame) -> pd.DataFrame:  # Normalize frame column names for downstream lookups.
     normalized = data.copy()
     normalized.columns = [str(column).strip().upper() for column in normalized.columns]
     return normalized
@@ -371,7 +358,7 @@ def _normalize_columns(data: pd.DataFrame) -> pd.DataFrame:
 
 def load_data_source(
     payload: Mapping[str, Any],
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str], str, str, str]:
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str], str, str, str]:  # Load and validate market and macro data from the requested source.
     source = str(payload.get("source", "yahoo"))
     if source == "yahoo":
         tickers = parse_tickers(payload.get("tickers", []))
@@ -452,6 +439,9 @@ def load_data_source(
             returns = np.log1p(returns)
         elif asset_input not in {"Price levels", "Log returns", "Returns"}:
             raise ValueError("Asset input must be Price levels, Log returns, or Simple returns.")
+        price_index = None
+        if "price_index" in macro_data:
+            price_index = pd.to_numeric(macro_data.pop("price_index"), errors="coerce").resample("ME").last()
         available_date = None
         if "AvailableDate" in macro_data.columns:
             available_date = pd.to_datetime(macro_data.pop("AvailableDate"), errors="coerce")
@@ -460,6 +450,10 @@ def load_data_source(
             macro_data = macro_data.loc[available_date.notna()].copy()
             macro_data.index = pd.DatetimeIndex(available_date.dropna()).to_period("M").to_timestamp("M")
         macro_data = macro_data.resample("ME").last()
+        if price_index is not None:
+            macro_data.attrs["observed_price_index"] = {
+                str(date): float(value) for date, value in price_index.dropna().items()
+            }
         macro_data.attrs.update(
             {
                 "data_vintage": "user_point_in_time" if available_date is not None else "user_supplied",
@@ -488,7 +482,7 @@ def load_data_source(
     raise ValueError(f"Unknown data source: {source}")
 
 
-def _frame_preview(frame: pd.DataFrame, columns: list[str] | None = None, rows: int = 60) -> dict[str, Any]:
+def _frame_preview(frame: pd.DataFrame, columns: list[str] | None = None, rows: int = 60) -> dict[str, Any]:  # Build a bounded, JSON-friendly preview of a data frame.
     preview = frame.tail(rows)
     selected = list(preview.columns) if columns is None else columns
     records = preview.loc[:, [col for col in selected if col in preview.columns]].reset_index(names="Date")
@@ -501,7 +495,7 @@ def _frame_preview(frame: pd.DataFrame, columns: list[str] | None = None, rows: 
     }
 
 
-def _coverage(returns: pd.DataFrame) -> dict[str, dict[str, str]]:
+def _coverage(returns: pd.DataFrame) -> dict[str, dict[str, str]]:  # Summarize the first and last observation for each asset.
     coverage: dict[str, dict[str, str]] = {}
     for column in returns.columns:
         valid = returns[column].dropna()
@@ -521,11 +515,13 @@ def build_load_response(
     growth_col: str,
     inflation_col: str,
     message: str,
-) -> dict[str, Any]:
+) -> dict[str, Any]:  # Shape loaded data and metadata for the frontend.
     rate_col = macro.attrs.get("rate_col")
     macro_columns = [growth_col, inflation_col]
     if rate_col and rate_col in macro.columns:
         macro_columns.append(str(rate_col))
+    if "bond_yield" in macro.columns:
+        macro_columns.append("bond_yield")
     return {
         "ok": True,
         "tickers": tickers,
@@ -547,13 +543,13 @@ def build_load_response(
     }
 
 
-def _threshold_value(raw: Any) -> str | float:
+def _threshold_value(raw: Any) -> str | float:  # Convert a UI threshold value into the calibration form.
     if isinstance(raw, str) and raw.startswith("fixed:"):
         return float(raw.split(":", 1)[1])
     return raw if raw in {"median", "mean"} else float(raw)
 
 
-def _asset_count(payload: Mapping[str, Any]) -> int:
+def _asset_count(payload: Mapping[str, Any]) -> int:  # Count the assets described by a simulation payload.
     selected = parse_tickers(payload.get("selected_tickers", []))
     if selected:
         return len(selected)
@@ -571,6 +567,8 @@ def _native_fused_payload(payload: Mapping[str, Any]) -> bool:
             payload.get("tax_country"), payload.get("tax_regime")
         ).enabled
     except ValueError:
+        return False
+    if bool(payload.get("garch", True)) and str(payload.get("volatility_model", "garch")).lower() == "qarch":
         return False
     if not native_fused_available():
         return False
@@ -591,12 +589,10 @@ def _native_fused_payload(payload: Mapping[str, Any]) -> bool:
             and str(payload.get("rebalance", "monthly")).lower() != "legacy"
         )
     metadata = payload.get("asset_tax_metadata") or {}
-    if not isinstance(metadata, Mapping):
-        return False
-    return True
+    return isinstance(metadata, Mapping)
 
 
-def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
+def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:  # Validate and normalize an optional simulation chunk size.
     raw = payload.get("chunk_size")
     paths = int(payload.get("paths", 100_000))
     periods = int(payload.get("periods", 360))
@@ -615,7 +611,7 @@ def _chunk_size_value(payload: Mapping[str, Any]) -> int | None:
     return chunk_size
 
 
-def _workers_value(payload: Mapping[str, Any]) -> int:
+def _workers_value(payload: Mapping[str, Any]) -> int:  # Validate and normalize the requested worker count.
     raw = payload.get("workers")
     if raw is None or raw == "":
         native_fused = _native_fused_payload(payload)
@@ -660,7 +656,7 @@ def simulation_resource_estimate(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_simulation_size(payload: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_simulation_size(payload: Mapping[str, Any]) -> dict[str, Any]:  # Validate simulation dimensions against safe resource limits.
     estimate = simulation_resource_estimate(payload)
     if estimate["periods"] < 1 or estimate["periods"] > MAX_PERIODS:
         raise ValueError(f"periods must be between 1 and {MAX_PERIODS}.")
@@ -674,7 +670,7 @@ def _validate_simulation_size(payload: Mapping[str, Any]) -> dict[str, Any]:
     return estimate
 
 
-def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
+def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:  # Translate a frontend payload into simulation keyword arguments.
     _validate_simulation_size(payload)
     distribution = str(payload.get("distribution", "mnts")).lower().replace("-", "_")
     distribution = DISTRIBUTION_KEYS.get(distribution, distribution)
@@ -742,25 +738,19 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     if np.isclose(sum(weights.values()), 0.0):
         raise ValueError("Portfolio weights must have a non-zero sum.")
     expense_ratios = parse_expense_ratios(payload.get("expense_ratios"))
-    tax_selection = resolve_tax_selection(
-        payload.get("tax_country"),
-        payload.get("tax_regime"),
-    )
-    tax_country = tax_selection.country
-    tax_regime = tax_selection.regime
+    tax_selection = resolve_tax_selection(payload.get("tax_country"), payload.get("tax_regime"))
     raw_tax_categories = payload.get("asset_tax_categories", "")
-    if isinstance(raw_tax_categories, Mapping):
-        tax_categories = {
-            str(asset).strip().upper(): str(category).strip().lower()
-            for asset, category in raw_tax_categories.items()
-        }
-    else:
-        tax_categories = {
-            asset: category.lower()
-            for asset, category in parse_pair_map(str(raw_tax_categories or ""), "tax category").items()
-        }
+    category_pairs = (
+        raw_tax_categories.items()
+        if isinstance(raw_tax_categories, Mapping)
+        else parse_pair_map(str(raw_tax_categories or ""), "tax category").items()
+    )
+    tax_categories = {
+        str(asset).strip().upper(): str(category).strip().lower()
+        for asset, category in category_pairs
+    }
     unknown_tax_categories = sorted(set(tax_categories.values()) - ITALY_TAX_CATEGORIES)
-    if tax_country == "IT" and unknown_tax_categories:
+    if tax_selection.country == "IT" and unknown_tax_categories:
         allowed = ", ".join(sorted(ITALY_TAX_CATEGORIES))
         raise ValueError(
             f"Unknown Italian tax category '{unknown_tax_categories[0]}'. Expected one of: {allowed}."
@@ -775,17 +765,10 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
     if len(tax_metadata) != len(raw_tax_metadata):
         raise ValueError("Every asset_tax_metadata value must be an object.")
-    if tax_country == "IT":
-        tax_metadata = normalize_italy_tax_metadata(
-            list(weights),
-            tax_categories,
-            tax_metadata,
-        )
-        tax_categories = {
-            asset: str(values["category"])
-            for asset, values in tax_metadata.items()
-        }
-    italy_wealth_tax = float(payload.get("italy_wealth_tax", 0.20)) / 100.0
+    if tax_selection.country == "IT":
+        tax_metadata = normalize_italy_tax_metadata(list(weights), tax_categories, tax_metadata)
+        tax_categories = {asset: str(values["category"]) for asset, values in tax_metadata.items()}
+    italy_wealth_tax = float(payload.get("italy_wealth_tax", 0.20)) / 100
     if not np.isfinite(italy_wealth_tax) or not 0 <= italy_wealth_tax < 1:
         raise ValueError("italy_wealth_tax must be between 0 and 100 percent.")
     italy_wealth_tax_mode = str(payload.get("italy_wealth_tax_mode", "auto")).strip().lower()
@@ -808,6 +791,9 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     base_currency = str(payload.get("base_currency", "USD")).strip().upper()
     if len(base_currency) != 3:
         raise ValueError("Portfolio currency must be a three-letter ISO code.")
+    volatility_model = str(payload.get("volatility_model", "garch")).strip().lower()
+    if volatility_model not in {"garch", "qarch"}:
+        raise ValueError("volatility_model must be 'garch' or 'qarch'.")
     garch_alpha = float(payload.get("garch_alpha", 0.10))
     garch_beta = float(payload.get("garch_beta", 0.85))
     if not 0 <= garch_alpha < 1 or not 0 <= garch_beta < 1 or garch_alpha + garch_beta >= 1:
@@ -833,8 +819,14 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("mean_prior_strength must be finite and non-negative.")
     parameter_draws = int(payload.get("parameter_draws", 0))
     parameter_block_size = int(payload.get("parameter_block_size", 12))
-    if not 0 <= parameter_draws <= 100:
-        raise ValueError("parameter_draws must be between 0 and 100.")
+    parameter_seed = payload.get("parameter_seed")
+    if parameter_seed is not None and (
+        isinstance(parameter_seed, bool) or not isinstance(parameter_seed, int)
+        or not 0 <= parameter_seed <= 2**32 - 1
+    ):
+        raise ValueError("parameter_seed must be an integer between 0 and 4294967295, or null.")
+    if not 0 <= parameter_draws <= 512:
+        raise ValueError("parameter_draws must be between 0 and 512.")
     if parameter_block_size < 1:
         raise ValueError("parameter_block_size must be positive.")
     joint_macro = bool(payload.get("joint_macro", False))
@@ -843,6 +835,10 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
     if macro_model not in {"ridge_var", "bvar", "bvar_ensemble"}:
         raise ValueError("macro_model must be ridge_var, bvar, or bvar_ensemble.")
     structural_returns = bool(payload.get("structural_returns", False))
+    from mc_quadrants.economic_returns import economic_assumptions
+    economic_returns = economic_assumptions(payload.get("economic_returns"))
+    if economic_returns and (model_kind != "quadrant" or (economic_returns["rate_stress"] and not joint_macro)):
+        raise ValueError("Economic rate stress requires the quadrant model and joint macro paths.")
     raw_asset_classes = payload.get("asset_classes", "")
     parsed_asset_classes = (
         {str(asset).strip().upper(): str(value).strip().upper() for asset, value in raw_asset_classes.items()}
@@ -873,20 +869,9 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
             "Probabilistic quadrants, parameter bootstrap, and joint macro paths require the quadrant model."
         )
     periods = int(payload.get("periods", 360))
-    withdrawal_start_raw = payload.get("withdrawal_start_period", 1)
-    try:
-        withdrawal_start_value = float(withdrawal_start_raw)
-        withdrawal_start_period = int(withdrawal_start_value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("withdrawal_start_period must be an integer.") from exc
-    if not np.isfinite(withdrawal_start_value) or not np.isclose(
-        withdrawal_start_value, withdrawal_start_period
-    ):
-        raise ValueError("withdrawal_start_period must be an integer.")
-    if not 1 <= withdrawal_start_period <= periods:
-        raise ValueError(
-            "withdrawal_start_period must be between 1 and the simulation periods."
-        )
+    withdrawal_start_period = normalize_withdrawal_start_period(
+        payload.get("withdrawal_start_period", 1), periods
+    )
     raw_decumulation = payload.get("decumulation")
     decumulation = (
         normalize_decumulation(
@@ -916,8 +901,8 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "state_dependent_liquidity": state_dependent_liquidity,
         "state_transaction_cost_multipliers": liquidity_multipliers,
         "asset_expense_ratios": expense_ratios,
-        "tax_country": tax_country,
-        "tax_regime": tax_regime,
+        "tax_country": tax_selection.country,
+        "tax_regime": tax_selection.regime,
         "asset_tax_categories": tax_categories,
         "asset_tax_metadata": tax_metadata,
         "italy_annual_wealth_tax": italy_wealth_tax,
@@ -946,6 +931,7 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "garch": garch,
         "calibrate_dependence": bool(payload.get("calibrate_dependence", True)),
         "select_hyperparameters": bool(payload.get("select_hyperparameters", False)),
+        "volatility_model": volatility_model,
         "garch_alpha": garch_alpha,
         "garch_beta": garch_beta,
         "walk_forward": bool(payload.get("walk_forward", True)),
@@ -958,11 +944,13 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:
         "mean_prior_strength": mean_prior_strength,
         "parameter_draws": parameter_draws,
         "parameter_block_size": parameter_block_size,
+        "parameter_seed": parameter_seed,
         "joint_macro": joint_macro,
         "macro_transition_weight": macro_transition_weight,
         "macro_parameter_uncertainty": macro_parameter_uncertainty,
         "macro_model": macro_model,
         "structural_returns": structural_returns,
+        "economic_returns": economic_returns,
         "asset_classes": asset_classes,
         "asset_durations": asset_durations,
         "asset_income_yields": asset_income_yields,
@@ -1122,9 +1110,9 @@ def _median_period_returns(wealth: pd.DataFrame, payload: Mapping[str, Any]) -> 
     return medians
 
 
-def _max_drawdown_paths(wealth: pd.DataFrame, initial_value: float = 100.0) -> np.ndarray:
+def _max_drawdown_paths(wealth: pd.DataFrame, initial_value: float = 100.0) -> np.ndarray:  # Compute each path's maximum drawdown in bounded chunks.
     drawdowns = np.empty(wealth.shape[1], dtype=float)
-    block = max(1, int(4096))
+    block = 4096
     for start in range(0, wealth.shape[1], block):
         chunk = wealth.iloc[:, start:start + block].to_numpy(dtype=float)
         chunk_with_initial = np.vstack([np.full(chunk.shape[1], initial_value), chunk])
@@ -1202,7 +1190,7 @@ def _risk_of_ruin(wealth: pd.DataFrame, block_size: int = 4096) -> float:
     return float(ruined / max(wealth.shape[1], 1))
 
 
-def _distribution_summary(values: np.ndarray) -> dict[str, float]:
+def _distribution_summary(values: np.ndarray) -> dict[str, float]:  # Summarize a numeric distribution with robust percentiles.
     clean = np.asarray(values, dtype=float)
     clean = clean[np.isfinite(clean)]
     if not clean.size:
@@ -1239,7 +1227,7 @@ def _drawdown_duration_metrics(values: np.ndarray, initial_value: float) -> dict
         current_duration = np.where(underwater, current_duration + 1, 0)
         maximum_duration = np.maximum(maximum_duration, current_duration)
 
-    def recovery_quantile(probability: float) -> float:
+    def recovery_quantile(probability: float) -> float:  # Convert a recovery probability into its reporting quantile.
         total = int(recovery_histogram.sum())
         if total == 0:
             return 0.0
@@ -1505,12 +1493,8 @@ def _path_analytics(
                 nominal_risk_free /= 100.0
             nominal_risk_free = np.clip(nominal_risk_free, -0.05, 0.50)
         if inflation_col in result.macro_columns:
-            annual_inflation = result.macro_paths[
-                :, :, result.macro_columns.index(inflation_col)
-            ].astype(float)
-            if bool(dynamics.get("inflation_is_percent", False)):
-                annual_inflation /= 100.0
-            annual_inflation = np.clip(annual_inflation, -0.10, 0.50)
+            from mc_quadrants.cpi import accounting_inflation_paths
+            annual_inflation = accounting_inflation_paths(model, result)
     real_risk_free = (1.0 + nominal_risk_free) / (1.0 + annual_inflation) - 1.0
     path_risk_free = np.mean(real_risk_free, axis=0)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -1641,7 +1625,7 @@ def _path_analytics(
     }
 
 
-def _regime_counts(result: Any) -> dict[str, int]:
+def _regime_counts(result: Any) -> dict[str, int]:  # Count simulated observations in each macro regime.
     native_portfolio = getattr(result, "native_portfolio", None)
     if isinstance(native_portfolio, Mapping) and native_portfolio.get("regime_counts") is not None:
         counts = np.asarray(native_portfolio["regime_counts"], dtype=np.uint64)
@@ -1662,7 +1646,7 @@ def _regime_counts(result: Any) -> dict[str, int]:
 def _simulated_regime_summary(
     result: Any,
     counts: Mapping[str, int] | None = None,
-) -> pd.DataFrame:
+) -> pd.DataFrame:  # Summarize simulated regime frequencies and persistence.
     counts = dict(counts) if counts is not None else _regime_counts(result)
     total = max(sum(counts.values()), 1)
     return pd.DataFrame(
@@ -1726,7 +1710,7 @@ def _persistence_response(
     }
 
 
-def _json_value(value: Any) -> Any:
+def _json_value(value: Any) -> Any:  # Convert NumPy and pandas values into JSON-safe values.
     if isinstance(value, (np.integer,)):
         return int(value)
     if isinstance(value, (float, np.floating)):
@@ -1745,7 +1729,15 @@ def _validation_response(walk_forward: Any) -> dict[str, Any] | None:
     if walk_forward is None:
         return None
     splits = walk_forward.splits
+    def table(frame):
+        return {
+            "columns": list(frame.columns),
+            "rows": [[_json_value(value) for value in row] for row in frame.itertuples(index=False, name=None)],
+        }
     return {
+        "metadata": walk_forward.metadata,
+        "horizon_summary": table(walk_forward.horizon_summary),
+        "horizon_scores": table(walk_forward.horizon_scores),
         "summary": {str(key): _json_value(value) for key, value in walk_forward.summary.items()},
         "columns": [str(column) for column in splits.columns],
         "rows": [
@@ -1758,7 +1750,7 @@ def _validation_response(walk_forward: Any) -> dict[str, Any] | None:
     }
 
 
-def _parameter_uncertainty_response(frame: pd.DataFrame | None) -> dict[str, Any] | None:
+def _parameter_uncertainty_response(frame: pd.DataFrame | None) -> dict[str, Any] | None:  # Shape parameter-uncertainty bands for the frontend.
     if frame is None or frame.empty:
         return None
     metric_columns = [column for column in frame.columns if column != "draw"]
@@ -1785,7 +1777,7 @@ def _macro_path_response(
     result: Any,
     *,
     quantiles: list[np.ndarray] | None = None,
-) -> dict[str, Any] | None:
+) -> dict[str, Any] | None:  # Shape sampled macro paths and quantiles for the frontend.
     if result.macro_paths is None or not result.macro_columns:
         return None
     response: dict[str, Any] = {"periods": list(range(1, len(result.macro_paths) + 1)), "series": {}}
@@ -1932,7 +1924,7 @@ def _retirement_response(
         policy_requested: np.ndarray,
         policy_funded: np.ndarray,
         policy_events: np.ndarray,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any]:  # Summarize withdrawal policy funding and guardrail outcomes.
         policy_cpi = cpi
         real_requested = policy_requested / np.maximum(policy_cpi, 1e-300)
         real_funded = policy_funded / np.maximum(policy_cpi, 1e-300)
@@ -2021,14 +2013,14 @@ def _retirement_response(
     }
 
 
-def _simulation_start_date(macro: pd.DataFrame) -> str | None:
+def _simulation_start_date(macro: pd.DataFrame) -> str | None:  # Read the first valid macro date for simulation metadata.
     if macro is None or macro.empty:
         return None
     last_observed = pd.Timestamp(macro.index.max())
     return (last_observed + pd.DateOffset(months=1)).strftime("%Y-%m-%d")
 
 
-def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
+def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:  # Run the requested scenario and build its frontend response.
     scenario, selected_tickers, macro = run_scenario_payload(payload)
     model = scenario.model
     result = scenario.result
@@ -2247,6 +2239,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "ok": True,
         "summary": summary_values,
+        "return_law_comparison": build_return_comparison(model),
         "currency": scenario.model.metadata.get("base_currency", "USD"),
         "terms": (
             "real"
@@ -2366,6 +2359,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         },
         "validation": _validation_response(scenario.walk_forward),
         "parameter_uncertainty": _parameter_uncertainty_response(scenario.parameter_uncertainty),
+        "parameter_convergence": model.metadata.get("parameter_convergence"),
         "uncertainty_decomposition": model.metadata.get("uncertainty_decomposition", {}),
         "asset_profiles": model.metadata.get("asset_profiles", {}),
         "regime_probabilities": [
@@ -2380,6 +2374,8 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         ],
         "macro_paths": macro_path_response,
         "methodology": {
+            "drawdown_sampling": "monthly_close",
+            "cpi_process": model.metadata.get("cpi_process"),
             "data_vintage": model.metadata.get("data_vintage", "user_supplied"),
             "point_in_time": bool(model.metadata.get("point_in_time", False)),
             "availability_aligned": bool(model.metadata.get("availability_aligned", False)),
@@ -2401,8 +2397,11 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             "hsmm_max_duration": model.metadata.get("hsmm_max_duration"),
             "mean_prior_strength": float(model.metadata.get("mean_prior_strength", 0.0)),
             "parameter_draws": int(payload.get("parameter_draws", 0)),
+            "parameter_seed": model.metadata.get("parameter_seed"),
+            "parameter_seed_mode": model.metadata.get("parameter_seed_mode"),
             "joint_macro": bool(payload.get("joint_macro", False)),
             "macro_model": model.metadata.get("macro_model", "ridge_var"),
+            "volatility_model": model.metadata.get("volatility_model", "garch"),
             "dependence_fit": model.metadata.get("dependence_fit"),
             "calibrate_dependence": model.metadata.get("calibrate_dependence", False),
             "simulation_dependence": model.metadata.get("simulation_dependence"),
@@ -2413,6 +2412,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
                 model.metadata.get("macro_dynamics", {}).get("residual_mnts", {}).items()
             },
             "macro_innovation_rmse": model.metadata.get("macro_dynamics", {}).get("forecast_rmse"),
+            "macro_stress_dynamics": model.metadata.get("macro_dynamics", {}).get("stress_dynamics"),
             "hyperparameter_selection": model.metadata.get("hyperparameter_selection"),
             "parameter_uncertainty_components": model.metadata.get("parameter_uncertainty_components", []),
             "macro_parameter_uncertainty_mode": model.metadata.get("macro_parameter_uncertainty_mode"),
@@ -2421,6 +2421,7 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
             ),
             "macro_parameter_uncertainty": bool(payload.get("macro_parameter_uncertainty", True)),
             "structural_returns": bool(model.metadata.get("structural_returns", False)),
+            "economic_returns": model.metadata.get("economic_returns"),
             "state_dependent_liquidity": bool(model.metadata.get("state_dependent_liquidity", False)),
             "dynamic_correlation": bool(payload.get("dynamic_correlation", False)),
             "inflation_model": model.metadata.get("inflation_model", "deterministic"),
@@ -2475,7 +2476,7 @@ def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     kwargs = scenario_kwargs(solver_payload)
     model = scenario.model
 
-    def macro_rate(column: str | None, percent_key: str) -> np.ndarray | None:
+    def macro_rate(column: str | None, percent_key: str) -> np.ndarray | None:  # Extract one macro rate series and normalize percentage units.
         if result.macro_paths is None or not column or column not in result.macro_columns:
             return None
         values = result.macro_paths[:, :, result.macro_columns.index(column)].astype(float)
@@ -2485,9 +2486,8 @@ def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         return values
 
     inflation_column = model.metadata.get("inflation_col")
-    inflation_paths = macro_rate(inflation_column, "inflation_is_percent")
-    if inflation_paths is not None:
-        inflation_paths = np.clip(inflation_paths, -0.10, 0.50)
+    from mc_quadrants.cpi import accounting_inflation_paths
+    inflation_paths = accounting_inflation_paths(model, result)
     cpi = withdrawal_inflation_index(
         periods,
         requested_paths,
@@ -2509,7 +2509,7 @@ def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         "financing_inflation_sensitivity": kwargs["financing_inflation_sensitivity"],
         "state_inflation": model.metadata.get("state_inflation"),
         "financing_rate_paths": rate_paths,
-        "financing_inflation_paths": inflation_paths,
+        "financing_inflation_paths": macro_rate(inflation_column, "inflation_is_percent"),
         "maintenance_margin": kwargs["maintenance_margin"],
         "contribution": kwargs["contribution"],
         "contribution_allocation": kwargs["contribution_allocation"],
@@ -2541,7 +2541,7 @@ def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         )
         evaluated: dict[int, dict[str, Any]] = {}
 
-        def evaluate(step: int, *, keep_frame: bool = False) -> dict[str, Any]:
+        def evaluate(step: int, *, keep_frame: bool = False) -> dict[str, Any]:  # Evaluate one candidate safe-withdrawal rate.
             step = max(0, min(max_step, int(step)))
             if step in evaluated and (not keep_frame or step in recommended_frames):
                 return evaluated[step]
@@ -2669,7 +2669,7 @@ def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_wealth_csv(payload: Mapping[str, Any]) -> dict[str, Any]:
+def build_wealth_csv(payload: Mapping[str, Any]) -> dict[str, Any]:  # Export selected wealth paths as a downloadable CSV payload.
     requested_paths = int(payload.get("paths", DEFAULT_EXPORT_PATHS))
     if requested_paths < 1 or requested_paths > MAX_PATHS:
         raise ValueError(f"paths must be between 1 and {MAX_PATHS:,}.")

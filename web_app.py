@@ -44,10 +44,10 @@ LOGGER = logging.getLogger("mc_quadrants.web")
 
 
 class WebHandler(BaseHTTPRequestHandler):
-    def log_message(self, format: str, *args: Any) -> None:
+    def log_message(self, format: str, *args: Any) -> None:  # Send HTTP access logs through the application logger.
         LOGGER.info("%s - %s", self.address_string(), format % args)
 
-    def _send_security_headers(self, cache_control: str) -> None:
+    def _send_security_headers(self, cache_control: str) -> None:  # Add the security and caching headers shared by responses.
         self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
@@ -59,7 +59,7 @@ class WebHandler(BaseHTTPRequestHandler):
             "base-uri 'none'; frame-ancestors 'none'",
         )
 
-    def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+    def _send_json(self, status: int, payload: dict[str, Any]) -> None:  # Serialize a JSON payload and send it with an HTTP status.
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -68,7 +68,7 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_file(self, path: str) -> None:
+    def _send_file(self, path: str) -> None:  # Safely resolve and serve one static web asset.
         relative = unquote(path).lstrip("/")
         if relative == "":
             relative = "index.html"
@@ -92,14 +92,14 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:
+    def do_GET(self) -> None:  # Route health checks to JSON and other GETs to static assets.
         path = urlparse(self.path).path
         if path == "/api/health":
             self._send_json(200, {"ok": True, "app": "mc-quadrant-sim web UI"})
             return
         self._send_file(path)
 
-    def do_POST(self) -> None:
+    def do_POST(self) -> None:  # Validate a request and dispatch it to the matching API endpoint.
         path = urlparse(self.path).path
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -159,7 +159,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 JOB_SEMAPHORE.release()
 
 
-def main() -> None:
+def main() -> None:  # Run the command-line entry point for this script.
     server = ThreadingHTTPServer(("0.0.0.0", PORT), WebHandler)
     server.daemon_threads = True
     LOGGER.info(

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Four-Quadrant Monte Carlo Simulator</title>
   <link rel="icon" href="logo.jpg">
-  <link rel="stylesheet" href="style.css?v=20260918">
+  <link rel="stylesheet" href="style.css?v=20260919">
 </head>
 <body class="light" id="top">
   <a class="skip-link" href="#workspace">Skip to simulation studio</a>
@@ -43,15 +43,26 @@
       </div>
     </div>
     <div class="quadrant-stage" id="quadrant-stage" aria-label="Four macroeconomic regimes">
-      <div class="regime-map-heading"><span>THE ECONOMIC CYCLE</span><span class="map-key">Four connected regimes</span></div>
+      <div class="regime-map-heading"><span>THE ECONOMIC CYCLE</span><button type="button" id="regime-tour" class="tour-button" aria-pressed="false">▶ Play tour</button></div>
       <div class="regime-map">
         <span class="map-axis axis-growth">Higher growth ↑</span>
-        <div class="quadrant-node node-goldilocks"><span>01 <b>↗</b></span><strong>Goldilocks</strong><small>Growth ↑ · Inflation ↓</small><p>Disinflationary expansion</p></div>
-        <div class="quadrant-node node-overheating"><span>02 <b>↗</b></span><strong>Overheating</strong><small>Growth ↑ · Inflation ↑</small><p>Inflationary expansion</p></div>
-        <div class="quadrant-node node-recession"><span>04 <b>↘</b></span><strong>Recession</strong><small>Growth ↓ · Inflation ↓</small><p>Deflationary slowdown</p></div>
-        <div class="quadrant-node node-stagflation"><span>03 <b>↘</b></span><strong>Stagflation</strong><small>Growth ↓ · Inflation ↑</small><p>Inflationary slowdown</p></div>
+        <button type="button" class="quadrant-node node-goldilocks" data-regime="high_growth_low_inflation" aria-pressed="false" aria-controls="regime-insight"><span>01 <b>↗</b></span><strong>Goldilocks</strong><small>Growth ↑ · Inflation ↓</small><span class="regime-description">Disinflationary expansion</span></button>
+        <button type="button" class="quadrant-node node-overheating" data-regime="high_growth_high_inflation" aria-pressed="false" aria-controls="regime-insight"><span>02 <b>↗</b></span><strong>Overheating</strong><small>Growth ↑ · Inflation ↑</small><span class="regime-description">Inflationary expansion</span></button>
+        <button type="button" class="quadrant-node node-recession" data-regime="low_growth_low_inflation" aria-pressed="false" aria-controls="regime-insight"><span>04 <b>↘</b></span><strong>Recession</strong><small>Growth ↓ · Inflation ↓</small><span class="regime-description">Deflationary slowdown</span></button>
+        <button type="button" class="quadrant-node node-stagflation" data-regime="low_growth_high_inflation" aria-pressed="false" aria-controls="regime-insight"><span>03 <b>↘</b></span><strong>Stagflation</strong><small>Growth ↓ · Inflation ↑</small><span class="regime-description">Inflationary slowdown</span></button>
         <span class="map-axis axis-inflation">Higher inflation →</span>
       </div>
+      <div class="regime-tour-progress" aria-hidden="true"></div>
+      <div id="regime-insight" class="regime-insight" aria-live="polite" aria-atomic="true">
+        <div class="regime-insight-heading"><h3 id="regime-insight-title">Goldilocks</h3><span id="regime-step">01 / 04</span></div>
+        <p id="regime-insight-copy"></p>
+        <div class="regime-dimensions">
+          <div><span>Growth <strong id="explorer-growth">Higher</strong></span><i><b id="explorer-growth-bar"></b></i></div>
+          <div><span>Inflation <strong id="explorer-inflation">Lower</strong></span><i><b id="explorer-inflation-bar"></b></i></div>
+        </div>
+      </div>
+      <button type="button" class="apply-regime" id="apply-regime">Use as starting state →</button>
+      <p class="explorer-note">Explore a quadrant, then choose whether to apply it.</p>
     </div>
     <div class="hero-meta">
       <span><strong>04</strong> macro regimes</span>
@@ -77,7 +88,7 @@
             </li>
           <li id="guide-portfolio" class="guide-step">
             <span class="guide-number">2</span>
-            <div><strong>Build an allocation</strong><span>Toggle assets and edit weights in the allocation bar, or apply a preset such as Classic 60/40.</span></div>
+            <div><strong>Build an allocation</strong><span>Choose a portfolio such as Classic 60/40 to load its assets and weights automatically, or customize the allocation yourself.</span></div>
           </li>
           <li id="guide-methodology" class="guide-step">
             <span class="guide-number">3</span>
@@ -109,6 +120,11 @@
         </div>
       </div>
 
+      <div class="scenario-preview" aria-label="Current scenario settings">
+        <button type="button" data-preview-control="periods"><span class="preview-icon" aria-hidden="true">↗</span><span><small>Time horizon</small><strong id="preview-horizon">30 years</strong></span><span class="preview-edit" aria-hidden="true">↗</span></button>
+        <button type="button" data-preview-control="paths"><span class="preview-icon" aria-hidden="true">≋</span><span><small>Simulated paths</small><strong id="preview-paths">100,000</strong></span><span class="preview-edit" aria-hidden="true">↗</span></button>
+        <button type="button" data-preview-control="start-state"><span class="preview-icon" aria-hidden="true">◈</span><span><small>Starting regime</small><strong id="preview-regime">Latest inferred</strong></span><span class="preview-edit" aria-hidden="true">↗</span></button>
+      </div>
       <div class="settings-panel">
         <details>
           <summary>Market data</summary>
@@ -345,11 +361,15 @@
             </div>
             <div class="two-col">
               <label>Parameter recalibrations
-                <input type="number" id="parameter-draws" value="8" min="0" max="100" step="1">
-                <span class="hint">Stationary-bootstrap outer draws; 0 treats estimates as fixed.</span>
+                <input type="number" id="parameter-draws" value="128" min="0" max="512" step="1">
+                <span class="hint">More fitted models improve precision but increase calibration time. Check the reported precision; 0 treats estimates as fixed.</span>
               </label>
               <label>Calibration block months
                 <input type="number" id="parameter-block-size" value="12" min="2" max="60" step="1">
+              </label>
+              <label>Parameter seed
+                <input type="number" id="parameter-seed" value="1729" min="0" max="4294967295" step="1">
+                <span class="hint">Keeps the fitted parameter bank fixed when the market-path seed changes. Change this separately to check stability.</span>
               </label>
             </div>
             <label class="check-inline"><input type="checkbox" id="joint-macro" checked> Joint growth, inflation, short-rate, regime and return paths</label>
@@ -365,6 +385,25 @@
               <label class="check-inline"><input type="checkbox" id="macro-parameter-uncertainty" checked> Draw uncertain macro coefficients</label>
             </div>
             <label class="check-inline"><input type="checkbox" id="structural-returns" checked> Structural asset-return links</label>
+            <label class="check-inline"><input type="checkbox" id="economic-returns"> Economic return model (experimental)</label>
+            <details class="nested-settings">
+              <summary>Economic return assumptions</summary>
+              <label class="check-inline"><input type="checkbox" id="economic-anchors" checked> Anchor long-term expected returns</label>
+              <label class="check-inline"><input type="checkbox" id="economic-rate-stress" checked> Persistent yields and estimated macro-surprise exposures</label>
+              <div class="two-col">
+                <label>Equity real-return prior (%)<input type="number" id="equity-real-anchor" value="5" min="-40" max="40" step="0.5"></label>
+                <label>Long-term inflation prior (%)<input type="number" id="economic-inflation-anchor" value="2" min="-5" max="40" step="0.5"></label>
+                <label>Prior strength (months)<input type="number" id="economic-anchor-strength" value="120" min="0" max="1200" step="12"></label>
+                <label>Legacy equity rate sensitivity (years)<input type="number" id="equity-rate-duration" value="4" min="0" max="30" step="0.5"></label>
+                <label>Bond yield column<input type="text" id="economic-yield-column" value="bond_yield"></label>
+                <label>Yield forecasts<select id="economic-yield-model"><option value="adaptive">Persistent forecast combination</option><option value="random_walk">No-change benchmark</option><option value="legacy">Legacy macro mean reversion</option></select></label>
+                <label>Equity rate response<select id="economic-equity-mode"><option value="surprise">Estimated macro-surprise exposures</option><option value="inflation_gate">Legacy inflation threshold</option></select></label>
+                <label>Macro stress dynamics<select id="economic-macro-stress"><option value="none">Current model</option><option value="persistent">Persistent macro news (experimental)</option><option value="volatility">Conditional macro volatility (experimental)</option><option value="combined">Persistent news and volatility (experimental)</option></select></label>
+              </div>
+              <p class="hint">Macro stress candidates let recent surprises affect later forecasts or uncertainty. They use fitted statistical relationships; the historical comparison is documented in macro-stress-model.md.</p>
+              <label>Advanced assumptions (JSON)<textarea id="economic-extra" rows="3" placeholder='{"equity_valuation_columns":{"SPY":"cape"}}'></textarea></label>
+              <p class="hint">Experimental assumptions, not guaranteed returns. Reload Yahoo/FRED data to obtain month-end 2-, 7-, and 20-year Treasury yields and a real-yield reference. Other maturities, credit spreads and valuation multiples require suitable CSV columns. Advanced assumptions accept asset_yield_columns, asset_spread_columns, credit_loss_rates, equity_valuation_columns and valuation_reference maps; rates are decimals except the observed yield columns, which use annual percentages. See the economic-return-model documentation for units and examples. This mode is off by default.</p>
+            </details>
             <details class="nested-settings">
               <summary>Asset structure overrides</summary>
               <label>Classes (ASSET:CLASS)
@@ -394,8 +433,14 @@
               </div>
             </details>
           </div>
-          <label class="check-inline" id="garch-group"><input type="checkbox" id="garch" checked> GARCH(1,1) volatility clustering</label>
-          <label class="check-inline"><input type="checkbox" id="calibrate-dependence" checked> Estimate GARCH/ADCC coefficients from history</label>
+          <label class="check-inline" id="garch-group"><input type="checkbox" id="garch" checked> Volatility clustering</label>
+          <label>Volatility model
+            <select id="volatility-model">
+              <option value="garch" selected>GARCH(1,1)</option>
+              <option value="qarch">QARCH — experimental monthly model</option>
+            </select>
+          </label>
+          <label class="check-inline"><input type="checkbox" id="calibrate-dependence" checked> Estimate volatility/correlation coefficients from history</label>
           <span class="hint">Constrained pooled QML, with a short-history fallback. Uncheck to use manual/default coefficients above.</span>
           <span class="hint" id="garch-hint">GARCH is applied to the calibrated MNTS innovations in each macro quadrant.</span>
           <label class="check-inline" id="walk-forward-group"><input type="checkbox" id="walk-forward" checked> Walk-forward validation</label>
@@ -426,7 +471,7 @@
               <span class="hint">Uses the latest filtered quadrant and its estimated age.</span>
             </label>
           </div>
-          <p class="hint"><strong>Return process:</strong> four-state MRS-MNTS-GARCH with state-specific skewness, fat tails, volatility, and dependence.</p>
+          <p class="hint"><strong>Return process:</strong> four-state MNTS with the selected volatility model, state-specific skewness, fat tails, and dependence.</p>
           <div class="two-col">
             <label>Rebalancing
               <select id="rebalance">
@@ -625,6 +670,7 @@
           <span class="allocation-bar-title">Allocation</span>
           <p id="portfolio-status" class="status inline-status">Load data to select assets.</p>
         </div>
+        <div id="allocation-composition" class="allocation-composition is-empty" role="img" aria-label="No allocation selected"></div>
         <div id="allocation-list" class="asset-pills"></div>
         <div class="allocation-controls">
           <details class="add-assets">
@@ -633,8 +679,7 @@
           </details>
           <button id="equalize-btn" class="btn btn-ghost btn-sm">Equalize</button>
           <button id="reset-btn" class="btn btn-ghost btn-sm">Reset</button>
-          <select id="preset-select" class="preset-select"><option value="">Presets</option></select>
-          <button id="preset-apply" class="btn btn-sm" disabled>Apply</button>
+          <select id="preset-select" class="preset-select" aria-label="Choose a portfolio" disabled><option value="">Choose a portfolio…</option></select>
         </div>
         <p id="weight-total" class="status inline-status"></p>
       </div>
@@ -675,6 +720,7 @@
             <h3>Parameter uncertainty</h3>
             <p class="caption">Variation across complete stationary-bootstrap recalibrations, separate from market-path dispersion.</p>
             <div id="parameter-bands" class="uncertainty-grid"></div>
+            <p id="parameter-convergence" class="caption"></p>
           </section>
           <h3 class="section-title">Portfolio metrics</h3>
           <div class="metric-grid" id="metric-grid"></div>
@@ -701,7 +747,7 @@
             </div>
           </section>
           <div class="chart-grid">
-            <div class="card card-wide"><h3>Wealth Percentiles</h3><div class="chart" id="chart-wealth"></div></div>
+            <div class="card card-wide"><h3>Wealth Percentiles</h3><p class="caption">Dashed purple line: one simulated path selected near the median terminal wealth.</p><div class="chart" id="chart-wealth"></div></div>
             <div class="card card-wide"><h3>Regime Timeline (P05 / Median / P95 paths)</h3><div class="chart" id="chart-timeline"></div></div>
             <div class="card">
               <h3>Goal probability curve</h3>
@@ -757,6 +803,18 @@
       <div id="tab-returns" class="tab-panel" role="tabpanel" aria-labelledby="trigger-tab-returns" tabindex="0">
         <div class="results-empty empty-state">Run a simulation to see return distributions.</div>
         <div id="returns-content" class="hidden">
+          <section id="return-law-card" class="card hidden">
+            <h3>Asset returns: MNTS vs Student’s t</h3>
+            <p class="caption">Single-period log returns with the same calibrated mean and volatility in each regime. Student’s t (5 degrees of freedom) is an illustrative reference, not a fitted alternative. These diagnostic draws exclude pathwise volatility, macro shocks, costs and parameter uncertainty.</p>
+            <div class="form-grid">
+              <label>Asset<select id="return-law-asset"></select></label>
+              <label>Regime<select id="return-law-state"></select></label>
+              <label>View<select id="return-law-view"><option value="density">Return density</option><option value="cdf">Cumulative probability</option></select></label>
+            </div>
+            <p id="return-law-caption" class="caption"></p>
+            <div class="chart" id="chart-return-laws"></div>
+            <div id="return-law-stats" class="table-wrap"></div>
+          </section>
           <div class="chart-grid">
             <div class="card"><h3>Terminal Wealth Distribution</h3><div class="chart" id="chart-terminal"></div></div>
             <div class="card"><h3>Simulated Regime Mix</h3><div class="chart" id="chart-regime-mix"></div></div>
@@ -777,7 +835,7 @@
           <div class="chart-grid">
             <div class="card card-wide">
               <h3>Underwater probability fan</h3>
-              <p class="caption">Point-in-time P05, median, and P95 drawdowns from each path's previous peak.</p>
+              <p class="caption">Monthly-close P05, median, and P95 drawdowns from each path's previous peak. Losses and recoveries within a month are not measured.</p>
               <div class="chart" id="chart-drawdown-fan"></div>
             </div>
             <div class="card">
@@ -790,7 +848,7 @@
               <p id="recovery-required-caption" class="caption">Gain required to regain the previous peak from the current drawdown.</p>
               <div class="chart" id="chart-recovery-required"></div>
             </div>
-            <div class="card card-wide"><h3>Maximum drawdown distribution</h3><div class="chart" id="chart-drawdowns"></div></div>
+            <div class="card card-wide"><h3>Maximum monthly-close drawdown distribution</h3><div class="chart" id="chart-drawdowns"></div></div>
           </div>
         </div>
       </div>
@@ -910,6 +968,8 @@
             <div id="validation-panel" class="hidden">
               <h3>Walk-forward validation</h3>
               <p class="caption" id="validation-summary"></p>
+              <p class="caption" id="validation-path-summary"></p>
+              <div class="table-wrap" id="validation-horizons"></div>
               <div class="table-wrap" id="validation-table"></div>
             </div>
             <div id="persistence-panel" class="hidden">
@@ -975,6 +1035,6 @@
   </div>
   <div id="toast-container"></div>
 
-  <script type="module" src="app.js?v=20260918"></script>
+  <script type="module" src="app.js?v=20260919"></script>
 </body>
 </html>

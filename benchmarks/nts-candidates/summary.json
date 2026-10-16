@@ -1,0 +1,1614 @@
+{
+  "confirmation_runs": 1526,
+  "validation_runs": 671,
+  "validation_points": 56,
+  "largest_distribution_error_standard_errors": 3.53505976629,
+  "bulk": [
+    {
+      "engine": "plus",
+      "mode": "scalar",
+      "assets": 1,
+      "median_speedup": 1.0140006920812341,
+      "minimum_speedup": 1.0107924934307844,
+      "maximum_speedup": 1.06272024914915,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 124.550209,
+          "speedup": 1.029441933734531
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 69.1955,
+          "speedup": 1.06272024914915
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 92.975,
+          "speedup": 1.015891368647486
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 109.988125,
+          "speedup": 1.031034032083009
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 96.274,
+          "speedup": 1.012530641710119
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 93.580375,
+          "speedup": 1.0111757726980684
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 94.173916,
+          "speedup": 1.0140006920812341
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 91.074042,
+          "speedup": 1.0107924934307844
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 59.029,
+          "speedup": 1.0128856155449015
+        }
+      ]
+    },
+    {
+      "engine": "plusplus",
+      "mode": "scalar",
+      "assets": 1,
+      "median_speedup": 1.0033214574066407,
+      "minimum_speedup": 0.9974364604466501,
+      "maximum_speedup": 1.0344692105283002,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 125.832875,
+          "speedup": 1.0189484107392444
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 71.085208,
+          "speedup": 1.0344692105283002
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 94.065875,
+          "speedup": 1.0041101515294468
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 111.180042,
+          "speedup": 1.0199807263969194
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 97.42875,
+          "speedup": 1.0005298743953914
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 94.519541,
+          "speedup": 1.0011285179643434
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 95.176292,
+          "speedup": 1.0033214574066407
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 92.219375,
+          "speedup": 0.998238797432752
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 59.943292,
+          "speedup": 0.9974364604466501
+        }
+      ]
+    },
+    {
+      "engine": "mcfarland",
+      "mode": "scalar",
+      "assets": 1,
+      "median_speedup": 1.0153717189298002,
+      "minimum_speedup": 1.0083494384504132,
+      "maximum_speedup": 1.0330510638020491,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 126.013,
+          "speedup": 1.0174919095648862
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 71.182792,
+          "speedup": 1.0330510638020491
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 93.022583,
+          "speedup": 1.0153717189298002
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 111.545959,
+          "speedup": 1.0166347666615156
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 96.673208,
+          "speedup": 1.0083494384504132
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 93.549791,
+          "speedup": 1.0115063538730942
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 94.618375,
+          "speedup": 1.0092375397484896
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 91.056834,
+          "speedup": 1.0109835138788155
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 58.279125,
+          "speedup": 1.0259183712864597
+        }
+      ]
+    },
+    {
+      "engine": "current",
+      "mode": "batch64",
+      "assets": 1,
+      "median_speedup": 1.0434648871165135,
+      "minimum_speedup": 0.9732781186971634,
+      "maximum_speedup": 1.2775620366423388,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 127.598334,
+          "speedup": 1.0048501730437955
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 57.559208,
+          "speedup": 1.2775620366423388
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 95.171334,
+          "speedup": 0.9924469483636743
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 116.515,
+          "speedup": 0.9732781186971634
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 93.554333,
+          "speedup": 1.041965367868103
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 86.367084,
+          "speedup": 1.0956281446297296
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 87.73875,
+          "speedup": 1.088372195865567
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 86.184583,
+          "speedup": 1.0681371864385536
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 57.299125,
+          "speedup": 1.0434648871165135
+        }
+      ]
+    },
+    {
+      "engine": "current",
+      "mode": "batch256",
+      "assets": 1,
+      "median_speedup": 1.0524026601458547,
+      "minimum_speedup": 0.9864813651176557,
+      "maximum_speedup": 1.26237520829018,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 127.167166,
+          "speedup": 1.0082571785864916
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 58.251666,
+          "speedup": 1.26237520829018
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 93.632584,
+          "speedup": 1.0087567379321711
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 114.955542,
+          "speedup": 0.9864813651176557
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 92.6265,
+          "speedup": 1.0524026601458547
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 86.943292,
+          "speedup": 1.088366978328817
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 88.138458,
+          "speedup": 1.0834364268092824
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 86.354,
+          "speedup": 1.0660416193806888
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 58.355375,
+          "speedup": 1.0245778559387202
+        }
+      ]
+    },
+    {
+      "engine": "current",
+      "mode": "vforce64",
+      "assets": 1,
+      "median_speedup": 1.7962776711190538,
+      "minimum_speedup": 1.522036685779696,
+      "maximum_speedup": 1.8305434949185924,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 81.511292,
+          "speedup": 1.572999333638338
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 47.952,
+          "speedup": 1.5335222514180848
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 53.682792,
+          "speedup": 1.759455804757696
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 74.506417,
+          "speedup": 1.522036685779696
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 53.907458,
+          "speedup": 1.8082910717103373
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 51.692958,
+          "speedup": 1.8305434949185924
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 52.335708,
+          "speedup": 1.8246130538637217
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 50.956333,
+          "speedup": 1.8065852187597564
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 33.285291,
+          "speedup": 1.7962776711190538
+        }
+      ]
+    },
+    {
+      "engine": "current",
+      "mode": "vforce256",
+      "assets": 1,
+      "median_speedup": 1.830441713245409,
+      "minimum_speedup": 1.5464833821716961,
+      "maximum_speedup": 1.8819460424069971,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 79.897125,
+          "speedup": 1.6047787451676139
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 46.475959,
+          "speedup": 1.5822257481550837
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 52.21125,
+          "speedup": 1.8090449855155737
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 73.328625,
+          "speedup": 1.5464833821716961
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 52.486167,
+          "speedup": 1.857258408677471
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 50.281042,
+          "speedup": 1.8819460424069971
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 50.822792,
+          "speedup": 1.878928965571195
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 49.594209,
+          "speedup": 1.8562037757271217
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 32.664042,
+          "speedup": 1.830441713245409
+        }
+      ]
+    },
+    {
+      "engine": "plus",
+      "mode": "vforce256",
+      "assets": 1,
+      "median_speedup": 1.8577389636982977,
+      "minimum_speedup": 1.5959295272174792,
+      "maximum_speedup": 1.9096907135685965,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 77.918792,
+          "speedup": 1.6455235599648415
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 46.044583,
+          "speedup": 1.5970490817562621
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 51.235625,
+          "speedup": 1.8434926869731754
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 71.056709,
+          "speedup": 1.5959295272174792
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 51.715125,
+          "speedup": 1.8849490357028045
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 49.550541,
+          "speedup": 1.9096907135685965
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 50.111,
+          "speedup": 1.9056178483766042
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 48.704166,
+          "speedup": 1.8901249227838126
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 32.184083,
+          "speedup": 1.8577389636982977
+        }
+      ]
+    },
+    {
+      "engine": "plusplus",
+      "mode": "vforce256",
+      "assets": 1,
+      "median_speedup": 1.82757887929128,
+      "minimum_speedup": 1.5589147539913153,
+      "maximum_speedup": 1.879147747423605,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 79.346291,
+          "speedup": 1.6159193628849018
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 46.751125,
+          "speedup": 1.5729131438013524
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 52.196291,
+          "speedup": 1.8095634419694686
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 72.743875,
+          "speedup": 1.5589147539913153
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 52.484042,
+          "speedup": 1.8573336062797905
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 50.355917,
+          "speedup": 1.879147747423605
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 50.941208,
+          "speedup": 1.8745612785625343
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 49.701834,
+          "speedup": 1.8521843278459302
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 32.715209,
+          "speedup": 1.82757887929128
+        }
+      ]
+    },
+    {
+      "engine": "mcfarland",
+      "mode": "vforce256",
+      "assets": 1,
+      "median_speedup": 1.947801174740949,
+      "minimum_speedup": 1.5802563543232355,
+      "maximum_speedup": 1.9742550414527762,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 128.217208,
+          "candidate_ns": 78.46325,
+          "speedup": 1.6341052403513747
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 73.535459,
+          "candidate_ns": 44.224042,
+          "speedup": 1.662793712976304
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 94.4525,
+          "candidate_ns": 49.673875,
+          "speedup": 1.9014522221187695
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 113.4015,
+          "candidate_ns": 71.761458,
+          "speedup": 1.5802563543232355
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 97.480375,
+          "candidate_ns": 50.018667,
+          "speedup": 1.9488799051762014
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 94.626208,
+          "candidate_ns": 47.930083,
+          "speedup": 1.9742550414527762
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 95.492416,
+          "candidate_ns": 48.495209,
+          "speedup": 1.9691103094328348
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 92.056958,
+          "candidate_ns": 47.158792,
+          "speedup": 1.9520635303805067
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 59.789625,
+          "candidate_ns": 30.695959,
+          "speedup": 1.947801174740949
+        }
+      ]
+    },
+    {
+      "engine": "plus",
+      "mode": "scalar",
+      "assets": 4,
+      "median_speedup": 1.0261185834421305,
+      "minimum_speedup": 1.023891765753803,
+      "maximum_speedup": 1.0376391546990833,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 133.106667,
+          "speedup": 1.0317865295207191
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 76.534875,
+          "speedup": 1.0376391546990833
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 101.476292,
+          "speedup": 1.0261185834421305
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 118.574166,
+          "speedup": 1.0330598319367474
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 104.717625,
+          "speedup": 1.0256177028461064
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 101.728208,
+          "speedup": 1.0254833447965583
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 102.843,
+          "speedup": 1.0260619779664149
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 99.284583,
+          "speedup": 1.023891765753803
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 66.673166,
+          "speedup": 1.0342779132462379
+        }
+      ]
+    },
+    {
+      "engine": "plusplus",
+      "mode": "scalar",
+      "assets": 4,
+      "median_speedup": 1.0008819247084235,
+      "minimum_speedup": 0.9965149151550404,
+      "maximum_speedup": 1.0178423904257101,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 135.77875,
+          "speedup": 1.0114812958581516
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 78.023458,
+          "speedup": 1.0178423904257101
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 104.034958,
+          "speedup": 1.0008819247084235
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 120.883792,
+          "speedup": 1.0133220175621227
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 107.3405,
+          "speedup": 1.000556639851687
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 104.277959,
+          "speedup": 1.000408753684947
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 105.367041,
+          "speedup": 1.0014829210208152
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 101.996042,
+          "speedup": 0.9966726650040008
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 69.19975,
+          "speedup": 0.9965149151550404
+        }
+      ]
+    },
+    {
+      "engine": "mcfarland",
+      "mode": "scalar",
+      "assets": 4,
+      "median_speedup": 1.01156501232559,
+      "minimum_speedup": 1.0073235534574345,
+      "maximum_speedup": 1.0302879603546184,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 135.008875,
+          "speedup": 1.0172491697305086
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 77.080958,
+          "speedup": 1.0302879603546184
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 102.93625,
+          "speedup": 1.01156501232559
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 120.574667,
+          "speedup": 1.0159199361504352
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 106.619417,
+          "speedup": 1.0073235534574345
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 103.362292,
+          "speedup": 1.0092711856660455
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 104.50575,
+          "speedup": 1.0097367082672484
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 100.707959,
+          "speedup": 1.0094203875187262
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 67.632292,
+          "speedup": 1.019610321649309
+        }
+      ]
+    },
+    {
+      "engine": "current",
+      "mode": "batch64",
+      "assets": 4,
+      "median_speedup": 1.0358275020994023,
+      "minimum_speedup": 0.9673605641755625,
+      "maximum_speedup": 1.1717778271841135,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 137.910667,
+          "speedup": 0.9958451292241232
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 67.773584,
+          "speedup": 1.1717778271841135
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 105.531709,
+          "speedup": 0.9866864659606716
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 126.62725,
+          "speedup": 0.9673605641755625
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 103.685459,
+          "speedup": 1.0358275020994023
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 96.617541,
+          "speedup": 1.0797271584463115
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 98.075375,
+          "speedup": 1.0759407445548896
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 96.386541,
+          "speedup": 1.0546769906391806
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 67.616542,
+          "speedup": 1.019847820670865
+        }
+      ]
+    },
+    {
+      "engine": "current",
+      "mode": "batch256",
+      "assets": 4,
+      "median_speedup": 1.0424682624722035,
+      "minimum_speedup": 0.9784514123224105,
+      "maximum_speedup": 1.1580413838358061,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 137.492083,
+          "speedup": 0.9988769026068214
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 68.5775,
+          "speedup": 1.1580413838358061
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 104.048166,
+          "speedup": 1.0007548715467027
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 125.191917,
+          "speedup": 0.9784514123224105
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 103.024959,
+          "speedup": 1.0424682624722035
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 96.982458,
+          "speedup": 1.075664456761861
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 98.64825,
+          "speedup": 1.0696924882093701
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 96.827792,
+          "speedup": 1.0498707540496224
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 68.752167,
+          "speedup": 1.003002319912331
+        }
+      ]
+    },
+    {
+      "engine": "current",
+      "mode": "vforce64",
+      "assets": 4,
+      "median_speedup": 1.632007610069603,
+      "minimum_speedup": 1.3661544535379295,
+      "maximum_speedup": 1.687635943759264,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 91.804875,
+          "speedup": 1.4959735634954028
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 58.13075,
+          "speedup": 1.3661544535379295
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 63.802833,
+          "speedup": 1.632007610069603
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 84.705167,
+          "speedup": 1.4461243904991061
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 64.068083,
+          "speedup": 1.6763456150233182
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 61.814625,
+          "speedup": 1.687635943759264
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 62.685833,
+          "speedup": 1.6833674683720004
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 61.13025,
+          "speedup": 1.662951926419408
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 43.82,
+          "speedup": 1.5736782975810133
+        }
+      ]
+    },
+    {
+      "engine": "current",
+      "mode": "vforce256",
+      "assets": 4,
+      "median_speedup": 1.6726499136372617,
+      "minimum_speedup": 1.4029699816446624,
+      "maximum_speedup": 1.7275171122513713,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 90.314667,
+          "speedup": 1.5206573922262263
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 56.605333,
+          "speedup": 1.4029699816446624
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 62.252542,
+          "speedup": 1.6726499136372617
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 83.202083,
+          "speedup": 1.4722492945278787
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 62.71075,
+          "speedup": 1.7126290149615497
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 60.387583,
+          "speedup": 1.7275171122513713
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 61.095292,
+          "speedup": 1.7271918759304725
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 59.761959,
+          "speedup": 1.7010263502238943
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 43.1285,
+          "speedup": 1.598909839201456
+        }
+      ]
+    },
+    {
+      "engine": "plus",
+      "mode": "vforce256",
+      "assets": 4,
+      "median_speedup": 1.6972879942786239,
+      "minimum_speedup": 1.4159714270956227,
+      "maximum_speedup": 1.7528623862685238,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 87.783334,
+          "speedup": 1.5645072901879076
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 56.085583,
+          "speedup": 1.4159714270956227
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 61.348875,
+          "speedup": 1.6972879942786239
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 81.044375,
+          "speedup": 1.511446142930956
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 61.709708,
+          "speedup": 1.740410925295579
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 59.514417,
+          "speedup": 1.7528623862685238
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 60.2445,
+          "speedup": 1.751583829229224
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 58.997334,
+          "speedup": 1.7230722154326499
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 42.525542,
+          "speedup": 1.6215803434086744
+        }
+      ]
+    },
+    {
+      "engine": "plusplus",
+      "mode": "vforce256",
+      "assets": 4,
+      "median_speedup": 1.6695467485459348,
+      "minimum_speedup": 1.400182026734985,
+      "maximum_speedup": 1.7294565062387395,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 89.69425,
+          "speedup": 1.5311758111584635
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 56.718042,
+          "speedup": 1.400182026734985
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 62.36825,
+          "speedup": 1.6695467485459348
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 82.7285,
+          "speedup": 1.480677251491324
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 62.550875,
+          "speedup": 1.717006356825544
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 60.356041,
+          "speedup": 1.7284199107757914
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 61.015291,
+          "speedup": 1.7294565062387395
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 59.802042,
+          "speedup": 1.6998862179321568
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 43.25325,
+          "speedup": 1.5942983012837186
+        }
+      ]
+    },
+    {
+      "engine": "mcfarland",
+      "mode": "vforce256",
+      "assets": 4,
+      "median_speedup": 1.9208675179196446,
+      "minimum_speedup": 1.5940936674647446,
+      "maximum_speedup": 1.978449303819025,
+      "points": [
+        {
+          "tail": 1.0,
+          "tempering": 0.3535533905932738,
+          "baseline_ns": 137.337666,
+          "candidate_ns": 83.647458,
+          "speedup": 1.641862996004015
+        },
+        {
+          "tail": 1.1,
+          "tempering": 20.0,
+          "baseline_ns": 79.415583,
+          "candidate_ns": 49.052583,
+          "speedup": 1.6189888104363435
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.35,
+          "baseline_ns": 104.126709,
+          "candidate_ns": 54.762792,
+          "speedup": 1.9014134450997313
+        },
+        {
+          "tail": 1.3,
+          "tempering": 0.5,
+          "baseline_ns": 122.494208,
+          "candidate_ns": 76.842541,
+          "speedup": 1.5940936674647446
+        },
+        {
+          "tail": 1.4,
+          "tempering": 0.45,
+          "baseline_ns": 107.40025,
+          "candidate_ns": 54.952042,
+          "speedup": 1.954436015316774
+        },
+        {
+          "tail": 1.5,
+          "tempering": 0.5,
+          "baseline_ns": 104.320583,
+          "candidate_ns": 52.728459,
+          "speedup": 1.978449303819025
+        },
+        {
+          "tail": 1.55,
+          "tempering": 0.6,
+          "baseline_ns": 105.523292,
+          "candidate_ns": 53.491791,
+          "speedup": 1.9727006710244568
+        },
+        {
+          "tail": 1.7,
+          "tempering": 0.9,
+          "baseline_ns": 101.656667,
+          "candidate_ns": 52.228334,
+          "speedup": 1.946389233859154
+        },
+        {
+          "tail": 1.9,
+          "tempering": 0.04,
+          "baseline_ns": 68.958583,
+          "candidate_ns": 35.899708,
+          "speedup": 1.9208675179196446
+        }
+      ]
+    }
+  ],
+  "short_paths": [
+    {
+      "periods": 120,
+      "engine": "current",
+      "mode": "scalar",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 106.402197222,
+      "speedup": 1.0
+    },
+    {
+      "periods": 120,
+      "engine": "current",
+      "mode": "vforce256",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 306.849886111,
+      "speedup": 0.34675651528027623
+    },
+    {
+      "periods": 120,
+      "engine": "current",
+      "mode": "vforce64",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 87.6520833333,
+      "speedup": 1.213915210861584
+    },
+    {
+      "periods": 120,
+      "engine": "mcfarland",
+      "mode": "scalar",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 101.073958333,
+      "speedup": 1.0527162384542763
+    },
+    {
+      "periods": 120,
+      "engine": "mcfarland",
+      "mode": "vforce256",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 290.291436111,
+      "speedup": 0.3665357774499229
+    },
+    {
+      "periods": 120,
+      "engine": "mcfarland",
+      "mode": "vforce64",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 79.7897,
+      "speedup": 1.3335329901227853
+    },
+    {
+      "periods": 120,
+      "engine": "plus",
+      "mode": "scalar",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 102.809141667,
+      "speedup": 1.0349487944042752
+    },
+    {
+      "periods": 120,
+      "engine": "plus",
+      "mode": "vforce256",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 300.593980556,
+      "speedup": 0.35397314685141373
+    },
+    {
+      "periods": 120,
+      "engine": "plus",
+      "mode": "vforce64",
+      "baseline_ns": 106.402197222,
+      "candidate_ns": 85.7640055556,
+      "speedup": 1.2406393163740523
+    },
+    {
+      "periods": 360,
+      "engine": "current",
+      "mode": "scalar",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 105.976736111,
+      "speedup": 1.0
+    },
+    {
+      "periods": 360,
+      "engine": "current",
+      "mode": "vforce256",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 111.755710185,
+      "speedup": 0.9482892277769653
+    },
+    {
+      "periods": 360,
+      "engine": "current",
+      "mode": "vforce64",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 80.6422453704,
+      "speedup": 1.314159044359882
+    },
+    {
+      "periods": 360,
+      "engine": "mcfarland",
+      "mode": "scalar",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 100.950231481,
+      "speedup": 1.0497919079159916
+    },
+    {
+      "periods": 360,
+      "engine": "mcfarland",
+      "mode": "vforce256",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 102.727893519,
+      "speedup": 1.0316257102205557
+    },
+    {
+      "periods": 360,
+      "engine": "mcfarland",
+      "mode": "vforce64",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 72.8833722222,
+      "speedup": 1.4540591753618102
+    },
+    {
+      "periods": 360,
+      "engine": "plus",
+      "mode": "scalar",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 102.560532407,
+      "speedup": 1.0333091455731058
+    },
+    {
+      "periods": 360,
+      "engine": "plus",
+      "mode": "vforce256",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 108.672261111,
+      "speedup": 0.9751958321981841
+    },
+    {
+      "periods": 360,
+      "engine": "plus",
+      "mode": "vforce64",
+      "baseline_ns": 105.976736111,
+      "candidate_ns": 78.3154703704,
+      "speedup": 1.353203085032543
+    }
+  ]
+}

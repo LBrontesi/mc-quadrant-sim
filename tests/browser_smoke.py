@@ -33,6 +33,19 @@ def main() -> None:
             page.on("console", lambda message: browser_errors.append(message.text) if message.type == "error" else None)
             page.goto(f"{base_url}/?skipAutoLoad=1", wait_until="networkidle")
             page.locator("#connection.badge-ok").wait_for()
+            # Exploring a quadrant must not silently change simulation assumptions.
+            initial_state = page.locator("#start-state").input_value()
+            page.locator(".node-stagflation").click()
+            assert page.locator("#regime-insight-title").inner_text() == "Stagflation"
+            assert page.locator("#start-state").input_value() == initial_state
+            page.locator("#apply-regime").click()
+            assert page.locator("#start-state").input_value() == "Low growth / high inflation"
+            assert page.locator("#preview-regime").inner_text() == "Stagflation"
+            page.locator("#regime-tour").click()
+            assert page.locator("#regime-tour").get_attribute("aria-pressed") == "true"
+            page.locator(".node-goldilocks").press("Enter")
+            assert page.locator("#regime-tour").get_attribute("aria-pressed") == "false"
+            assert page.locator("#start-state").input_value() == "Low growth / high inflation"
             # Legacy local settings are migrated into a recurring real-spending phase.
             page.evaluate(
                 """localStorage.setItem('mcq-controls', JSON.stringify({
@@ -82,6 +95,8 @@ def main() -> None:
             page.locator("#run-message").filter(has_text="Simulation complete").wait_for()
             assert page.locator("#metric-grid").get_by_text("Annualized return", exact=True).is_visible()
             assert page.locator("#goal-metric-grid").get_by_text("Target success", exact=True).is_visible()
+            assert page.locator("#allocation-composition > span").count() == 3
+            assert "Normalized allocation:" in page.locator("#allocation-composition").get_attribute("aria-label")
             assert page.locator("#chart-goal-probability svg").is_visible()
             assert page.locator("#chart-rolling-horizon svg").is_visible()
             page.locator('[data-tab="tab-drawdowns"]').click()

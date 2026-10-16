@@ -48,7 +48,7 @@ def simulate_neutral_portfolios_native(
     cpi: np.ndarray,
     safe_rate: float,
     workers: int,
-) -> dict | None:
+) -> dict | None:  # Run the native tax-neutral portfolio ledger when available.
     if os.getenv("MC_DISABLE_NATIVE_SIM", "").strip().lower() in {"1", "true", "yes", "on"}:
         return None
     library = _load_library()

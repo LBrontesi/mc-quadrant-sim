@@ -1,0 +1,560 @@
+[
+  {
+    "tail": 1.1,
+    "tempering": 0.04,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 83.30332,
+      "env3": 277.065
+    }
+  },
+  {
+    "tail": 1.1,
+    "tempering": 0.1,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 544.01082,
+      "env1": 92.6725,
+      "env3": 192.69334
+    }
+  },
+  {
+    "tail": 1.1,
+    "tempering": 0.25,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 389.09918,
+      "env1": 108.35166,
+      "env2": 533.34666,
+      "env3": 143.445
+    }
+  },
+  {
+    "tail": 1.1,
+    "tempering": 0.5,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 348.50416,
+      "env1": 129.04834,
+      "env2": 347.36166,
+      "env3": 126.99
+    }
+  },
+  {
+    "tail": 1.1,
+    "tempering": 1.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 277.82082,
+      "env1": 160.37584,
+      "env2": 198.24582,
+      "env3": 105.9
+    }
+  },
+  {
+    "tail": 1.1,
+    "tempering": 2.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 287.705,
+      "env1": 202.20332,
+      "env2": 141.98666,
+      "env3": 96.10668
+    }
+  },
+  {
+    "tail": 1.1,
+    "tempering": 5.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 338.38416,
+      "env1": 286.15,
+      "env2": 104.2025,
+      "env3": 83.9775
+    }
+  },
+  {
+    "tail": 1.1,
+    "tempering": 10.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 444.04334,
+      "env1": 383.11416,
+      "env2": 94.11166,
+      "env3": 81.99334
+    }
+  },
+  {
+    "tail": 1.1,
+    "tempering": 20.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env1": 530.43666,
+      "env2": 87.10082,
+      "env3": 79.00332
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 0.04,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 77.92,
+      "env3": 278.89
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 0.1,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 87.01416,
+      "env3": 201.8575
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 0.25,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 495.26834,
+      "env1": 99.42332,
+      "env2": 761.83584,
+      "env3": 147.70916
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 0.5,
+    "original": 3,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 414.1225,
+      "env1": 112.22166,
+      "env2": 471.78916,
+      "env3": 122.4925
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 1.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 310.74834,
+      "env1": 136.905,
+      "env2": 247.98916,
+      "env3": 102.56584
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 2.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 325.4675,
+      "env1": 167.46918,
+      "env2": 192.9575,
+      "env3": 91.44668
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 5.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 356.89418,
+      "env1": 233.08082,
+      "env2": 132.8175,
+      "env3": 82.37584
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 10.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 448.31582,
+      "env1": 317.73584,
+      "env2": 112.73834,
+      "env3": 74.955
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 20.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env1": 453.425,
+      "env2": 106.20668,
+      "env3": 73.21
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 0.04,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 78.105,
+      "env3": 318.75082
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 0.1,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 83.4975,
+      "env3": 233.25418
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 0.25,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 722.2475,
+      "env1": 101.65416,
+      "env3": 170.02666
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 0.5,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 567.515,
+      "env1": 106.12666,
+      "env2": 732.73416,
+      "env3": 131.3275
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 1.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 400.73666,
+      "env1": 121.59,
+      "env2": 371.93334,
+      "env3": 110.2575
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 2.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 400.29916,
+      "env1": 148.76168,
+      "env2": 277.44416,
+      "env3": 97.39166
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 5.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 421.285,
+      "env1": 201.065,
+      "env2": 188.21834,
+      "env3": 81.85584
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 10.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 492.77416,
+      "env1": 262.565,
+      "env2": 148.83084,
+      "env3": 72.2025
+    }
+  },
+  {
+    "tail": 1.5,
+    "tempering": 20.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env1": 362.66832,
+      "env2": 133.73418,
+      "env3": 68.8925
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 0.04,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 75.145,
+      "env3": 387.04666
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 0.1,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 78.10832,
+      "env3": 273.57666
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 0.25,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 85.44084,
+      "env3": 195.8475
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 0.5,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 93.54,
+      "env3": 147.95582
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 1.0,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 577.81916,
+      "env1": 105.2025,
+      "env2": 688.41666,
+      "env3": 121.03916
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 2.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 526.3025,
+      "env1": 122.90832,
+      "env2": 451.7075,
+      "env3": 102.47
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 5.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env0": 529.54166,
+      "env1": 165.10416,
+      "env2": 307.4175,
+      "env3": 86.02084
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 10.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env1": 206.4325,
+      "env2": 234.88334,
+      "env3": 74.26
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 20.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env1": 265.5,
+      "env2": 188.81166,
+      "env3": 65.9975
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 0.04,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 69.5225
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 0.1,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 70.36666,
+      "env3": 393.94832
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 0.25,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 73.31918,
+      "env3": 278.21832
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 0.5,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 76.01418,
+      "env3": 217.6
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 1.0,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 83.84332,
+      "env3": 164.0275
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 2.0,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env1": 91.04168,
+      "env3": 127.24334
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 5.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env1": 110.13918,
+      "env3": 101.3075
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 10.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env1": 133.9575,
+      "env2": 600.39,
+      "env3": 87.17168
+    }
+  },
+  {
+    "tail": 1.9,
+    "tempering": 20.0,
+    "original": 3,
+    "selected": 3,
+    "pilot_ns": {
+      "env1": 164.61334,
+      "env2": 457.51416,
+      "env3": 75.4675
+    }
+  },
+  {
+    "tail": 1.7,
+    "tempering": 0.9,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 746.79918,
+      "env1": 102.215,
+      "env2": 919.43166,
+      "env3": 122.7625
+    }
+  },
+  {
+    "tail": 1.55,
+    "tempering": 0.6,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 586.36332,
+      "env1": 105.50918,
+      "env2": 737.09584,
+      "env3": 128.83166
+    }
+  },
+  {
+    "tail": 1.3,
+    "tempering": 0.35,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 448.1,
+      "env1": 104.88834,
+      "env2": 594.69668,
+      "env3": 132.65584
+    }
+  },
+  {
+    "tail": 1.4,
+    "tempering": 0.45,
+    "original": 1,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 506.3975,
+      "env1": 107.85,
+      "env2": 625.81334,
+      "env3": 129.72668
+    }
+  },
+  {
+    "tail": 1.0,
+    "tempering": 0.3535533905932738,
+    "original": 3,
+    "selected": 1,
+    "pilot_ns": {
+      "env0": 329.8025,
+      "env1": 127.15668,
+      "env2": 368.92584,
+      "env3": 139.36668
+    }
+  }
+]

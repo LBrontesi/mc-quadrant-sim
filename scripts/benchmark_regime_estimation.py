@@ -19,7 +19,7 @@ from mc_quadrants.simulation import (
 )
 
 
-def _synthetic_macro(months: int) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
+def _synthetic_macro(months: int) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:  # Generate deterministic synthetic macro data for a benchmark.
     rng = np.random.default_rng(20_260_903)
     exit_matrix = np.array(
         [
@@ -60,7 +60,7 @@ def _synthetic_macro(months: int) -> tuple[pd.DataFrame, np.ndarray, np.ndarray,
     return macro, truth_values, means, covariances
 
 
-def _probability_scores(probabilities: np.ndarray, truth: np.ndarray) -> dict[str, float]:
+def _probability_scores(probabilities: np.ndarray, truth: np.ndarray) -> dict[str, float]:  # Score predicted regime probabilities against truth labels.
     rows = np.arange(len(truth))
     one_hot = np.eye(len(REGIME_ORDER))[truth]
     return {
@@ -72,7 +72,7 @@ def _probability_scores(probabilities: np.ndarray, truth: np.ndarray) -> dict[st
     }
 
 
-def benchmark(months: int, heldout_samples: int, repeats: int) -> dict[str, object]:
+def benchmark(months: int, heldout_samples: int, repeats: int) -> dict[str, object]:  # Run and summarize the selected performance benchmark.
     if months < 120 or heldout_samples < 1 or repeats < 1:
         raise ValueError("months must be at least 120 and samples/repeats must be positive")
     macro, truth, true_means, true_covariances = _synthetic_macro(months)
@@ -160,7 +160,7 @@ def benchmark(months: int, heldout_samples: int, repeats: int) -> dict[str, obje
     return results
 
 
-def main() -> None:
+def main() -> None:  # Run the command-line entry point for this script.
     parser = argparse.ArgumentParser()
     parser.add_argument("--months", type=int, default=720)
     parser.add_argument("--heldout-samples", type=int, default=100_000)

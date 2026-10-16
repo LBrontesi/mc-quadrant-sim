@@ -87,6 +87,27 @@ def test_pipeline_supports_semi_markov_duration_model():
     assert scenario.model.metadata["model_kind"] == "quadrant"
 
 
+def test_independent_parameter_seed_keeps_bank_fixed_when_path_seed_changes():
+    first = run_scenario(**_scenario_kwargs({
+        "walk_forward": False, "parameter_draws": 3, "parameter_seed": 17,
+        "random_seed": 100, "paths": 129,
+    }))
+    second = run_scenario(**_scenario_kwargs({
+        "walk_forward": False, "parameter_draws": 3, "parameter_seed": 17,
+        "random_seed": 200, "paths": 129,
+    }))
+    pd.testing.assert_series_equal(
+        first.parameter_uncertainty["annualized_return"], second.parameter_uncertainty["annualized_return"],
+    )
+    assert not np.array_equal(first.wealth.to_numpy(), second.wealth.to_numpy())
+    assert first.model.metadata["parameter_seed"] == 17
+    diagnostic = first.model.metadata["parameter_convergence"]
+    assert diagnostic["status"] == "insufficient_models"
+    assert diagnostic["paths_per_model"] == [43, 43, 43]
+    assert "drawdown_p95" in diagnostic["metrics"]
+    assert any("precision is not established" in w for w in first.diagnostics.warnings)
+
+
 def test_neutral_gross_reporting_reuses_inflation_adjusted_wealth():
     scenario = run_scenario(
         **_scenario_kwargs(

@@ -1,0 +1,182 @@
+[
+  {
+    "round": 0,
+    "implementation": "user",
+    "ms": 166.751,
+    "output": "166.751 ms, checksum 287.892"
+  },
+  {
+    "round": 0,
+    "implementation": "monte_carlo",
+    "ms": 132.383,
+    "output": "132.383 ms, checksum 350.942"
+  },
+  {
+    "round": 1,
+    "implementation": "monte_carlo",
+    "ms": 132.208,
+    "output": "132.208 ms, checksum 350.942"
+  },
+  {
+    "round": 1,
+    "implementation": "user",
+    "ms": 165.301,
+    "output": "165.301 ms, checksum 287.892"
+  },
+  {
+    "round": 2,
+    "implementation": "user",
+    "ms": 171.746,
+    "output": "171.746 ms, checksum 287.892"
+  },
+  {
+    "round": 2,
+    "implementation": "monte_carlo",
+    "ms": 132.656,
+    "output": "132.656 ms, checksum 350.942"
+  },
+  {
+    "round": 3,
+    "implementation": "monte_carlo",
+    "ms": 132.923,
+    "output": "132.923 ms, checksum 350.942"
+  },
+  {
+    "round": 3,
+    "implementation": "user",
+    "ms": 174.767,
+    "output": "174.767 ms, checksum 287.892"
+  },
+  {
+    "round": 4,
+    "implementation": "user",
+    "ms": 182.332,
+    "output": "182.332 ms, checksum 287.892"
+  },
+  {
+    "round": 4,
+    "implementation": "monte_carlo",
+    "ms": 132.588,
+    "output": "132.588 ms, checksum 350.942"
+  },
+  {
+    "round": 5,
+    "implementation": "monte_carlo",
+    "ms": 132.409,
+    "output": "132.409 ms, checksum 350.942"
+  },
+  {
+    "round": 5,
+    "implementation": "user",
+    "ms": 172.141,
+    "output": "172.141 ms, checksum 287.892"
+  },
+  {
+    "round": 6,
+    "implementation": "user",
+    "ms": 185.398,
+    "output": "185.398 ms, checksum 287.892"
+  },
+  {
+    "round": 6,
+    "implementation": "monte_carlo",
+    "ms": 133.218,
+    "output": "133.218 ms, checksum 350.942"
+  },
+  {
+    "round": 7,
+    "implementation": "monte_carlo",
+    "ms": 133.255,
+    "output": "133.255 ms, checksum 350.942"
+  },
+  {
+    "round": 7,
+    "implementation": "user",
+    "ms": 168.891,
+    "output": "168.891 ms, checksum 287.892"
+  },
+  {
+    "round": 8,
+    "implementation": "user",
+    "ms": 173.728,
+    "output": "173.728 ms, checksum 287.892"
+  },
+  {
+    "round": 8,
+    "implementation": "monte_carlo",
+    "ms": 132.581,
+    "output": "132.581 ms, checksum 350.942"
+  },
+  {
+    "round": 9,
+    "implementation": "monte_carlo",
+    "ms": 133.161,
+    "output": "133.161 ms, checksum 350.942"
+  },
+  {
+    "round": 9,
+    "implementation": "user",
+    "ms": 172.543,
+    "output": "172.543 ms, checksum 287.892"
+  },
+  {
+    "round": 10,
+    "implementation": "user",
+    "ms": 167.827,
+    "output": "167.827 ms, checksum 287.892"
+  },
+  {
+    "round": 10,
+    "implementation": "monte_carlo",
+    "ms": 132.665,
+    "output": "132.665 ms, checksum 350.942"
+  },
+  {
+    "round": 11,
+    "implementation": "monte_carlo",
+    "ms": 133.018,
+    "output": "133.018 ms, checksum 350.942"
+  },
+  {
+    "round": 11,
+    "implementation": "user",
+    "ms": 173.002,
+    "output": "173.002 ms, checksum 287.892"
+  },
+  {
+    "round": 12,
+    "implementation": "user",
+    "ms": 170.127,
+    "output": "170.127 ms, checksum 287.892"
+  },
+  {
+    "round": 12,
+    "implementation": "monte_carlo",
+    "ms": 132.34,
+    "output": "132.34 ms, checksum 350.942"
+  },
+  {
+    "round": 13,
+    "implementation": "monte_carlo",
+    "ms": 132.488,
+    "output": "132.488 ms, checksum 350.942"
+  },
+  {
+    "round": 13,
+    "implementation": "user",
+    "ms": 179.321,
+    "output": "179.321 ms, checksum 287.892"
+  },
+  {
+    "round": 14,
+    "implementation": "user",
+    "ms": 175.586,
+    "output": "175.586 ms, checksum 287.892"
+  },
+  {
+    "round": 14,
+    "implementation": "monte_carlo",
+    "ms": 133.02,
+    "output": "133.02 ms, checksum 350.942"
+  }
+]

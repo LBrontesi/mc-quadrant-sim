@@ -15,7 +15,7 @@ from mc_quadrants.regimes import Regime
 from mc_quadrants.simulation import simulate_portfolio_paths, simulate_returns, summarize_terminal_wealth
 
 
-def main() -> None:
+def main() -> None:  # Run the command-line entry point for this script.
     tickers = ["SPY", "IEF", "GLD", "DBC", "EFA", "VNQ", "TIP", "SHY"]
     prices = fetch_yahoo_prices(tickers, start="2006-01-01")
     returns = prices_to_returns(prices, method="log").resample("ME").sum().dropna()

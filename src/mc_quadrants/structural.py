@@ -26,7 +26,9 @@ _KNOWN_CLASSES = {
     "VNQ": "real_estate",
     "IEF": "government_bond",
     "TLT": "government_bond",
-    "SHY": "cash",
+    "SHY": "government_bond",
+    "LQD": "corporate_bond",
+    "HYG": "corporate_bond",
     "TIP": "inflation_linked_bond",
     "GLD": "gold",
     "DBC": "commodity",
@@ -57,7 +59,7 @@ _DEFAULT_INCOME_YIELD = {
 }
 
 
-def _base_symbol(asset: str) -> str:
+def _base_symbol(asset: str) -> str:  # Normalize a ticker by removing synthetic-series suffixes.
     return str(asset).strip().upper().removesuffix("_SIM").removesuffix("SIM")
 
 

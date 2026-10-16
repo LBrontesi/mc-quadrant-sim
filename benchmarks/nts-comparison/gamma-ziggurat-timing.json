@@ -1,0 +1,92 @@
+[
+  {
+    "round": 0,
+    "version": "before",
+    "ms": 163.932
+  },
+  {
+    "round": 0,
+    "version": "after",
+    "ms": 122.979
+  },
+  {
+    "round": 1,
+    "version": "after",
+    "ms": 122.576
+  },
+  {
+    "round": 1,
+    "version": "before",
+    "ms": 164.802
+  },
+  {
+    "round": 2,
+    "version": "before",
+    "ms": 164.409
+  },
+  {
+    "round": 2,
+    "version": "after",
+    "ms": 122.559
+  },
+  {
+    "round": 3,
+    "version": "after",
+    "ms": 122.271
+  },
+  {
+    "round": 3,
+    "version": "before",
+    "ms": 164.608
+  },
+  {
+    "round": 4,
+    "version": "before",
+    "ms": 163.597
+  },
+  {
+    "round": 4,
+    "version": "after",
+    "ms": 122.456
+  },
+  {
+    "round": 5,
+    "version": "after",
+    "ms": 122.763
+  },
+  {
+    "round": 5,
+    "version": "before",
+    "ms": 165.285
+  },
+  {
+    "round": 6,
+    "version": "before",
+    "ms": 164.752
+  },
+  {
+    "round": 6,
+    "version": "after",
+    "ms": 122.996
+  },
+  {
+    "round": 7,
+    "version": "after",
+    "ms": 124.992
+  },
+  {
+    "round": 7,
+    "version": "before",
+    "ms": 165.559
+  },
+  {
+    "round": 8,
+    "version": "before",
+    "ms": 165.624
+  },
+  {
+    "round": 8,
+    "version": "after",
+    "ms": 124.185
+  }
+]

@@ -17,7 +17,7 @@ from mc_quadrants.simulation import simulate_joint_regime_macro_paths, simulate_
 from mc_quadrants.taxes import prepare_italian_native_configuration
 
 
-def _model_fixture():
+def _model_fixture():  # Construct the calibrated model fixture for a benchmark.
     rng = np.random.default_rng(81)
     dates = pd.date_range("1980-01-31", periods=360, freq="ME")
     phases = np.resize(np.repeat(np.arange(4), 15), len(dates))
@@ -61,7 +61,7 @@ def _model_fixture():
     )
 
 
-def _portfolio_configuration(model, periods: int) -> dict[str, object]:
+def _portfolio_configuration(model, periods: int) -> dict[str, object]:  # Build the portfolio options for a benchmark run.
     configuration = prepare_italian_native_configuration(
         periods=periods,
         assets=model.assets,
@@ -87,7 +87,7 @@ def _portfolio_configuration(model, periods: int) -> dict[str, object]:
     return configuration
 
 
-def _macro_summary(result) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _macro_summary(result) -> tuple[np.ndarray, np.ndarray, np.ndarray]:  # Extract compact macro summary statistics from a result.
     regimes = np.asarray(result.regimes, dtype=int)
     frequencies = np.bincount(regimes.ravel(), minlength=4) / regimes.size
     macro = np.asarray(result.macro_paths, dtype=float)
@@ -100,7 +100,7 @@ def benchmark(
     reporting_paths: int,
     workers: int,
     repeats: int,
-) -> dict[str, object]:
+) -> dict[str, object]:  # Run and summarize the selected performance benchmark.
     if min(periods, paths, reporting_paths, workers, repeats) < 1:
         raise ValueError("benchmark sizes, workers, and repeats must be positive")
     model = _model_fixture()
@@ -205,7 +205,7 @@ def benchmark(
     }
 
 
-def main() -> None:
+def main() -> None:  # Run the command-line entry point for this script.
     parser = argparse.ArgumentParser()
     parser.add_argument("--periods", type=int, default=120)
     parser.add_argument("--paths", type=int, default=25_000)

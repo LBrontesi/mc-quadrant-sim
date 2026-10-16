@@ -9,7 +9,7 @@ import numpy as np
 
 from mc_quadrants.decumulation import DecumulationPlan
 
-NATIVE_ABI_VERSION = 10
+NATIVE_ABI_VERSION = 11
 NATIVE_RISK_STAT_NAMES = (
     "return_sum", "return_squares", "return_count", "log_return_sum",
     "log_return_count", "excess_return_sum", "downside_sum", "risk_free_sum",
@@ -150,12 +150,16 @@ class _MacroProcessConfig(ctypes.Structure):
         ("membership_inflation_threshold", ctypes.c_double),
         ("membership_growth_scale", ctypes.c_double),
         ("membership_inflation_scale", ctypes.c_double),
+        ("cpi_monthly_log_history", ctypes.c_void_p),
+        ("cpi_state_centers", ctypes.c_void_p),
+        ("cpi_persistence", ctypes.c_double),
+        ("cpi_latest_monthly_log", ctypes.c_double),
     ]
 
 _LIBRARY: ctypes.CDLL | None | bool = None
 
 
-def _load_library() -> ctypes.CDLL | None:
+def _load_library() -> ctypes.CDLL | None:  # Load and configure the optional compiled simulation library.
     global _LIBRARY
     if _LIBRARY is False:
         return None
@@ -377,11 +381,11 @@ def sample_mnts_subordinators_native(
     return output
 
 
-def _pointer(values: np.ndarray | None) -> ctypes.c_void_p:
+def _pointer(values: np.ndarray | None) -> ctypes.c_void_p:  # Return a C-compatible pointer for a NumPy array or null.
     return ctypes.c_void_p(0 if values is None else values.ctypes.data)
 
 
-def _income_arrays(assets, annual_income_yield, foreign_withholding_rate, foreign_tax_credit_rate):
+def _income_arrays(assets, annual_income_yield, foreign_withholding_rate, foreign_tax_credit_rate):  # Validate and normalize per-asset income and tax-rate arrays.
     arrays = []
     for values in (annual_income_yield, foreign_withholding_rate, foreign_tax_credit_rate):
         array = np.ascontiguousarray(np.zeros(assets) if values is None else values, dtype=np.float64)
@@ -1185,6 +1189,11 @@ def simulate_parametric_italian_portfolios_compact_native(
             raise ValueError("macro_process inflation_index is outside the macro vector.")
         if not np.isfinite([inflation_scale, rate_scale]).all() or min(inflation_scale, rate_scale) <= 0:
             raise ValueError("Macro reporting scales must be positive and finite.")
+        cpi_history = macro_process.get("cpi_monthly_log_history")
+        if cpi_history is not None:
+            cpi_history = np.ascontiguousarray(cpi_history, dtype=np.float64)
+            if cpi_history.shape != (12,) or not np.isfinite(cpi_history).all():
+                raise ValueError("CPI history requires twelve finite monthly log changes.")
         macro_config = _MacroProcessConfig(
             macro_dimensions,
             _pointer(macro_latest),
@@ -1202,6 +1211,15 @@ def simulate_parametric_italian_portfolios_compact_native(
             inflation_scale,
             rate_scale,
         )
+        macro_config.cpi_monthly_log_history = _pointer(cpi_history)
+        cpi_dynamics = macro_process.get("cpi_dynamics")
+        if cpi_dynamics:
+            cpi_centers = np.ascontiguousarray(list(cpi_dynamics["state_centers"].values()), dtype=float)
+            if cpi_centers.shape != (states,) or not np.isfinite(cpi_centers).all() or cpi_history is None:
+                raise ValueError("Monthly CPI dynamics require state centers and twelve monthly changes.")
+            macro_config.cpi_state_centers = _pointer(cpi_centers)
+            macro_config.cpi_persistence = float(cpi_dynamics["persistence"])
+            macro_config.cpi_latest_monthly_log = float(cpi_dynamics["latest_monthly_log"])
 
     multipliers = None
     if state_transaction_cost_multipliers is not None:

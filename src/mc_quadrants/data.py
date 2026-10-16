@@ -548,7 +548,7 @@ def _load_market_data_cached(
     threshold_window: int | None = None,
     macro_lag_periods: int = 1,
     macro_vintage: str = "latest",
-) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...], dict[str, dict[str, object]]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, tuple[str, ...], dict[str, dict[str, object]]]:  # Cache the complete market-data loading and backfill workflow.
     start_date = pd.Timestamp(start)
     end_date = pd.Timestamp(end)
     if end_date <= start_date:
@@ -611,6 +611,10 @@ def _load_market_data_cached(
             "growth": "INDPRO",
             "inflation": "CPIAUCSL",
             "interest_rate": "FEDFUNDS",
+            "bond_yield": "DGS7",
+            "bond_yield_2y": "DGS2",
+            "bond_yield_20y": "DGS20",
+            "real_bond_yield": "DFII10",
         },
         start=start_date.strftime("%Y-%m-%d"),
         end=end_date.strftime("%Y-%m-%d"),
@@ -629,14 +633,22 @@ def _load_market_data_cached(
     )
     if "interest_rate" in macro_levels:
         macro["interest_rate"] = pd.to_numeric(macro_levels["interest_rate"], errors="coerce")
+    macro["cpi_monthly_log"] = np.log(macro_levels["inflation"]).diff()
     macro.attrs.update(macro_attrs)
+    # Realized CPI stays on the economic observation calendar even when macro
+    # predictors move to their publication dates. Used only as validation truth.
+    macro.attrs["observed_price_index"] = {
+        str(date): float(value) for date, value in macro_levels["inflation"].dropna().items()
+    }
     if isinstance(macro_attrs.get("release_dates"), pd.DataFrame):
         macro.attrs["release_dates"] = macro_levels.attrs["release_dates"].reindex(
             index=macro.index,
             columns=macro.columns,
         )
+    if isinstance(macro.attrs.get("release_dates"), pd.DataFrame):
+        macro.attrs["release_dates"]["cpi_monthly_log"] = macro.attrs["release_dates"]["inflation"]
     macro.attrs["rate_col"] = "interest_rate" if "interest_rate" in macro.columns else None
-    macro = macro.dropna(how="any")
+    macro = macro.dropna(subset=[column for column in macro if column != "cpi_monthly_log"], how="any")
     if macro.attrs.get("point_in_time"):
         macro = align_macro_to_availability(macro)
     if macro.empty:
@@ -679,6 +691,12 @@ def _load_market_data_cached(
         if not simulated_returns.empty:
             returns = combine_observed_and_simulated_returns(returns, simulated_returns)
         available = tuple(returns.columns)
+    # Market yields retain their observation calendar, independently of macro
+    # publication lags. Keep this optional factor out of synthetic backfill.
+    for column in ("bond_yield", "bond_yield_2y", "bond_yield_20y", "real_bond_yield"):
+        if column in macro_levels:
+            macro[column] = pd.to_numeric(macro_levels[column], errors="coerce").reindex(macro.index)
+    macro["tips_inflation_log"] = np.log(macro_levels["inflation"]).diff().shift(3).reindex(macro.index)
     return macro, returns, available, synthetic_report
 
 

@@ -11,7 +11,7 @@ import numpy as np
 DEFAULT_DEPENDENCE = dict(garch_alpha=.10, garch_beta=.85, dcc_alpha=.04, dcc_beta=.94, dcc_asymmetry=.01)
 
 
-def _search(score, initial, steps, rounds=5):
+def _search(score, initial, steps, rounds=5):  # Search a local parameter grid for the lowest loss.
     best = np.asarray(initial, dtype=float)
     value = float(score(best[None])[0])
     increments = np.asarray(steps, dtype=float)
@@ -33,7 +33,7 @@ def _search(score, initial, steps, rounds=5):
     return best, value
 
 
-def fit_dependence(returns, regimes, moments, *, minimum_observations=60):
+def fit_dependence(returns, regimes, moments, *, minimum_observations=60, volatility_model="garch"):
     """Fit common coefficients on chronological, regime-standardized residuals."""
     states = list(moments)
     values = returns.to_numpy(dtype=float)
@@ -47,11 +47,17 @@ def fit_dependence(returns, regimes, moments, *, minimum_observations=60):
     result = {**DEFAULT_DEPENDENCE, "method": "pooled_regime_reset_gaussian_qml",
               "observations": len(values), "status": "insufficient_history",
               "minimum_observations": minimum_observations}
+    if volatility_model not in {"garch", "qarch"}:
+        raise ValueError("volatility_model must be 'garch' or 'qarch'.")
+    if volatility_model == "qarch":
+        from mc_quadrants.qarch import fit_qarch
+        result["qarch"] = fit_qarch(residuals, levels[codes], minimum_observations)
+        result["method"] = "pooled_qarch_adcc_gaussian_qml"
     if len(values) < minimum_observations or values.shape[1] == 0:
         return result
     assets = values.shape[1]
 
-    def garch_score(parameters, output=False):
+    def garch_score(parameters, output=False):  # Score pooled GARCH parameters against standardized residuals.
         alpha, beta = parameters[:, 0, None], parameters[:, 1, None]
         h = np.broadcast_to(levels[codes[0]], (len(parameters), assets)).copy()
         loss = np.zeros(len(parameters))
@@ -73,8 +79,14 @@ def fit_dependence(returns, regimes, moments, *, minimum_observations=60):
         key=lambda pair: pair[1],
     )
     z, next_h = garch_score(garch[None], output=True)
+    if volatility_model == "qarch":
+        from mc_quadrants.qarch import filtered_ratios, kernel
+        normalized = residuals / np.sqrt(levels[codes])
+        ratios = filtered_ratios(normalized, kernel(result["qarch"]["weights"]))
+        z = normalized / np.sqrt(ratios)
+        next_h = levels[codes[-1]] * result["qarch"]["next_variance_ratio"]
 
-    def dcc_score(parameters, output=False):
+    def dcc_score(parameters, output=False):  # Score pooled dynamic-correlation parameters against standardized residuals.
         a, b, g = (parameters[:, i, None, None] for i in range(3))
         q = np.broadcast_to(base[codes[0]], (len(parameters), assets, assets)).copy()
         loss = np.zeros(len(parameters))

@@ -15,7 +15,7 @@ def _library():
     return _load_library()
 
 
-def money_weighted_returns_native(terminal, periods, initial, contribution):
+def money_weighted_returns_native(terminal, periods, initial, contribution):  # Compute money-weighted returns with the native backend.
     library = _library()
     if library is None:
         return None
@@ -35,7 +35,7 @@ def money_weighted_returns_native(terminal, periods, initial, contribution):
     return output
 
 
-def risk_path_statistics_native(wealth, contributions, withdrawals, risk_free, initial):
+def risk_path_statistics_native(wealth, contributions, withdrawals, risk_free, initial):  # Compute path risk statistics with the native backend.
     library = _library()
     if library is None:
         return None
@@ -65,7 +65,7 @@ def risk_path_statistics_native(wealth, contributions, withdrawals, risk_free, i
     return output
 
 
-def inflation_index_native(periods, paths, annual_rate, rates=None, *, frequency=12.0, inverse=False):
+def inflation_index_native(periods, paths, annual_rate, rates=None, *, frequency=12.0, inverse=False):  # Compute cumulative inflation indexes with the native backend.
     library = _library()
     if library is None:
         return None

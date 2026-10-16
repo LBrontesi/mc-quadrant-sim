@@ -27,7 +27,7 @@ def benchmark(
     workers: int,
     compare_python: bool = False,
     repeats: int = 3,
-) -> dict[str, object]:
+) -> dict[str, object]:  # Run and summarize the selected performance benchmark.
     if repeats < 1:
         raise ValueError("repeats must be at least 1")
     assets = ["Equity", "Bonds", "Gold", "Commodities"]
@@ -97,7 +97,7 @@ def benchmark(
     weight_values = np.full(len(assets), 0.25)
     weights = dict(zip(assets, weight_values, strict=True))
 
-    def run_fused(wrapper_benchmark: bool, *, compact: bool):
+    def run_fused(wrapper_benchmark: bool, *, compact: bool):  # Implement the operation described by this function.
         native_config = prepare_italian_native_configuration(
             periods=periods,
             assets=assets,
@@ -307,7 +307,7 @@ def benchmark(
     return report
 
 
-def main() -> None:
+def main() -> None:  # Run the command-line entry point for this script.
     parser = argparse.ArgumentParser()
     parser.add_argument("--periods", type=int, default=360)
     parser.add_argument("--paths", type=int, default=100_000)

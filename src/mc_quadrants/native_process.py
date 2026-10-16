@@ -15,7 +15,7 @@ def simulate_regime_macro_native(
     random_seed, duration_model, min_regime_duration, macro_dynamics=None,
     emission_coefficients=None, macro_transition_weight=0.35,
     macro_parameter_uncertainty=True, workers=1,
-):
+):  # Prepare and run the native regime and macro process.
     if os.getenv("MC_DISABLE_NATIVE_SIM", "").strip().lower() in {"1", "true", "yes", "on"}:
         return None
     library = _load_library()
@@ -30,7 +30,7 @@ def simulate_regime_macro_native(
         raise ValueError("Invalid duration_model.")
     buffers = []
 
-    def keep(values, shape=None, dtype=np.float64):
+    def keep(values, shape=None, dtype=np.float64):  # Validate, store, and return one native-process input buffer.
         array = np.ascontiguousarray(values, dtype=dtype)
         if shape is not None and array.shape != shape:
             raise ValueError(f"Native process input must have shape {shape}, got {array.shape}.")
@@ -114,6 +114,16 @@ def simulate_regime_macro_native(
             _pointer(centers), _pointer(factor), _pointer(emission), macro_transition_weight,
             rate_index, *bounds, -1, 1.0, 1.0, int(emission is None), *thresholds, *scales,
         )
+        cpi = dynamics.get("cpi_dynamics")
+        if cpi:
+            history = keep(model.metadata["cpi_process"]["monthly_log_history"], (12,))
+            cpi_centers = keep([cpi["state_centers"][state] for state in model.states], (states,))
+            macro.cpi_monthly_log_history = _pointer(history)
+            macro.cpi_state_centers = _pointer(cpi_centers)
+            macro.cpi_persistence = float(cpi["persistence"])
+            macro.cpi_latest_monthly_log = float(cpi["latest_monthly_log"])
+            macro.inflation_index = int(cpi["index"])
+            macro.inflation_scale = float(cpi["yoy_scale"])
     regimes = np.empty((periods, paths), dtype=np.uint8)
     values = np.empty((periods, paths, dimensions)) if macro is not None else None
     shocks = np.empty_like(values) if macro is not None else None

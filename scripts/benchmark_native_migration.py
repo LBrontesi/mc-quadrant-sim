@@ -16,7 +16,7 @@ from mc_quadrants.simulation import simulate_portfolio_paths
 from mc_quadrants.types import SimulationResult
 
 
-def main() -> None:
+def main() -> None:  # Run the command-line entry point for this script.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--paths", type=int, default=25_000)
     parser.add_argument("--periods", type=int, default=360)

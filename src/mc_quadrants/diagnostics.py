@@ -18,7 +18,7 @@ class CalibrationDiagnostics:
     warnings: list[str]
 
 
-def _transition_counts(regimes: pd.Series) -> pd.DataFrame:
+def _transition_counts(regimes: pd.Series) -> pd.DataFrame:  # Count observed transitions between consecutive regimes.
     clean = regimes.dropna().sort_index().astype(str)
     counts = pd.DataFrame(0, index=REGIME_ORDER, columns=REGIME_ORDER, dtype=int)
     for current, next_state in zip(clean.iloc[:-1], clean.iloc[1:]):

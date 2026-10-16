@@ -147,7 +147,7 @@ def _fit_factor_model(
     return beta, r2, residual_vol, int(len(aligned))
 
 
-def _grade(history_months: int, r2: float | None, covered_regimes: int) -> str:
+def _grade(history_months: int, r2: float | None, covered_regimes: int) -> str:  # Assign a backfill feasibility grade from history and fit quality.
     if history_months < 12:
         return "X"
     if history_months < 24:
@@ -170,7 +170,7 @@ def _report_entry(
     residual_vol: float | None,
     grade: str,
     warnings: Sequence[str],
-) -> dict[str, object]:
+) -> dict[str, object]:  # Build the diagnostics entry for one synthetic asset.
     return {
         "asset": asset,
         "grade": grade,
@@ -298,10 +298,7 @@ def simulate_regime_conditioned_pre_inception_returns(
                 and model_anchors.loc[date].notna().all()
             ):
                 factor_part = float(beta[0] + beta[1:] @ model_anchors.loc[date].to_numpy(dtype=float))
-                if state in residual_by_regime:
-                    mean, std = residual_by_regime[state]
-                else:
-                    mean, std = 0.0, full_residual_vol
+                mean, std = residual_by_regime.get(state, (0.0, full_residual_vol))
                 generated[date] = _mnts_noise(rng, factor_part + mean, std)
             elif state in regime_mean:
                 generated[date] = _mnts_noise(rng, regime_mean[state], regime_std[state])

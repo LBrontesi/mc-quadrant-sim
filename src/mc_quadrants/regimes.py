@@ -161,7 +161,7 @@ def quadrant_probabilities(
         temperature,
     )
 
-    def logistic(values: pd.Series) -> pd.Series:
+    def logistic(values: pd.Series) -> pd.Series:  # Map macro observations to smooth high-state probabilities.
         clipped = values.clip(lower=-35.0, upper=35.0)
         return 1.0 / (1.0 + np.exp(-clipped))
 
@@ -310,7 +310,7 @@ def classify_persistent_quadrants(
         1.0,
     ) * float(hysteresis)
 
-    def state_for(growth_high: bool, inflation_high: bool) -> str:
+    def state_for(growth_high: bool, inflation_high: bool) -> str:  # Map growth and inflation flags to a quadrant state.
         if growth_high and not inflation_high:
             return Regime.HIGH_GROWTH_LOW_INFLATION.value
         if growth_high and inflation_high:
@@ -319,13 +319,13 @@ def classify_persistent_quadrants(
             return Regime.LOW_GROWTH_HIGH_INFLATION.value
         return Regime.LOW_GROWTH_LOW_INFLATION.value
 
-    def growth_is_high(state: str) -> bool:
+    def growth_is_high(state: str) -> bool:  # Report whether a regime has high growth.
         return state in {
             Regime.HIGH_GROWTH_LOW_INFLATION.value,
             Regime.HIGH_GROWTH_HIGH_INFLATION.value,
         }
 
-    def inflation_is_high(state: str) -> bool:
+    def inflation_is_high(state: str) -> bool:  # Report whether a regime has high inflation.
         return state in {
             Regime.HIGH_GROWTH_HIGH_INFLATION.value,
             Regime.LOW_GROWTH_HIGH_INFLATION.value,

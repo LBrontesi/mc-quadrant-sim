@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from mc_quadrants.calibration import CorrelationOverrides, calibrate_quadrant_model
+from mc_quadrants.cpi import accounting_inflation_paths
 from mc_quadrants.data import convert_returns_to_base_currency
 from mc_quadrants.decumulation import DecumulationPlan, normalize_decumulation
 from mc_quadrants.diagnostics import (
@@ -20,6 +21,7 @@ from mc_quadrants.diagnostics import (
     build_calibration_diagnostics,
     build_hmm_diagnostics,
 )
+from mc_quadrants.ensemble_convergence import assess_parameter_convergence
 from mc_quadrants.hmm import fit_hmm_model
 from mc_quadrants.model_selection import select_calibration_hyperparameters
 from mc_quadrants.native import NATIVE_RISK_STAT_NAMES, native_fused_available
@@ -134,6 +136,8 @@ def _cached_walk_forward_validation(
     digest.update(_frame_cache_digest(returns))
     digest.update(_frame_cache_digest(macro))
     digest.update(repr(normalized_kwargs).encode())
+    for attr in ("observed_price_index", "point_in_time", "availability_aligned", "data_vintage"):
+        digest.update(repr(macro.attrs.get(attr)).encode())
     key = digest.digest()
     with _WALK_FORWARD_CACHE_LOCK:
         cached = _WALK_FORWARD_CACHE.get(key)
@@ -212,7 +216,7 @@ def _clear_parameter_model_cache() -> None:
         _PARAMETER_MODEL_CACHE.clear()
 
 
-def _alternative_decumulation(plan: DecumulationPlan) -> DecumulationPlan | None:
+def _alternative_decumulation(plan: DecumulationPlan) -> DecumulationPlan | None:  # Build the alternate withdrawal policy used for comparison.
     if not plan.active or plan.legacy_nominal:
         return None
     alternative = "fixed" if plan.policy == "guyton_klinger" else "guyton_klinger"
@@ -245,7 +249,7 @@ def _init_chunk_worker(state: dict[str, Any]) -> None:
 def _merge_tax_by_year(
     target: dict[str, dict[str, float]],
     source: Mapping[str, Mapping[str, Any]] | None,
-) -> None:
+) -> None:  # Add yearly tax metrics into an accumulated summary.
     for year, metrics in (source or {}).items():
         bucket = target.setdefault(str(year), {})
         for name, value in metrics.items():
@@ -453,6 +457,7 @@ def _run_chunk(
         duration_model=state["duration_model"],
         min_regime_duration=state["min_regime_duration"],
         garch=state["garch"],
+        volatility_model=state["volatility_model"],
         garch_alpha=state["garch_alpha"],
         garch_beta=state["garch_beta"],
         joint_macro=state["joint_macro"],
@@ -497,7 +502,7 @@ def _run_chunk(
         "withdrawal": state["withdrawal"],
         "withdrawal_start_period": state["withdrawal_start_period"],
         "decumulation": state["decumulation"],
-        "withdrawal_inflation_paths": financing_inflation_paths,
+        "withdrawal_inflation_paths": accounting_inflation_paths(state["model"], chunk_result),
         "annual_inflation": state["annual_inflation"],
         "safe_withdrawal_rate": state["safe_withdrawal_rate"],
         "native_threads": state.get("native_threads", 1),
@@ -601,7 +606,7 @@ def _run_chunk(
     )
 
 
-def _chunk_specs(total: int, chunk_size: int, random_seed: int) -> list[tuple[int, int, int]]:
+def _chunk_specs(total: int, chunk_size: int, random_seed: int) -> list[tuple[int, int, int]]:  # Split a simulation into deterministic seeded chunks.
     return [
         (start, min(chunk_size, total - start), int(random_seed) + start // chunk_size)
         for start in range(0, total, chunk_size)
@@ -619,6 +624,7 @@ def _simulate_chunked(
     duration_model: str,
     min_regime_duration: int,
     garch: bool,
+    volatility_model: str,
     garch_alpha: float,
     garch_beta: float,
     joint_macro: bool,
@@ -687,7 +693,7 @@ def _simulate_chunked(
         rebalance_frequency=rebalance_frequency, leverage_multiple=leverage_multiple,
         withdrawal=withdrawal, decumulation=decumulation,
     )
-    native_tax_execution = native_tax_execution or native_neutral_execution
+    native_tax_execution = (native_tax_execution or native_neutral_execution) and not (garch and volatility_model == "qarch")
     native_threads = max(1, int(workers)) if native_tax_execution else 1
     native_portfolio_config: dict[str, object] | None = None
     if native_tax_execution:
@@ -732,7 +738,7 @@ def _simulate_chunked(
     def _single(
         paths_now: int,
         seed: int,
-    ) -> tuple[SimulationResult, pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[SimulationResult, pd.DataFrame, pd.DataFrame]:  # Run one unchunked simulation batch inside the pipeline.
         chunk_result = simulate_returns(
             model,
             periods=periods,
@@ -744,6 +750,7 @@ def _simulate_chunked(
             duration_model=duration_model,
             min_regime_duration=min_regime_duration,
             garch=garch,
+            volatility_model=volatility_model,
             garch_alpha=garch_alpha,
             garch_beta=garch_beta,
             joint_macro=joint_macro,
@@ -831,7 +838,7 @@ def _simulate_chunked(
             "withdrawal": withdrawal,
             "withdrawal_start_period": withdrawal_start_period,
             "decumulation": decumulation,
-            "withdrawal_inflation_paths": financing_inflation_paths,
+            "withdrawal_inflation_paths": accounting_inflation_paths(model, chunk_result),
             "annual_inflation": annual_inflation,
             "safe_withdrawal_rate": safe_withdrawal_rate,
             "native_threads": native_threads,
@@ -991,6 +998,7 @@ def _simulate_chunked(
             "duration_model": duration_model,
             "min_regime_duration": int(min_regime_duration),
             "garch": bool(garch),
+            "volatility_model": volatility_model,
             "garch_alpha": float(garch_alpha),
             "garch_beta": float(garch_beta),
             "joint_macro": bool(joint_macro),
@@ -1259,6 +1267,7 @@ def run_scenario(
     mean_prior_strength: float = 0.0,
     parameter_draws: int = 0,
     parameter_block_size: int = 12,
+    parameter_seed: int | None = None,
     joint_macro: bool = False,
     macro_transition_weight: float = 0.35,
     macro_parameter_uncertainty: bool = True,
@@ -1276,6 +1285,8 @@ def run_scenario(
     workers: int = 1,
     calibrate_dependence: bool = True,
     select_hyperparameters: bool = False,
+    volatility_model: str = "garch",
+    economic_returns: Mapping | None = None,
 ) -> SimulationRun:
     """Calibrate and simulate one fully specified investment scenario.
 
@@ -1286,6 +1297,20 @@ def run_scenario(
     hazards. ``walk_forward`` runs a strictly out-of-sample predictive check.
     """
 
+    from mc_quadrants.economic_returns import economic_assumptions
+    economic_returns = economic_assumptions(economic_returns)
+    if economic_returns and model_kind != "quadrant":
+        raise ValueError("Economic returns currently require the quadrant model.")
+    if economic_returns and economic_returns["rate_stress"]:
+        if not joint_macro:
+            raise ValueError("Persistent rate stress requires joint macro paths.")
+        chunk_size = chunk_size if chunk_size is not None else 2000
+    volatility_model = str(volatility_model).strip().lower()
+    if volatility_model not in {"garch", "qarch"}:
+        raise ValueError("volatility_model must be 'garch' or 'qarch'.")
+    if garch and volatility_model == "qarch" and chunk_size is None:
+        # Bound temporary return/history cubes in the reference QARCH backend.
+        chunk_size = max(1, min(2000, 2_000_000 // max(1, int(periods) * len(selected_tickers))))
     distribution = str(distribution).strip().lower().replace("-", "_")
     if distribution != "mnts":
         raise ValueError("distribution must be 'mnts'.")
@@ -1314,8 +1339,15 @@ def run_scenario(
         0 if bool(macro.attrs.get("availability_aligned", False)) else requested_macro_lag_periods
     )
     parameter_draws = int(parameter_draws)
-    if parameter_draws < 0 or parameter_draws > 100:
-        raise ValueError("parameter_draws must be between 0 and 100.")
+    if parameter_draws < 0 or parameter_draws > 512:
+        raise ValueError("parameter_draws must be between 0 and 512.")
+    if parameter_seed is not None and (
+        isinstance(parameter_seed, (bool, np.bool_))
+        or not isinstance(parameter_seed, (int, np.integer))
+        or not 0 <= parameter_seed <= 2**32 - 1
+    ):
+        raise ValueError("parameter_seed must be an integer between 0 and 4294967295, or None.")
+    effective_parameter_seed = int(random_seed) + 10_000 if parameter_seed is None else int(parameter_seed)
     if parameter_draws > int(paths):
         raise ValueError("parameter_draws cannot exceed simulated paths.")
     if parameter_draws and model_kind == "hmm":
@@ -1384,6 +1416,37 @@ def run_scenario(
         fx_quote=fx_quote,
     )
 
+    validation_options = dict(
+        calibration_options=dict(
+            rate_col=rate_col, correlation_overrides=correlation_overrides, override_weight=override_weight,
+            joint_macro=joint_macro, structural_returns=structural_returns,
+            asset_classes=normalized_asset_classes, asset_durations=normalized_asset_durations,
+            asset_income_yields=normalized_asset_income_yields, macro_model=macro_model,
+            economic_returns=economic_returns,
+        ),
+        simulation_options=dict(
+            duration_model=duration_model, macro_transition_weight=macro_transition_weight,
+            macro_parameter_uncertainty=macro_parameter_uncertainty,
+            transition_concentration=None if transition_uncertainty == 0 else max(1.0, 1.0 / transition_uncertainty**2),
+            garch_alpha=garch_alpha, garch_beta=garch_beta,
+            dcc_alpha=dcc_alpha, dcc_beta=dcc_beta, dcc_asymmetry=dcc_asymmetry,
+        ),
+        portfolio_options=dict(
+            initial_value=initial_value, return_kind=return_kind, rebalance_frequency=rebalance_frequency,
+            transaction_cost_bps=transaction_cost_bps, state_transaction_cost_multipliers=liquidity_multipliers,
+            asset_expense_ratios=normalized_expense_ratios, leverage_multiple=leverage_multiple,
+            financing_rate=financing_rate, financing_inflation_sensitivity=financing_inflation_sensitivity,
+            maintenance_margin=maintenance_margin, contribution=contribution,
+            contribution_allocation=contribution_allocation, withdrawal=withdrawal,
+            withdrawal_start_period=withdrawal_start_period, decumulation=decumulation_plan,
+            annual_inflation=annual_inflation, safe_withdrawal_rate=safe_withdrawal_rate,
+            tax_country=tax_country, tax_regime=tax_regime,
+            asset_tax_categories=normalized_tax_categories, asset_tax_metadata=normalized_tax_metadata,
+            italy_annual_wealth_tax=italy_annual_wealth_tax, italy_wealth_tax_mode=italy_wealth_tax_mode,
+            tax_terminal_liquidation=tax_terminal_liquidation,
+        ),
+        parameter_draws=parameter_draws, parameter_block_size=parameter_block_size, parameter_seed=parameter_seed,
+    )
     selection_report = None
     selection_warning = None
     if select_hyperparameters:
@@ -1402,7 +1465,8 @@ def run_scenario(
                     duration_prior_strength=duration_prior_strength, min_regime_duration=min_regime_duration,
                     mean_prior_strength=mean_prior_strength, weights=normalized_weights,
                     use_fitted_dependence=calibrate_dependence,
-                    garch=garch, dynamic_correlation=dynamic_correlation,
+                    garch=garch, dynamic_correlation=dynamic_correlation, volatility_model=volatility_model,
+                    **validation_options,
                 ),
             )
             mean_prior_strength = selection_report["selected_parameters"]["mean_prior_strength"]
@@ -1451,6 +1515,8 @@ def run_scenario(
             asset_durations=normalized_asset_durations,
             asset_income_yields=normalized_asset_income_yields,
             macro_model=macro_model,
+            volatility_model=volatility_model if garch else "garch",
+            economic_returns=economic_returns,
         )
         model.metadata["requested_macro_lag_periods"] = requested_macro_lag_periods
         regimes = classify_persistent_quadrants(
@@ -1497,14 +1563,17 @@ def run_scenario(
         if asset_currencies:
             model.metadata["asset_currencies"] = dict(asset_currencies)
 
+    if joint_macro and model.metadata.get("cpi_process"):
+        if model.metadata["cpi_process"]["history_source"] == "flat_history_assumption":
+            diagnostics.warnings.append("CPI monthly history was unavailable: the initial twelve changes are assumed equal. Supply cpi_monthly_log for exact observed initialization.")
     model.metadata["hyperparameter_selection"] = selection_report
     if selection_warning:
         diagnostics.warnings.append(selection_warning)
     if select_hyperparameters and selection_report:
         diagnostics.warnings.append("Hyperparameters selected on development folds; reported validation uses only the reserved final holdout.")
-    if calibrate_dependence and "dependence_fit" not in model.metadata:
+    if (calibrate_dependence or (garch and volatility_model == "qarch")) and "dependence_fit" not in model.metadata:
         from mc_quadrants.dependence import fit_dependence
-        model.metadata["dependence_fit"] = fit_dependence(scenario_returns, regimes.reindex(scenario_returns.index), model.moments)
+        model.metadata["dependence_fit"] = fit_dependence(scenario_returns, regimes.reindex(scenario_returns.index), model.moments, volatility_model=volatility_model if garch else "garch")
 
     if tax_selection.enabled and structural_returns:
         for asset, profile in model.metadata.get("asset_profiles", {}).items():
@@ -1519,7 +1588,7 @@ def run_scenario(
             macro,
             draws=parameter_draws,
             block_size=int(parameter_block_size),
-            random_seed=int(random_seed) + 10_000,
+            random_seed=effective_parameter_seed,
             growth_col=growth_col,
             inflation_col=inflation_col,
             rate_col=rate_col,
@@ -1543,15 +1612,25 @@ def run_scenario(
             asset_durations=normalized_asset_durations,
             asset_income_yields=normalized_asset_income_yields,
             macro_model=macro_model,
+            volatility_model=volatility_model if garch else "garch",
+            economic_returns=economic_returns,
         )
         parameter_models = anchor_parameter_models(parameter_models, model)
         parameter_summary = summarize_parameter_models(parameter_models, normalized_weights)
 
     simulation_models = parameter_models or [model]
+    model.metadata["parameter_seed"] = effective_parameter_seed if parameter_models else None
+    model.metadata["parameter_seed_mode"] = "legacy_linked" if parameter_seed is None else "independent"
     model.metadata["calibrate_dependence"] = bool(calibrate_dependence)
+    model.metadata["volatility_model"] = volatility_model if garch else "constant"
+    if garch and volatility_model == "qarch":
+        diagnostics.warnings.append("Experimental monthly QARCH: 12-lag constrained kernel; Python return backend. Forecast improvement over GARCH has not been established.")
+    for simulation_model in simulation_models:
+        simulation_model.metadata["calibrate_dependence"] = bool(calibrate_dependence)
+        simulation_model.metadata["volatility_model"] = volatility_model if garch else "constant"
     model.metadata["parameter_uncertainty_components"] = (
         (["moments", "mnts", "transitions", "durations"]
-         + (["garch"] if calibrate_dependence and garch else [])
+         + ([volatility_model] if calibrate_dependence and garch else [])
          + (["adcc"] if calibrate_dependence and dynamic_correlation else [])
          + (["macro"] if joint_macro else [])) if parameter_models else []
     )
@@ -1593,6 +1672,9 @@ def run_scenario(
                 "dcc_alpha": dcc_alpha, "dcc_beta": dcc_beta, "dcc_asymmetry": dcc_asymmetry,
             }.items()
         }
+        if garch and volatility_model == "qarch":
+            from mc_quadrants.qarch import DEFAULT_WEIGHTS
+            effective_dependence["qarch_weights"] = fitted_dependence.get("qarch", {}).get("weights", DEFAULT_WEIGHTS.tolist())
         if draw == 0:
             model.metadata["simulation_dependence"] = effective_dependence
         model.metadata["simulation_dependence_draws"].append({"draw": draw, "paths": draw_paths, **effective_dependence})
@@ -1611,6 +1693,7 @@ def run_scenario(
                 duration_model=duration_model,
                 min_regime_duration=int(min_regime_duration),
                 garch=garch,
+                volatility_model=volatility_model,
                 garch_alpha=effective_dependence["garch_alpha"],
                 garch_beta=effective_dependence["garch_beta"],
                 joint_macro=joint_macro,
@@ -1688,6 +1771,26 @@ def run_scenario(
         )
         for _, run_wealth, _ in simulation_runs
     ]
+    if parameter_models:
+        drawdown_groups = []
+        for _, run_wealth, _ in simulation_runs:
+            exact = run_wealth.attrs.get("native_max_drawdowns")
+            if exact is None:
+                values = run_wealth.to_numpy(dtype=float)
+                peaks = np.maximum.accumulate(values, axis=0)
+                exact = np.max(1.0 - values / np.maximum(peaks, 1e-12), axis=0)
+            drawdown_groups.append(np.asarray(exact, dtype=float))
+        convergence = assess_parameter_convergence(
+            {"terminal_median": terminal_groups, "drawdown_p95": drawdown_groups},
+            {"terminal_median": (.5, .02, True), "drawdown_p95": (.95, .02, False)},
+        )
+        model.metadata["parameter_convergence"] = convergence
+        if convergence["status"] != "within_tolerance":
+            diagnostics.warnings.append(
+                "Parameter-ensemble precision is not established: "
+                f"{convergence['status'].replace('_', ' ')} ({len(parameter_models)} fitted models). "
+                "Check additional parameter banks and path seeds; more paths alone may not resolve this."
+            )
     if len(simulation_runs) == 1:
         result, wealth, gross_wealth = simulation_runs[0]
     else:
@@ -1914,7 +2017,8 @@ def run_scenario(
                 mean_prior_strength=float(mean_prior_strength),
                 weights=normalized_weights,
                 use_fitted_dependence=calibrate_dependence,
-                garch=garch, dynamic_correlation=dynamic_correlation,
+                garch=garch, dynamic_correlation=dynamic_correlation, volatility_model=volatility_model,
+                **validation_options,
                 evaluation_start=selection_report["holdout_start"] if selection_report else None,
                 **({"step": 1} if selection_report else {}),
             )
@@ -1928,17 +2032,8 @@ def run_scenario(
         raise ValueError("Portfolio weights must have a non-zero sum.")
     weight_series = weight_series / weight_total
     fee_series = pd.Series(normalized_expense_ratios, dtype=float).reindex(selected).fillna(0.0)
-    inflation_paths = None
-    if result.macro_paths is not None and inflation_col in result.macro_columns:
-        inflation_index = result.macro_columns.index(inflation_col)
-        inflation_paths = result.macro_paths[:, :, inflation_index]
-        dynamics = model.metadata.get("macro_dynamics", {})
-        if bool(dynamics.get("inflation_is_percent", False)):
-            inflation_paths = inflation_paths / 100.0
-        inflation_paths = np.clip(inflation_paths, -0.10, 0.50)
-        model.metadata["inflation_model"] = "joint_macro_path"
-    else:
-        model.metadata["inflation_model"] = "deterministic"
+    inflation_paths = accounting_inflation_paths(model, result)
+    model.metadata["inflation_model"] = "joint_macro_path" if inflation_paths is not None else "deterministic"
     risk_free_paths = _annual_macro_paths(
         model,
         result,
@@ -2072,7 +2167,7 @@ def run_scenario(
     if risk_free_paths is not None:
         financing_paths = risk_free_paths + float(financing_rate)
         if float(financing_inflation_sensitivity) > 0 and inflation_paths is not None:
-            financing_paths += float(financing_inflation_sensitivity) * inflation_paths
+            financing_paths += float(financing_inflation_sensitivity) * _annual_macro_paths(model, result, inflation_col, "inflation_is_percent")
         effective_financing = float(np.clip(financing_paths, 0.0, 1.0).mean())
     elif float(financing_inflation_sensitivity) > 0 and state_inflation and len(result.states):
         native_regime_counts = wealth.attrs.get("native_regime_counts")

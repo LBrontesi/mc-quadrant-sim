@@ -32,7 +32,7 @@ def _align_regimes_to_returns(
     regimes: pd.Series,
     returns: pd.DataFrame,
     lag_periods: int = 0,
-) -> pd.Series:
+) -> pd.Series:  # Align regime labels to return dates after applying a lag.
     if lag_periods < 0:
         raise ValueError("lag_periods must be non-negative.")
     sorted_regimes = regimes.dropna().sort_index().astype(str).shift(lag_periods)
@@ -46,7 +46,7 @@ def _clean_aligned_returns(
     returns: pd.DataFrame,
     regimes: pd.Series,
     lag_periods: int = 0,
-) -> tuple[pd.DataFrame, pd.Series]:
+) -> tuple[pd.DataFrame, pd.Series]:  # Validate and filter returns and aligned regime labels.
     if returns.index.has_duplicates or regimes.index.has_duplicates:
         raise ValueError("returns and macro regime indexes must not contain duplicates.")
     clean_returns = returns.sort_index().dropna(how="all")
@@ -104,7 +104,7 @@ def _blend_covariance(
     global_covariance: pd.DataFrame,
     shrinkage: float | None,
     observations: np.ndarray | None = None,
-) -> pd.DataFrame:
+) -> pd.DataFrame:  # Blend local and global covariance estimates.
     if shrinkage is None:
         alpha = (
             _ledoit_wolf_alpha(
@@ -127,7 +127,7 @@ def _apply_correlation_overrides(
     covariance: pd.DataFrame,
     overrides: Mapping[tuple[str, str], float] | None,
     override_weight: float,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:  # Apply user correlation targets while preserving a valid covariance.
     if not overrides:
         correlation = covariance_to_correlation(covariance)
         return covariance, correlation
@@ -327,7 +327,7 @@ def estimate_weighted_regime_moments(
     return moments
 
 
-def _weighted_covariance(values: np.ndarray, weights: np.ndarray, fallback: np.ndarray) -> np.ndarray:
+def _weighted_covariance(values: np.ndarray, weights: np.ndarray, fallback: np.ndarray) -> np.ndarray:  # Compute a weighted covariance with a fallback estimate.
     weight_sum = float(weights.sum())
     if weight_sum <= 1.0:
         return fallback.copy()
@@ -356,6 +356,10 @@ def _fit_joint_macro_dynamics(
     macro_model: str = "bvar_ensemble",
     ridge: float = 1e-3,
     macro_lag_periods: int = 0,
+    additional_columns: tuple[str, ...] = (),
+    yield_model: str = "legacy",
+    log_columns: tuple[str, ...] = (),
+    macro_stress: str = "none",
 ) -> dict[str, object]:
     """Fit a compact regime-conditioned macro VAR and return-factor link.
 
@@ -370,12 +374,17 @@ def _fit_joint_macro_dynamics(
     if rate_col and rate_col in macro.columns and rate_col not in columns:
         active_rate_col = str(rate_col)
         columns.append(active_rate_col)
+    columns.extend(column for column in additional_columns if column not in columns)
     macro_clean = macro.loc[:, columns].apply(pd.to_numeric, errors="coerce").dropna().sort_index()
     if len(macro_clean) < 24:
         raise ValueError("Joint macro dynamics require at least 24 complete macro observations.")
     macro_model = str(macro_model).strip().lower()
     if macro_model not in {"ridge_var", "bvar", "bvar_ensemble"}:
         raise ValueError("macro_model must be 'ridge_var', 'bvar', or 'bvar_ensemble'.")
+    for column in log_columns:
+        if (macro_clean[column] <= 0).any():
+            raise ValueError("Credit spreads must be strictly positive for log-spread dynamics.")
+        macro_clean[column] = np.log(macro_clean[column])
     macro_values = macro_clean.to_numpy(dtype=float)
     global_mean = macro_values.mean(axis=0)
     x = macro_values[:-1] - global_mean
@@ -383,27 +392,33 @@ def _fit_joint_macro_dynamics(
     scale = np.maximum(macro_values.std(axis=0, ddof=1), 1e-6)
     x_scaled = x / scale
     y_scaled = y / scale
+    valid_transitions = np.asarray(macro.attrs.get("valid_macro_transitions", np.ones(len(x_scaled), dtype=bool)), dtype=bool)
+    if valid_transitions.shape != (len(x_scaled),) or valid_transitions.sum() < 12:
+        raise ValueError("Joint macro fitting requires at least 12 valid one-step transitions.")
+    # Preserve the original numerical path when no bootstrap joins are masked.
+    all_transitions = bool(valid_transitions.all())
+    fit_x, fit_y = (x_scaled, y_scaled) if all_transitions else (x_scaled[valid_transitions], y_scaled[valid_transitions])
     prior = np.zeros((len(columns), len(columns)), dtype=float)
     for index in range(len(columns)):
-        denominator = float(x_scaled[:, index] @ x_scaled[:, index])
+        denominator = float(fit_x[:, index] @ fit_x[:, index])
         slope = (
-            float(x_scaled[:, index] @ y_scaled[:, index]) / denominator
+            float(fit_x[:, index] @ fit_y[:, index]) / denominator
             if denominator > 1e-12
             else 0.5
         )
         prior[index, index] = float(np.clip(slope, -0.20, 0.98))
     prior_strength = 4.0 if macro_model != "ridge_var" else float(ridge)
 
-    def fit_coefficients(x_values: np.ndarray, y_values: np.ndarray) -> np.ndarray:
+    def fit_coefficients(x_values: np.ndarray, y_values: np.ndarray) -> np.ndarray:  # Fit the local macro autoregression coefficients.
         precision = x_values.T @ x_values + prior_strength * np.eye(len(columns))
         target = x_values.T @ y_values + prior_strength * prior
         return np.linalg.solve(precision, target)
 
-    full_coefficient_scaled = fit_coefficients(x_scaled, y_scaled)
-    rolling_observations = min(len(x_scaled), max(36, len(x_scaled) // 2))
+    full_coefficient_scaled = fit_coefficients(fit_x, fit_y)
+    rolling_observations = min(len(fit_x), max(36, len(fit_x) // 2))
     rolling_coefficient_scaled = fit_coefficients(
-        x_scaled[-rolling_observations:],
-        y_scaled[-rolling_observations:],
+        fit_x[-rolling_observations:],
+        fit_y[-rolling_observations:],
     )
     if macro_model == "bvar_ensemble":
         coefficient_scaled = 0.65 * full_coefficient_scaled + 0.35 * rolling_coefficient_scaled
@@ -419,9 +434,10 @@ def _fit_joint_macro_dynamics(
     global_residual_covariance = nearest_psd(np.atleast_2d(np.cov(residuals, rowvar=False)))
     scaled_residuals = y_scaled - x_scaled @ coefficient_scaled
     posterior_precision = np.linalg.inv(
-        x_scaled.T @ x_scaled + max(prior_strength, 1e-9) * np.eye(len(columns))
+        fit_x.T @ fit_x + max(prior_strength, 1e-9) * np.eye(len(columns))
     )
-    equation_variances = np.maximum(scaled_residuals.var(axis=0, ddof=1), 1e-12)
+    fit_residuals = scaled_residuals if all_transitions else scaled_residuals[valid_transitions]
+    equation_variances = np.maximum(fit_residuals.var(axis=0, ddof=1), 1e-12)
     coefficient_std_scaled = np.sqrt(
         np.maximum(np.diag(posterior_precision)[:, None] * equation_variances[None, :], 0.0)
     )
@@ -459,10 +475,48 @@ def _fit_joint_macro_dynamics(
     conditional_centers = membership @ np.asarray([state_centers[state] for state in REGIME_ORDER])
     conditional_centers[membership.sum(axis=1) == 0] = global_mean
     forecasts = conditional_centers[:-1] + (macro_values[:-1]-conditional_centers[:-1]) @ coefficient
-    residuals = macro_values[1:]-forecasts
-    global_residual_covariance = nearest_psd(np.atleast_2d(np.cov(residuals, rowvar=False)))
+    cpi_dynamics = None
+    observed_targets = macro_values[1:].copy()
+    if "cpi_monthly_log" in macro:
+        monthly = pd.to_numeric(macro["cpi_monthly_log"], errors="coerce").reindex(macro_clean.index).to_numpy(dtype=float) * 100
+        finite_monthly = np.isfinite(monthly)
+        valid_transitions &= finite_monthly[:-1] & finite_monthly[1:]
+        if "valid_macro_transitions" not in macro.attrs:
+            valid_transitions &= np.diff(macro_clean.index.to_period("M").asi8) == 1
+        if valid_transitions.sum() < 12:
+            raise ValueError("Monthly CPI dynamics require twelve observed one-month transitions.")
+        all_transitions = bool(valid_transitions.all())
+        mean = float(np.nanmean(monthly))
+        left, right = (monthly[:-1] - mean)[valid_transitions], (monthly[1:] - mean)[valid_transitions]
+        phi = float(np.clip((left @ right) / max(left @ left + 24 * np.nanvar(monthly), 1e-12), -0.5, 0.95))
+        monthly_centers = {}
+        for i, state in enumerate(REGIME_ORDER):
+            weights = membership[:, i] * finite_monthly
+            monthly_centers[state] = float((weights @ np.nan_to_num(monthly) + 24 * mean) / (weights.sum() + 24))
+        conditional_monthly = membership @ np.asarray(list(monthly_centers.values()))
+        inflation_index = columns.index(inflation_col)
+        forecasts[:, inflation_index] = conditional_monthly[:-1] + phi * (monthly[:-1] - conditional_monthly[:-1])
+        observed_targets[:, inflation_index] = monthly[1:]
+        cpi_dynamics = dict(persistence=phi, state_centers=monthly_centers, latest_monthly_log=float(monthly[-1] / 100) if finite_monthly[-1] else np.log1p(macro_clean[inflation_col].iloc[-1] * (0.01 if macro_clean[inflation_col].abs().quantile(0.9) >= 0.5 else 1.0)) / 12,
+                            innovation_basis="monthly_log_cpi_percent", index=inflation_index,
+                            yoy_scale=0.01 if macro_clean[inflation_col].abs().quantile(0.9) >= 0.5 else 1.0)
+    yield_dynamics = {}
+    if additional_columns and yield_model != "legacy":
+        from mc_quadrants.yield_forecasts import fit_yield_forecasts
+        yield_dynamics, yield_predictions = fit_yield_forecasts(macro_values, columns, additional_columns, valid_transitions, yield_model)
+        for column, prediction in yield_predictions.items():
+            forecasts[:, columns.index(column)] = prediction
+    residuals = observed_targets-forecasts
+    residuals[~valid_transitions] = 0.0
+    stress_specification = None
+    if macro_stress != "none":
+        from mc_quadrants.macro_stress import fit_macro_stress
+        stress_specification, residuals, _ = fit_macro_stress(
+            residuals, valid_transitions, macro_stress, membership[:-1],
+        )
+    global_residual_covariance = nearest_psd(np.atleast_2d(np.cov(residuals if all_transitions else residuals[valid_transitions], rowvar=False)))
     for index, state in enumerate(REGIME_ORDER):
-        weights = membership[:-1, index]
+        weights = membership[:-1, index] * valid_transitions
         local = _weighted_covariance(residuals, weights, global_residual_covariance)
         effective = weights.sum()**2 / max(float(weights @ weights), 1e-12)
         reliability = effective/(effective+24.0)
@@ -470,6 +524,7 @@ def _fit_joint_macro_dynamics(
             reliability*local + (1-reliability)*global_residual_covariance
         ).tolist()
     macro_innovations = pd.DataFrame(residuals, index=macro_clean.index[1:], columns=columns)
+    macro_innovations.loc[~valid_transitions] = np.nan
     aligned_changes = macro_innovations.reindex(returns.index, method="ffill").shift(macro_lag_periods)
     joint = returns.join(aligned_changes.add_prefix("__macro_"), how="inner").dropna()
     return_values = joint.loc[:, returns.columns].to_numpy(dtype=float)
@@ -530,6 +585,10 @@ def _fit_joint_macro_dynamics(
     )
     return {
         "columns": columns,
+        "yield_dynamics": yield_dynamics,
+        "log_columns": list(log_columns),
+        "cpi_dynamics": cpi_dynamics,
+        "stress_dynamics": stress_specification,
         "latest": macro_values[-1].tolist(),
         "global_mean": global_mean.tolist(),
         "var_coefficient": coefficient.tolist(),
@@ -541,7 +600,7 @@ def _fit_joint_macro_dynamics(
         "return_exposure_basis": "state_centered_forecast_innovations",
         "_residual_returns": pd.DataFrame(return_values-change_values @ betas, index=joint.index, columns=returns.columns),
         "innovation_covariance_prior_observations": 24,
-        "forecast_rmse": np.sqrt(np.mean(residuals**2, axis=0)).tolist(),
+        "forecast_rmse": np.sqrt(np.mean(residuals[valid_transitions]**2, axis=0)).tolist(),
         "state_centers": state_centers,
         "state_innovation_covariances": state_covariances,
         "return_betas": betas.tolist(),
@@ -590,9 +649,27 @@ def calibrate_quadrant_model(
     asset_income_yields: Mapping[str, float] | None = None,
     macro_model: str = "bvar_ensemble",
     hsmm_max_iterations: int = 30,
+    volatility_model: str = "garch",
+    economic_returns: Mapping | None = None,
 ) -> ScenarioModel:
     """Calibrate a full four-quadrant Markov Monte Carlo model."""
 
+    from mc_quadrants.economic_returns import (
+        anchor_moments,
+        economic_assumptions,
+        economic_columns,
+        prepare_economic_history,
+    )
+    economic_options = economic_assumptions(economic_returns)
+    if economic_options and frequency not in {"M", "ME"}:
+        raise ValueError("Economic return modeling currently requires monthly observations.")
+    if economic_options and economic_options["rate_stress"] and not joint_macro:
+        raise ValueError("Persistent rate stress requires joint_macro=True.")
+    asset_profiles = build_asset_profiles(list(returns.columns), asset_classes=asset_classes,
+                                         durations=asset_durations, income_yields=asset_income_yields)
+    economic_metadata = None
+    if economic_options:
+        returns, economic_metadata = prepare_economic_history(returns, macro, asset_profiles, economic_options, inflation_col)
     initial_regimes = classify_persistent_quadrants(
         macro,
         growth_col=growth_col,
@@ -761,6 +838,10 @@ def calibrate_quadrant_model(
             structural_returns=structural_returns,
             macro_model=macro_model,
             macro_lag_periods=macro_lag_periods,
+            additional_columns=tuple(economic_columns(asset_profiles, economic_options)) if economic_options and economic_options["rate_stress"] else (),
+            yield_model=economic_options["yield_model"] if economic_options else "legacy",
+            log_columns=tuple(sorted(set(economic_options["asset_spread_columns"].values()))) if economic_options and economic_options["rate_stress"] else (),
+            macro_stress=economic_options["macro_stress"] if economic_options else "none",
         )
 
     from mc_quadrants.dependence import fit_dependence
@@ -778,9 +859,17 @@ def calibrate_quadrant_model(
             state: dependence_returns.loc[dependence_regimes == state] for state in REGIME_ORDER
         })
         dynamics["residual_mnts"] = {state: dependence_moments[state].mnts for state in REGIME_ORDER}
-    metadata["dependence_fit"] = fit_dependence(dependence_returns, dependence_regimes, dependence_moments)
+    metadata["dependence_fit"] = fit_dependence(dependence_returns, dependence_regimes, dependence_moments, volatility_model=volatility_model)
     metadata["dependence_fit"]["input_basis"] = "macro_residual_returns" if joint_macro else "returns"
     metadata["mnts_estimation"] = {state: moments[state].mnts.estimation for state in REGIME_ORDER}
+    if joint_macro and frequency in {"M", "ME"}:
+        from mc_quadrants.cpi import calibrate_cpi_history
+        metadata["cpi_process"] = calibrate_cpi_history(macro, inflation_col)
+    if economic_metadata:
+        moments = anchor_moments(moments, returns, asset_profiles, economic_metadata)
+        metadata["economic_returns"] = economic_metadata
+        carry = pd.Series(economic_metadata["current_carry"], index=returns.columns)
+        moments = {state: replace(moment, mean=moment.mean + carry) for state, moment in moments.items()}
     model = ScenarioModel(
         states=REGIME_ORDER.copy(),
         transition_matrix=transition_matrix,

@@ -34,7 +34,7 @@ def select_calibration_hyperparameters(returns, macro, *, validation_kwargs, can
     for index, parameters in enumerate(candidates):
         if set(parameters)-allowed:
             raise ValueError("Unsupported calibration hyperparameter candidate.")
-        kwargs = {**validation_kwargs, **parameters, "max_splits": 4}
+        kwargs = {**validation_kwargs, **parameters, "max_splits": 4, "horizons": (1,)}
         kwargs.pop("evaluation_start", None)
         result = validation_runner(training, development_macro, **kwargs)
         score = float(result.summary["regime_energy_score_mean"])

@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 
-def scalar_score(draws, actual):
+def scalar_score(draws, actual):  # Compute the scalar forecast score used in model comparisons.
     values = np.sort(np.asarray(draws))
     n = len(values)
     return float(np.mean(np.abs(values - actual)) - np.sum((2 * np.arange(1, n + 1) - n - 1) * values) / n**2)
@@ -38,7 +38,7 @@ def vector_score(draws, actual):
     return float(np.linalg.norm(values - actual, axis=1).mean() - 0.5 * distance / len(values) ** 2)
 
 
-def worker(args):
+def worker(args):  # Run one parallel model-quality comparison task.
     sys.path.insert(0, args.package)
     from mc_quadrants.calibration import calibrate_quadrant_model
     from mc_quadrants.simulation import simulate_returns
@@ -183,7 +183,7 @@ def worker(args):
     print(f"Completed {args.variant}", flush=True)
 
 
-def paired_ci(values, length=12, repeats=4000):
+def paired_ci(values, length=12, repeats=4000):  # Estimate a paired block-bootstrap confidence interval.
     rng = np.random.default_rng(481)
     values = np.asarray(values)
     count = len(values)
@@ -192,7 +192,7 @@ def paired_ci(values, length=12, repeats=4000):
     return np.quantile(values[indexes].mean(axis=1), [0.025, 0.975]).tolist()
 
 
-def report(out):
+def report(out):  # Render the model-quality comparison report.
     manifest = json.loads((out / "manifest.json").read_text())
     assert hashlib.sha256((out / "data.pkl").read_bytes()).hexdigest() == manifest["data_sha256"]
     old = json.loads((out / "baseline.json").read_text())
@@ -289,7 +289,7 @@ def report(out):
     print(json.dumps(result, indent=2))
 
 
-def main():
+def main():  # Run the command-line entry point for this script.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="research/model_quality_2025")
     parser.add_argument("--package")

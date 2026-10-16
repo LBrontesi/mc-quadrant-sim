@@ -22,6 +22,9 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.6",
 ]
+research = [
+  "scipy>=1.16",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mc_quadrants"]

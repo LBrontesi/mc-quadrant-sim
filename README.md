@@ -303,6 +303,42 @@ coefficient defaults. Forecast paths still initialize variance and correlation
 at their starting regime's long-run levels; one-step validation uses filtered
 end-of-training dependence when the state continues.
 
+**Experimental monthly QARCH** is available under **Volatility model** in the
+web UI, or with `volatility_model="qarch"` in `run_scenario` and
+`simulate_returns` (keep `garch=True`, the volatility-clustering switch).
+The default remains GARCH. This is a restricted monthly adaptation of
+[Chicheportiche and Bouchaud's QARCH study](https://arxiv.org/abs/1206.2153),
+not a replication of its daily-stock calibration.
+
+For each asset, let `x` contain the last 12 residual returns divided by their
+historical regime's baseline standard deviation, newest first. The next
+variance is `regime_variance * (1 - trace(K) + x.T @ K @ x)`. The kernel combines
+a diagonal proportional to `lag**-1.2` with rank-one 3- and 12-month blocks.
+Each component has unit trace; three nonnegative weights with total below
+0.98 ensure a positive variance and finite unconditional second moment under
+the model's unit-variance martingale innovations. The off-diagonal terms
+distinguish trending and alternating return histories with equal magnitudes.
+There is no linear loss/gain asymmetry term in this version.
+
+Weights are pooled across assets and regimes and estimated by Gaussian
+quasi-likelihood with a small ridge penalty. At least 60 observations are
+required; shorter histories use weights `[0.35, 0.10, 0.10]`. Disabling
+coefficient estimation uses those defaults. Recent normalized residuals
+initialize the paths, persist across regime changes, and are anchored to the
+observed forecast origin in bootstrap runs. With no historical initialization,
+unknown lags contribute their unit-variance expectation until filled.
+ADCC calibration uses QARCH-filtered innovations when QARCH is selected.
+Walk-forward validation recalibrates QARCH within each training fold and uses
+its variance forecast for every candidate next regime.
+
+QARCH currently uses the Python return sampler with bounded automatic batch
+sizes; native portfolio accounting remains available, but fused native return
+generation is bypassed. It is slower than GARCH. The MNTS tail-fitting method
+is unchanged; joint tail/volatility recalibration and daily-frequency QARCH
+remain future work. Better out-of-sample forecasts or portfolio decisions have
+not yet been established. Kernel weights, fit status, objective, initial
+history, and effective simulation weights are included in methodology metadata.
+
 **Joint macro-financial paths** default to a shrinkage Bayesian VAR(1) ensemble
 that blends full-history and rolling-window coefficients for growth, inflation,
 and the effective federal funds rate when available. Stability constraints,
@@ -346,20 +382,57 @@ and duration-estimator details. This regularized update is not guaranteed to
 increase unpenalized likelihood at every iteration or improve holdout scores.
 
 **Walk-forward validation** (quadrant model only, enabled by default in the
-dashboard) checks the regime model and selected portfolio strictly out of sample: each split fits on
-data up to period `t` and scores the next observation under the one-step
-regime-switching MNTS predictive draws versus an unconditional MNTS model fitted
-on the same history. A multivariate energy score provides a proper scoring rule
-without approximating the MNTS density. Validation also reports transition Brier and log scores, observed
-versus predicted switches per decade, completed-duration log scores and errors,
-stability of expected durations across rolling calibration vintages,
-actual-state probabilities, portfolio probability-integral-transform
-diagnostics, 95% VaR breach frequency and clustering, and a Newey-West/HAC
-score comparison. Multi-horizon 3/12/60-month errors and a mean-variance
-certainty-equivalent advantage test whether complexity adds decision value.
-The UI shows expected months in every state and expected
-switches per decade, and warns when the implied persistence is unusually low.
-Weak or miscalibrated results are surfaced as warnings rather than hidden.
+dashboard) now refits the model at historical origins and calls the production
+`simulate_returns` engine for 512 paths over fully observed 1/3/12/60-month
+windows. Each refit uses only the return prefix and available macro prefix;
+approximate release lags first move predictors onto publication months, while
+availability-aligned inputs are not delayed twice. The forecast starts from that refit's filtered
+state/age posterior, never a present-day user-selected state. Revised historical
+macro inputs still carry revision look-ahead; the report explicitly labels
+point-in-time status rather than claiming that chronological refitting fixes it.
+
+The pipeline forwards selected duration, MNTS-GARCH/QARCH, correlation, joint
+macro, structural, manual/fitted dependence and parameter-bootstrap settings.
+Bootstrap models are refitted inside each origin and anchored there, with
+separate macro coefficient draws disabled to avoid duplicate uncertainty.
+The independent benchmark remains an iid unconditional MNTS model fitted on the
+same return prefix; its macro assumptions persist the last available release.
+
+The report includes energy and pair-averaged variogram scores and marginal CRPS
+for cumulative asset log returns; CRPS, midpoint PIT, forecast quantiles and
+central 90% interval coverage for portfolio returns, wealth and maximum drawdown;
+and joint-asset-loss Brier scores. Portfolio return scores compound weighted
+**simple** returns with monthly rebalancing, before costs. Wealth uses the
+production portfolio ledger with the selected rebalancing, fees, costs,
+financing, contributions, spending and tax policy. The legacy no-rebalancing
+setting retains its production weighted-log accounting and is labeled in
+metadata. Tax policy is a hypothetical replay of the selected policy, not a
+reconstruction of historical law. Each horizon is replayed separately so terminal
+liquidation occurs at the correct endpoint. Cash flows affect wealth drawdowns.
+
+Joint macro forecasts additionally score annual inflation on the supplied macro
+release calendar. Real-wealth and real-drawdown outcomes require actual CPI
+levels: FRED loading retains these on their economic observation dates, and
+macro CSVs may supply a `price_index` column alongside annual inflation. Direct
+Python callers can supply `observed_price_index` to `walk_forward_validation`.
+CPI outcomes never enter calibration. Observed CPI also drives inflation-indexed
+spending in the historical replay and supplies cumulative-inflation outcomes.
+Without complete price levels these scores
+are unavailable; trailing annual inflation is not used to invent realized
+monthly CPI. Forecast deflation retains the production model's current annual-
+rate approximation, so these checks can reveal its limitations.
+
+API `validation.horizon_scores` contains every scored origin and horizon;
+`validation.horizon_summary` and the dashboard report score means, coverage,
+valid counts and non-overlapping window counts. Longer overlapping forecasts
+are not independent replications. Incomplete calendar windows are skipped, and
+fewer than ten non-overlapping windows trigger an explicit limitation warning.
+Legacy one-month energy, VaR, PIT and certainty-equivalent fields now use the
+production draws; 3/12/60-month mean errors use simulated cumulative simple
+portfolio returns. Regime transition and duration diagnostics remain separately
+labeled checks against a causal persistent-classifier proxy, not observed latent
+states. Direct Python calls can configure `horizons`, `validation_paths`,
+`calibration_options`, `simulation_options` and `portfolio_options`.
 
 **Hyperparameter selection** is enabled by the dashboard's separate checkbox
 and opt-in through `select_hyperparameters=True` in Python/API requests. It
@@ -372,8 +445,9 @@ prior (a small candidate set, not an exhaustive joint grid). The final
 with the selected setting; earlier holdout observations may enter subsequent
 expanding-window fits. Final simulation calibration uses all available history.
 Selection scores are labeled separately from holdout performance. Short data
-fall back to requested settings with a warning. Validation assesses return and
-regime forecasts, not the complete joint macro/portfolio/bootstrap distribution.
+fall back to requested settings with a warning. Selection uses one-month
+production forecasts; final evaluation additionally scores every fully observed
+requested horizon. A 12-month final holdout cannot provide 60-month outcomes.
 Calibration and validation take additional time; production path generation
 still uses the existing native C++ kernels. The HSMM now has age-regularized
 duration estimation; additional latent states and new emission families remain
@@ -754,8 +828,9 @@ continue to use their registered implementation.
 Rebuild the library after pulling these changes (ABI **10**). Formerly
 NumPy-generated standalone regime/macro paths now use the native per-path
 random stream: identical seeds are reproducible across native worker counts,
-but do not reproduce the old NumPy draws. The existing compact large-run
-random stream is unchanged. Numerical ledger parity is tested with identical
+but do not reproduce the old NumPy draws. The Ziggurat update also changes
+normal-dependent native sequences, including compact large-run simulations.
+Numerical ledger parity is tested with identical
 input returns and tight floating-point tolerances, not by comparing unrelated
 random streams. Native generation supports up to 256 states; larger standalone
 regime models retain the reference path.
@@ -768,6 +843,16 @@ smallest one. The exact [Devroye (2009)](https://doi.org/10.1145/1596519.1596523
 sampler and the former simple-rejection/Devroye hybrid remain callable for
 distributional regression tests and reproducible performance comparisons.
 The Python fallback continues to use Devroye's exact reference algorithm.
+
+Native Gaussian draws now use a 256-layer Ziggurat with the existing
+Xoshiro256** generator and 53-bit uniforms. Layer selection uses a separate
+pool of random bits following [Doornik's improved Ziggurat method](https://www.doornik.com/research/ziggurat.pdf).
+Immutable tables are initialized once, and the rare rejection/tail branch is
+kept outside the inlined hot path. Qu's gamma proposals use these same fast
+normal draws. Path-local seeds remain reproducible across worker counts;
+rebuild with `./scripts/build_native.sh` to activate the new implementation.
+The ABI remains 10. Full-draw benchmarks and reproduction instructions are in
+[`benchmarks/nts-rng/README.md`](benchmarks/nts-rng/README.md).
 
 Automatic unlevered holdings-based runs above 25,000 paths without active decumulation use the
 fused native path for both tax-neutral and compatible Italian-tax portfolios.
@@ -1056,10 +1141,27 @@ print(summarize_terminal_wealth(wealth))
 
 For a reusable application workflow, `mc_quadrants.pipeline.run_scenario()`
 returns the calibrated model, simulated paths, wealth, risk summary, and
-calibration diagnostics together. Set `parameter_draws=8` and
-`parameter_block_size=12` there to distribute paths across eight complete
-stationary-bootstrap recalibrations; the returned `parameter_uncertainty`
-table reports the resulting model-risk bands.
+calibration diagnostics together. Set `parameter_draws=128`,
+`parameter_block_size=12`, and `parameter_seed=1729` to distribute paths across
+128 complete stationary-bootstrap recalibrations. These are the new UI defaults;
+existing saved settings are preserved. More recalibrations increase cold-start
+calibration time. The API still defaults to no parameter bootstrap when omitted.
+The returned `parameter_uncertainty` table reports model-risk bands.
+
+`parameter_seed` controls the fitted parameter bank independently of the market
+`random_seed`; omitting it preserves the legacy `random_seed + 10000` behavior.
+Change each seed separately to distinguish calibration sampling error from path
+sampling error. `model.metadata["parameter_convergence"]` (also returned by the
+web API) reports 95% Monte Carlo intervals for the terminal median and drawdown
+P95 using whole-model resampling. These measure numerical precision, not the
+range of investment outcomes. Targets are 2% of the terminal median and two
+percentage points of drawdown, with at least 32 models and 128 paths per model
+required before reporting that the outer error is within tolerance. Inner-path
+error and independent parameter banks still need checking; 128 models do not
+guarantee convergence. Up to 512 recalibrations are supported.
+
+See [the convergence measurements](docs/parameter-ensemble-convergence.md) for
+the measured seed sensitivity and limitations.
 
 ## Suggested Real Data Inputs
 
@@ -1095,6 +1197,160 @@ inflation above 3 percent.
 
 
 
+## Volatility forecast benchmark
+
+`scripts/compare_volatility_models.py` compares filtered GARCH(1,1),
+GJR-GARCH(1,1), EGARCH(1,1), and the restricted monthly QARCH kernel on the
+frozen `research/model_quality_2025/data.pkl` dataset. The dataset is a local
+research artifact, not included in the repository. Run:
+
+```bash
+python scripts/compare_volatility_models.py --workers 4 --paths 8192
+```
+
+To fit separate volatility coefficients for each ETF and compare with the
+saved pooled forecasts on identical dates:
+
+```bash
+python scripts/compare_volatility_models.py --independent --workers 4 --paths 8192
+python scripts/summarize_independent_volatility.py
+```
+
+Install the optional `research` dependencies for difficult independent EGARCH
+fits and FIGARCH, then add FIGARCH(1,d,1) to the same experiment:
+
+```bash
+python -m pip install '.[research]'
+python scripts/compare_volatility_models.py --independent --include-figarch --workers 4 --paths 8192
+python scripts/summarize_independent_volatility.py
+```
+
+FIGARCH uses a 1,000-lag ARCH-infinity truncation, fixed unit presample squared
+normalized residuals, and a freely estimated intercept. It is not variance
+targeted: the positive-intercept, untruncated fractional model does not have a
+finite unconditional variance. This is a research forecasting approximation.
+There is no pooled FIGARCH baseline in this comparison.
+
+The independent experiment keeps one coefficient set per ETF across regimes.
+It saves per-asset fits and scores to `research/independent_volatility_models_2026-10-04`.
+The comparison checks matching data, dates, seeds, simulation settings and
+production source hashes, and includes pointwise and Bonferroni-adjusted paired
+block-bootstrap intervals. It does not select ETF model defaults using the
+test sample.
+
+The expanding-window experiment uses common macro, MNTS, ADCC, and simulation
+shocks. All four models preserve volatility memory across regime changes and
+start from filtered history. It fits pooled coefficients with the same
+unpenalized Gaussian QML objective and 12-month warmup; the QARCH experiment
+therefore omits the production prototype's small regularization penalty.
+GJR targeting and EGARCH centering use moments from the fitted MNTS law.
+Outputs include monthly scores, parameter estimates, paired block-bootstrap
+intervals, data checksum, and source hashes. GJR and EGARCH are benchmark-only;
+this script does not change the production engine or its defaults.
+
+This controlled comparison is distinct from the earlier deployed-GARCH
+comparison in `scripts/compare_qarch_forecasts.py`. Revised macro data and a
+short monthly sample limit conclusions; this is not a point-in-time backtest.
+
+### Stochastic-volatility benchmark
+
+The research-only stochastic-volatility benchmark is available with:
+
+```bash
+python scripts/compare_sv_forecasts.py --workers 4
+python scripts/summarize_sv_forecasts.py
+```
+
+It compares independent mean-reverting log-volatility AR(1) models with the
+saved five-model forecasts, preserving macro forecasts and MNTS return draws.
+MNTS observation densities use conditional-normal mixture integration; a
+discrete-state forward filter estimates each ETF's current volatility
+distribution. Forecasts draw that filtered state and continuous Gaussian
+volatility shocks. Parameter uncertainty, leverage effects and correlated
+volatility shocks are not included. The benchmark replays saved GARCH forecasts
+to verify identical return shocks and portfolio scoring. It requires the
+optional `research` dependencies and local frozen data/benchmark artifacts.
+
+### Extended stochastic-volatility research
+
+Five additional prototypes can be tested against the frozen benchmarks:
+leverage SV, one-factor SV, realized SV using daily-close variance, monthly
+Euler Heston variance, and fractional-Brownian rough log-SV QML.
+
+```bash
+python scripts/prepare_sv_realized_data.py
+python scripts/compare_sv_extensions.py --workers 4
+python scripts/compare_sv_extensions.py --workers 2 --stride 6 --grid-points 121 --quadrature 25 --output research/sv_extensions_2026-10-04/numerical-check
+python scripts/compare_sv_extensions.py --workers 4 --baseline research/independent_volatility_models_2026-10-04/seed-check --output research/sv_extensions_2026-10-04/seed-check
+python scripts/summarize_sv_extensions.py
+```
+
+The preparation command verifies or reconstructs monthly realized variance
+from the frozen Yahoo-adjusted daily price snapshot. These commands require
+the optional research dependencies, a C++17 compiler, and saved input/baseline
+artifacts. Gaussian-SV, constant-factor and RV-EWMA controls help distinguish
+model dynamics from changes in innovations, dependence and available data.
+The report includes paired block-bootstrap intervals, per-ETF scores and
+numerical/seed sensitivity. Heston and rough SV are monthly approximations;
+these experiments do not add production model choices or alter defaults.
+
+### Richer stochastic-volatility specifications
+
+The next research comparison adds realized skew-t SV with copula leverage,
+fast/slow two-component SV, joint return/volatility jumps, two-regime SV,
+two-factor Student-t SV with stochastic idiosyncratic variance, and a
+three-factor lifted-Heston approximation:
+
+```bash
+python scripts/compare_complex_sv.py --workers 4
+python scripts/compare_complex_sv.py --workers 2 --stride 12 --grid-points 61 --component-grid 33 --particles 256 --steps 42 --mcmc-scale 2 --output research/complex_sv_2026-10-05/numerical-check
+python scripts/replay_complex_sv.py --workers 4
+python scripts/check_complex_sv_inference.py
+python scripts/summarize_complex_sv.py
+```
+
+These remain monthly forecasting experiments with the frozen daily-close RV
+proxy. They require the same research dependencies, compiler and baseline
+artifacts as the earlier SV experiments. Complete origins are checkpointed;
+resuming requires matching source hashes and configuration. The second-seed
+command reuses fitted states and parameters to isolate simulation noise.
+The inference check extends the five worst factor-MCMC convergence diagnostics,
+selected without reference to forecast losses. Lifted Heston receives marginal
+ETF scores only because joint asset drivers are not specified. MCMC convergence,
+particle-filter error and discretization sensitivity are reported separately
+from forecast rankings. No production options are added.
+
+## Experimental economic return model
+
+The quadrant engine now offers optional economic return anchors and persistent
+inflation/yield repricing through `economic_returns={}` with `joint_macro=True`.
+Use `economic_returns={"rate_stress": False}` for anchors alone. The UI exposes
+both under **Economic return model (experimental)**, disabled by default.
+Yahoo/FRED loading supplies monthly endpoint Treasury yields at 2, 7, and 20
+years, a ten-year real yield, and observed monthly CPI changes. Persistent yield
+forecasts avoid a forced return to historical yield levels. Equity macro
+responses use fitted forecast innovations; valuation priors and corporate
+spread/loss inputs are optional advanced assumptions.
+
+Purchasing-power accounting now respects the trailing twelve-month CPI
+identity. With monthly CPI observations the model simulates monthly price
+changes and derives year-over-year inflation. Incomplete initial CPI history
+is disclosed as an assumption. Drawdown charts explicitly say monthly-close.
+
+The new historical comparison improves one-year bond return distribution
+scores and drawdown coverage over the previous economic model. The 2022 bond
+tail remains understated. See [implementation, assumptions, and measured
+results](docs/economic-return-model.md). Rebuild the native library with
+`./scripts/build_native.sh` after updating (ABI version 11).
+
+Optional persistent macro-news and conditional-volatility candidates are now
+available under **Macro stress dynamics**, or via
+`economic_returns={"macro_stress": "volatility"}`. The comparison modestly
+improves bond drawdown scoring but does not resolve joint-loss calibration,
+so the default remains off. See [model and simulation evidence](docs/macro-stress-model.md).
+
 ## Possible improvements
 
-- QARCH model usage instead of GARCH for assets' volatility -> [arXiv](https://arxiv.org/html/1206.2153v2) 
+- Validate the volatility-model comparison with point-in-time macro vintages
+  and additional unseen data, then investigate daily calibration and joint
+  MNTS tail/volatility fitting.

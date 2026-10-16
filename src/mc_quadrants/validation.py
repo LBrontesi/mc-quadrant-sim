@@ -14,8 +14,11 @@ from mc_quadrants.mnts import (
     sample_mnts_subordinators,
 )
 from mc_quadrants.native import native_available, sample_mnts_subordinators_native
+from mc_quadrants.path_validation import score_horizon, summarize_horizons
 from mc_quadrants.regimes import classify_persistent_quadrants
-from mc_quadrants.types import RegimeMoments
+from mc_quadrants.simulation import simulate_returns
+from mc_quadrants.types import RegimeMoments, SimulationResult
+from mc_quadrants.uncertainty import anchor_parameter_models, bootstrap_quadrant_models
 
 
 @dataclass(frozen=True)
@@ -25,18 +28,30 @@ class WalkForwardResult:
     splits: pd.DataFrame
     summary: pd.Series
     warnings: list[str] = field(default_factory=list)
+    horizon_scores: pd.DataFrame = field(default_factory=pd.DataFrame)
+    horizon_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    metadata: dict = field(default_factory=dict)
 
 
 def _energy_score(
     observation: np.ndarray,
     draws: np.ndarray,
 ) -> float:
-    """Monte Carlo multivariate energy score; lower values are better."""
+    """Exact empirical-ensemble energy score, invariant to bootstrap ordering."""
 
     values = np.asarray(draws, dtype=float)
     first = np.linalg.norm(values - np.asarray(observation, dtype=float), axis=1).mean()
-    second = np.linalg.norm(values - np.roll(values, len(values) // 2, axis=0), axis=1).mean()
-    return float(first - 0.5 * second)
+    # All pairs matter for a mixture: pairing opposite halves would sample
+    # only cross-model distances when two bootstrap ensembles are concatenated.
+    centered = values - values.mean(axis=0)
+    squares = np.sum(centered**2, axis=1)
+    pair_sum = 0.0
+    for start in range(0, len(values), 128):
+        stop = min(start + 128, len(values))
+        distances_squared = squares[start:stop, None] + squares[None, :] - 2 * centered[start:stop] @ centered.T
+        distances_squared[np.arange(stop-start), np.arange(start, stop)] = 0.0
+        pair_sum += float(np.sqrt(np.maximum(distances_squared, 0.0)).sum())
+    return float(first - 0.5 * pair_sum / len(values)**2)
 
 
 def _sample_mnts_observations(
@@ -80,7 +95,7 @@ def _sample_mnts_observations(
     return moments.mean.reindex(assets).to_numpy(dtype=float) + standardized * volatility
 
 
-def _unconditional_mnts_moments(training_returns: pd.DataFrame) -> RegimeMoments:
+def _unconditional_mnts_moments(training_returns: pd.DataFrame) -> RegimeMoments:  # Fit the unconditional MNTS benchmark moments.
     assets = list(training_returns.columns)
     covariance = nearest_psd(training_returns.cov().to_numpy(dtype=float))
     volatility = np.sqrt(np.maximum(np.diag(covariance), 1e-12))
@@ -98,7 +113,7 @@ def _unconditional_mnts_moments(training_returns: pd.DataFrame) -> RegimeMoments
     )
 
 
-def _newey_west_t_statistic(values: np.ndarray, max_lag: int = 3) -> float:
+def _newey_west_t_statistic(values: np.ndarray, max_lag: int = 3) -> float:  # Compute a Newey-West statistic for serial dependence.
     clean = np.asarray(values, dtype=float)
     clean = clean[np.isfinite(clean)]
     if len(clean) < 3:
@@ -128,7 +143,7 @@ def _current_run_length(regimes: pd.Series) -> int:
     return length
 
 
-def _duration_hazard(model: object, state: str, age: int, minimum: int) -> float:
+def _duration_hazard(model: object, state: str, age: int, minimum: int) -> float:  # Read one state-age exit hazard from model metadata.
     hazards = np.asarray(model.metadata.get("duration_hazards", {}).get(state, []), dtype=float)
     if not len(hazards):
         return float(1.0 - model.transition_matrix.loc[state, state])
@@ -164,7 +179,7 @@ def _duration_log_probability(
     state: str,
     duration: int,
     minimum: int,
-) -> float:
+) -> float:  # Compute the log probability of a state duration.
     hazards = np.asarray(model.metadata.get("duration_hazards", {}).get(state, []), dtype=float)
     if not len(hazards) or duration < 1:
         return float("nan")
@@ -198,24 +213,95 @@ def walk_forward_validation(
     min_regime_duration: int = 5,
     mean_prior_strength: float = 24.0,
     weights: Mapping[str, float] | None = None,
-    hsmm_max_iterations: int = 5,
+    hsmm_max_iterations: int = 30,
     evaluation_start: str | None = None,
     use_fitted_dependence: bool = True,
     garch: bool = True,
     dynamic_correlation: bool = True,
+    volatility_model: str = "garch",
+    horizons: tuple[int, ...] = (1, 3, 12, 60),
+    validation_paths: int = 512,
+    random_seed: int = 42,
+    calibration_options: Mapping | None = None,
+    simulation_options: Mapping | None = None,
+    portfolio_options: Mapping | None = None,
+    parameter_draws: int = 0,
+    parameter_block_size: int = 12,
+    parameter_seed: int | None = None,
+    observed_price_index: pd.Series | None = None,
 ) -> WalkForwardResult:
-    """Evaluate the regime model strictly out of sample.
+    """Refit chronologically and score paths from the production simulator.
 
-    Each split fits the quadrant model on data available up to period ``t``
-    and scores the *next* return observation with regime-conditional and
-    unconditional MNTS predictive draws. The multivariate energy score remains
-    proper when the MNTS density is not evaluated in closed form. The regime
-    hit rate measures whether the most likely next state matches reality.
-
-    Thresholds are re-estimated causally on each training window, so no
-    future information enters a split.
+    Simulated first-month returns supply the legacy one-step diagnostics.
+    Fully observed 1/3/12/60-month windows additionally score cumulative asset
+    returns, a monthly rebalanced portfolio, and the production portfolio ledger.
+    Macro release history and optional CPI outcomes are scored separately.
+    Point-in-time validity remains conditional on the supplied data vintage.
     """
 
+    horizons = tuple(sorted(set(horizons) | {1}))
+    if any(not isinstance(h, (int, np.integer)) or isinstance(h, bool) or not 1 <= h <= 360 for h in horizons):
+        raise ValueError("horizons must contain integer months between 1 and 360.")
+    if not isinstance(validation_paths, (int, np.integer)) or validation_paths < 2:
+        raise ValueError("validation_paths must be an integer of at least 2.")
+    if not isinstance(parameter_draws, (int, np.integer)) or not 0 <= parameter_draws <= validation_paths:
+        raise ValueError("parameter_draws must be between zero and validation_paths.")
+    if parameter_seed is not None and (
+        isinstance(parameter_seed, (bool, np.bool_))
+        or not isinstance(parameter_seed, (int, np.integer))
+        or not 0 <= parameter_seed <= 2**32 - 1
+    ):
+        raise ValueError("parameter_seed must be an integer between 0 and 4294967295, or None.")
+    if step is not None and (not isinstance(step, (int, np.integer)) or step < 1):
+        raise ValueError("step must be a positive integer.")
+    extra_calibration = dict(calibration_options or {})
+    allowed_calibration = {"rate_col", "correlation_overrides", "override_weight", "joint_macro",
+                           "structural_returns", "asset_classes", "asset_durations", "asset_income_yields",
+                           "macro_model", "transition_smoothing", "shrinkage", "economic_returns"}
+    if set(extra_calibration) - allowed_calibration:
+        raise ValueError("Unsupported walk-forward calibration option.")
+    extra_simulation = dict(simulation_options or {})
+    allowed_simulation = {"duration_model", "transition_concentration", "macro_transition_weight",
+                          "macro_parameter_uncertainty", "garch_alpha", "garch_beta", "dcc_alpha",
+                          "dcc_beta", "dcc_asymmetry", "native_threads"}
+    if set(extra_simulation) - allowed_simulation:
+        raise ValueError("Unsupported walk-forward simulation option; forecast origins are inferred from training history.")
+    ledger_options = dict(portfolio_options or {})
+    # Forecast-origin dates and exogenous path arrays are owned by validation.
+    if set(ledger_options) & {"financing_rate_paths", "financing_inflation_paths", "withdrawal_inflation_paths",
+                              "state_inflation", "tax_start_date", "weights"}:
+        raise ValueError("Portfolio path arrays and forecast dates cannot be overridden in validation.")
+    if ledger_options.get("return_kind", "log") != "log":
+        raise ValueError("Production-path validation requires log-return calibration inputs.")
+    if observed_price_index is None:
+        raw_index = macro.attrs.get("observed_price_index")
+        if raw_index:
+            observed_price_index = pd.Series(raw_index, dtype=float)
+            observed_price_index.index = pd.to_datetime(observed_price_index.index)
+        elif "price_index" in macro:
+            observed_price_index = macro["price_index"]
+    if observed_price_index is not None:
+        observed_price_index = observed_price_index.sort_index()
+        if observed_price_index.index.has_duplicates:
+            raise ValueError("observed_price_index must have unique dates.")
+    joint_macro = bool(extra_calibration.get("joint_macro", False))
+    rate_col = extra_calibration.get("rate_col", "interest_rate")
+    macro = macro.sort_index()
+    # Availability-aligned data already carry their publication month.
+    macro_lag_periods = 0 if macro.attrs.get("availability_aligned", False) else macro_lag_periods
+    if not isinstance(macro_lag_periods, (int, np.integer)) or macro_lag_periods < 0:
+        raise ValueError("macro_lag_periods must be a non-negative integer.")
+    source_macro_lag = int(macro_lag_periods)
+    if source_macro_lag:
+        # Model the observable release sequence on its information calendar.
+        # Slicing unshifted levels would either reveal unavailable observations
+        # or start the macro process several months behind the forecast origin.
+        macro = macro.copy()
+        macro.index = macro.index + pd.offsets.MonthEnd(source_macro_lag)
+        macro.attrs["availability_aligned"] = True
+        macro_lag_periods = 0
+    if volatility_model not in {"garch", "qarch"}:
+        raise ValueError("volatility_model must be 'garch' or 'qarch'.")
     if min_train_periods < 12:
         raise ValueError("min_train_periods must be at least 12.")
     if max_splits < 1:
@@ -267,17 +353,36 @@ def walk_forward_validation(
         step = max(1, int(np.ceil(available_splits / max_splits)))
 
     rows: list[dict[str, object]] = []
+    path_rows: list[dict[str, object]] = []
+    skipped_windows = 0
     for split in range(min_train_periods, n, step):
         if evaluation_start is not None and aligned_returns.index[split] < pd.Timestamp(evaluation_start):
             continue
-        train_returns = aligned_returns.iloc[:split]
         train_cutoff = aligned_returns.index[split - 1]
-        train_macro = macro.loc[macro.index <= train_cutoff]
+        train_returns = returns.sort_index().loc[:train_cutoff].dropna(how="any")
+        available_horizons = []
+        for horizon in horizons:
+            if split + horizon > n:
+                continue
+            actual_months = aligned_returns.index[split:split + horizon].to_period("M")
+            expected_months = pd.period_range(train_cutoff.to_period("M") + 1, periods=horizon, freq="M")
+            if not actual_months.equals(expected_months):
+                skipped_windows += 1
+                continue
+            available_horizons.append(horizon)
+        if 1 not in available_horizons:
+            continue
+        macro_cutoff = train_cutoff
+        train_macro = macro.loc[macro.index <= macro_cutoff].copy()
+        # Outcome-only CPI is deliberately excluded from every model fit.
+        train_macro.attrs.pop("observed_price_index", None)
+        release_dates = train_macro.attrs.get("release_dates")
+        if isinstance(release_dates, pd.DataFrame):
+            train_macro.attrs["release_dates"] = release_dates.loc[release_dates.index <= train_cutoff]
+        train_macro = train_macro.drop(columns=["price_index"], errors="ignore")
         if train_macro.empty:
             raise ValueError("No macro observations are available before a validation split.")
-        model = calibrate_quadrant_model(
-            returns=train_returns,
-            macro=train_macro,
+        fit_options = dict(
             growth_col=growth_col,
             inflation_col=inflation_col,
             growth_threshold=growth_threshold,
@@ -294,11 +399,12 @@ def walk_forward_validation(
             duration_prior_strength=duration_prior_strength,
             mean_prior_strength=mean_prior_strength,
             hsmm_max_iterations=hsmm_max_iterations,
+            volatility_model=volatility_model if garch else "garch",
+            **extra_calibration,
         )
+        model = calibrate_quadrant_model(train_returns, train_macro, **fit_options)
         next_observation = observations[split]
         unconditional_moments = _unconditional_mnts_moments(train_returns)
-        unconditional_mean = unconditional_moments.mean.to_numpy(dtype=float)
-        unconditional_covariance = unconditional_moments.covariance.to_numpy(dtype=float)
         current_state = str(aligned_regimes.iloc[split - 1])
         current_age = _current_run_length(aligned_regimes.iloc[:split])
         state_probabilities, switch_probability = _semi_markov_state_probabilities(
@@ -320,88 +426,85 @@ def walk_forward_validation(
         )
         benchmark_probabilities /= benchmark_probabilities.sum()
 
-        validation_rng = np.random.default_rng(split)
-        sampled_states = validation_rng.choice(
-            len(model.states), size=512, p=state_probabilities
+        forecast_periods = max(available_horizons)
+        seed = int(np.random.SeedSequence([random_seed, train_cutoff.year, train_cutoff.month]).generate_state(1)[0])
+        simulation_models = [model]
+        if parameter_draws:
+            bootstrap_options = {key: value for key, value in fit_options.items() if key != "hsmm_max_iterations"}
+            bank_seed = seed if parameter_seed is None else int(np.random.SeedSequence(
+                [parameter_seed, train_cutoff.year, train_cutoff.month]
+            ).generate_state(1)[0])
+            simulation_models = anchor_parameter_models(bootstrap_quadrant_models(
+                train_returns, train_macro, draws=parameter_draws, block_size=parameter_block_size,
+                random_seed=bank_seed, **bootstrap_options), model)
+        forecasts = []
+        for draw, simulation_model in enumerate(simulation_models):
+            simulation_model.metadata["calibrate_dependence"] = use_fitted_dependence
+            count = validation_paths // len(simulation_models) + (draw < validation_paths % len(simulation_models))
+            options = {"duration_model": "semi_markov", **extra_simulation}
+            if use_fitted_dependence:
+                fitted = simulation_model.metadata.get("dependence_fit", {})
+                for key in ("garch_alpha", "garch_beta", "dcc_alpha", "dcc_beta", "dcc_asymmetry"):
+                    if key in fitted:
+                        options[key] = fitted[key]
+            if parameter_draws:
+                options.update(macro_parameter_uncertainty=False, transition_concentration=None)
+            forecasts.append(simulate_returns(
+                simulation_model, periods=forecast_periods, paths=count,
+                random_seed=seed + draw * 100_003, min_regime_duration=min_regime_duration,
+                garch=garch, dynamic_correlation=dynamic_correlation, joint_macro=joint_macro,
+                volatility_model=volatility_model, **options))
+        forecast = replace(forecasts[0], returns=np.concatenate([f.returns for f in forecasts], axis=1),
+                           regimes=np.concatenate([f.regimes for f in forecasts], axis=1),
+                           macro_paths=np.concatenate([f.macro_paths for f in forecasts], axis=1) if joint_macro else None)
+        conditional_draws = forecast.returns[0]
+        benchmark_returns = _sample_mnts_observations(
+            unconditional_moments, forecast_periods * validation_paths, seed + 1,
+        ).reshape(forecast_periods, validation_paths, -1)
+        benchmark_draws = benchmark_returns[0]
+        # A state-free benchmark: keep the training origin's classifier label
+        # for state-dependent accounting, without borrowing future states.
+        benchmark = replace(forecast, returns=benchmark_returns,
+                            regimes=np.full(forecast.regimes.shape, current_state, dtype=object), macro_paths=None)
+        outcome_dates = aligned_returns.index[split:split + forecast_periods]
+        observed_macro = macro.reindex(outcome_dates, method="ffill")
+        observed = SimulationResult(
+            returns=observations[split:split + forecast_periods, None, :],
+            regimes=aligned_regimes.iloc[split:split + forecast_periods].to_numpy()[:, None],
+            assets=model.assets, states=model.states, frequency=model.frequency,
+            macro_paths=observed_macro[forecast.macro_columns].to_numpy(dtype=float)[:, None, :] if joint_macro else None,
+            macro_columns=forecast.macro_columns,
         )
-        conditional_draws = np.empty((512, next_observation.shape[0]), dtype=float)
-        for state_index, state in enumerate(model.states):
-            mask = sampled_states == state_index
-            if not mask.any():
-                continue
-            predictive = model.moments[state]
-            fitted = model.metadata.get("dependence_fit", {})
-            if use_fitted_dependence and fitted.get("status") == "fitted" and state == fitted.get("last_state"):
-                next_variance = (np.asarray(fitted["next_variance"], dtype=float) if garch
-                                 else np.diag(predictive.covariance))
-                scale = np.sqrt(next_variance / np.maximum(np.diag(predictive.covariance), 1e-12))
-                predictive = replace(
-                    predictive,
-                    covariance=pd.DataFrame(predictive.covariance.to_numpy()*np.outer(scale, scale),
-                                            index=predictive.mean.index, columns=predictive.mean.index),
-                    mnts=replace(predictive.mnts, gaussian_correlation=pd.DataFrame(
-                        fitted["next_gaussian_correlation"], index=predictive.mean.index, columns=predictive.mean.index))
-                    if dynamic_correlation else predictive.mnts,
-                )
-            conditional_draws[mask] = _sample_mnts_observations(
-                predictive,
-                int(mask.sum()),
-                split * 101 + state_index,
-            )
-        benchmark_draws = _sample_mnts_observations(
-            unconditional_moments,
-            512,
-            split * 101 + len(model.states),
-        )
+        origin_scores = []
+        for horizon in available_horizons:
+            origin_scores.append(score_horizon(
+                model=model, forecast=forecast, benchmark=benchmark, observed=observed,
+                weights=dict(zip(model.assets, portfolio_weights)), portfolio_options=ledger_options,
+                inflation_col=inflation_col, rate_col=rate_col, observed_macro=macro,
+                price_index=observed_price_index, origin=train_cutoff, horizon=horizon,
+                outcome_dates=outcome_dates[:horizon], forecast_components=list(zip(simulation_models, forecasts)),
+                macro_cutoff=macro_cutoff, energy_score=_energy_score))
+        path_rows.extend(origin_scores)
         regime_energy_score = _energy_score(next_observation, conditional_draws)
         benchmark_energy_score = _energy_score(next_observation, benchmark_draws)
-        portfolio_draws = conditional_draws @ portfolio_weights
+        portfolio_draws = np.expm1(conditional_draws) @ portfolio_weights
         predicted_var = float(np.quantile(portfolio_draws, 0.05))
         predicted_es = float(portfolio_draws[portfolio_draws <= predicted_var].mean())
-        actual_portfolio_return = float(next_observation @ portfolio_weights)
-        state_portfolio_means = np.array(
-            [float(model.moments[state].mean.to_numpy(dtype=float) @ portfolio_weights) for state in model.states]
-        )
-        state_portfolio_variances = np.array(
-            [
-                float(
-                    portfolio_weights
-                    @ model.moments[state].covariance.to_numpy(dtype=float)
-                    @ portfolio_weights
-                )
-                for state in model.states
-            ]
-        )
-        predicted_portfolio_mean = float(state_probabilities @ state_portfolio_means)
-        predicted_portfolio_variance = float(
-            state_probabilities
-            @ (state_portfolio_variances + np.square(state_portfolio_means - predicted_portfolio_mean))
-        )
-        benchmark_portfolio_mean = float(unconditional_mean @ portfolio_weights)
-        benchmark_portfolio_variance = float(
-            portfolio_weights @ unconditional_covariance @ portfolio_weights
-        )
-        risk_aversion = 3.0
-        certainty_equivalent_advantage = (
-            predicted_portfolio_mean - 0.5 * risk_aversion * predicted_portfolio_variance
-            - benchmark_portfolio_mean
-            + 0.5 * risk_aversion * benchmark_portfolio_variance
-        )
-        horizon_scores: dict[str, float] = {}
-        transition_values = model.transition_matrix.loc[model.states, model.states].to_numpy(dtype=float)
+        actual_portfolio_return = float(np.expm1(next_observation) @ portfolio_weights)
+        benchmark_portfolio_draws = np.expm1(benchmark_draws) @ portfolio_weights
+        certainty_equivalent_advantage = float(
+            portfolio_draws.mean() - 1.5 * portfolio_draws.var()
+            - benchmark_portfolio_draws.mean() + 1.5 * benchmark_portfolio_draws.var())
+        horizon_scores = {}
         for horizon in (3, 12, 60):
-            if split + horizon > n:
-                horizon_scores[f"forecast_error_{horizon}m"] = np.nan
+            scored = next((row for row in origin_scores if row["horizon_months"] == horizon), None)
+            horizon_scores[f"forecast_error_{horizon}m"] = (
+                scored["portfolio_return_mean"] - scored["portfolio_return_actual"] if scored else np.nan)
+            if scored:
+                base_return = np.prod(1 + np.expm1(benchmark_returns[:horizon]) @ portfolio_weights, axis=0) - 1
+                horizon_scores[f"benchmark_error_{horizon}m"] = float(base_return.mean() - scored["portfolio_return_actual"])
+            else:
                 horizon_scores[f"benchmark_error_{horizon}m"] = np.nan
-                continue
-            probability = state_probabilities.copy()
-            forecast = 0.0
-            for _ in range(horizon):
-                forecast += float(probability @ state_portfolio_means)
-                probability = probability @ transition_values
-            actual = float((observations[split:split + horizon] @ portfolio_weights).sum())
-            horizon_scores[f"forecast_error_{horizon}m"] = forecast - actual
-            horizon_scores[f"benchmark_error_{horizon}m"] = horizon * benchmark_portfolio_mean - actual
         expected_duration_map = model.metadata.get("expected_duration_months", {})
         expected_duration = float(expected_duration_map.get(current_state, np.nan))
         vintage_expected_duration = float(
@@ -561,4 +664,44 @@ def walk_forward_validation(
             f"The 95% one-period VaR breach rate is {summary['var_95_breach_rate']:.1%}; "
             "the calibrated target is 5%."
         )
-    return WalkForwardResult(splits=splits, summary=summary, warnings=warnings)
+    path_scores = pd.DataFrame(path_rows)
+    horizon_summary = summarize_horizons(path_scores, horizons)
+    if observed_price_index is None:
+        warnings.append("Real-wealth validation unavailable: provide observed CPI levels (price_index); annual inflation is not a monthly price index.")
+    elif "real_wealth_crps" not in path_scores or path_scores["real_wealth_crps"].isna().any():
+        warnings.append("Some real-wealth validation windows lack complete observed CPI levels.")
+    if not bool(macro.attrs.get("point_in_time", False)):
+        warnings.append("Validation refits are chronological, but supplied macro data are not certified point-in-time vintages.")
+    if skipped_windows:
+        warnings.append(f"Skipped {skipped_windows} validation windows containing missing calendar months.")
+    for row in horizon_summary.itertuples():
+        if row.nonoverlapping_origins < 10:
+            warnings.append(f"{row.horizon_months}-month validation has {row.origins} scored origins and only {row.nonoverlapping_origins} non-overlapping windows; long-horizon evidence is limited.")
+    return WalkForwardResult(
+        splits=splits, summary=summary, warnings=warnings,
+        horizon_scores=path_scores, horizon_summary=horizon_summary,
+        metadata={
+            "forecast_engine": "production_simulate_returns",
+            "portfolio_engine": "production_simulate_portfolio_paths",
+            "paths_per_origin": validation_paths, "horizons_months": list(horizons),
+            "hsmm_max_iterations": hsmm_max_iterations, "joint_macro": joint_macro,
+            "parameter_draws": parameter_draws, "seed": random_seed, "parameter_seed": parameter_seed,
+            "duration_model": extra_simulation.get("duration_model", "semi_markov"),
+            "volatility_model": volatility_model if garch else "constant",
+            "dynamic_correlation": dynamic_correlation, "fitted_dependence": use_fitted_dependence,
+            "portfolio_return_basis": "monthly_rebalanced_simple_returns_before_costs",
+            "wealth_basis": "selected_portfolio_ledger_with_cash_flows",
+            "inflation_basis": "annual_rate_on_supplied_macro_release_calendar",
+            "real_wealth_outcome_basis": "observed_price_index" if observed_price_index is not None else "unavailable",
+            "regime_diagnostics_basis": "persistent_classifier_proxy_not_observed_latent_state",
+            "point_in_time": bool(macro.attrs.get("point_in_time", False)),
+            "benchmark": "iid_unconditional_mnts_with_constant_origin_macro",
+            "overlapping_windows": True,
+            "forecast_origin": "training_filtered_state_and_age; no present-day state override",
+            "macro_lag_periods": source_macro_lag,
+            "macro_calendar": "publication_month",
+            "tax_policy_basis": "selected_policy_replayed_on_historical_returns_not_historical_tax_law",
+            "wealth_return_basis": "legacy_weighted_log" if ledger_options.get("rebalance_frequency") is None else "holdings_ledger",
+            "score_units": "asset scores: cumulative log returns; portfolio returns: decimals; wealth: initial-value currency; inflation: decimal annual rate",
+
+        })

@@ -1,6 +1,6 @@
 "use strict";
 
-export async function postJSON(path, payload) {
+export async function postJSON(path, payload) { // POST JSON and parse the JSON response.
   const response = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

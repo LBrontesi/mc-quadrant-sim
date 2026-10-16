@@ -21,7 +21,7 @@ def _nanoseconds_per_draw(
     tempering: float,
     algorithm: str,
     repeats: int,
-) -> float:
+) -> float:  # Measure sampler time per generated draw.
     timings = []
     for repeat in range(repeats):
         started = time.perf_counter_ns()
@@ -36,7 +36,7 @@ def _nanoseconds_per_draw(
     return float(statistics.median(timings))
 
 
-def benchmark(samples: int, repeats: int) -> dict[str, object]:
+def benchmark(samples: int, repeats: int) -> dict[str, object]:  # Run and summarize the selected performance benchmark.
     if samples < 1 or repeats < 1:
         raise ValueError("samples and repeats must be positive")
     alphas = (0.55, 0.65, 0.75, 0.85, 0.95)
@@ -100,7 +100,7 @@ def benchmark(samples: int, repeats: int) -> dict[str, object]:
     }
 
 
-def main() -> None:
+def main() -> None:  # Run the command-line entry point for this script.
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=100_000)
     parser.add_argument("--repeats", type=int, default=3)

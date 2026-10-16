@@ -1,0 +1,16 @@
+envelope=1 rate=0.1 error_in_SE=0.746703
+envelope=1 rate=1 error_in_SE=0.866635
+envelope=1 rate=5 error_in_SE=0.654851
+envelope=2 rate=0.1 error_in_SE=0.38264
+envelope=2 rate=1 error_in_SE=0.534056
+envelope=2 rate=5 error_in_SE=1.1281
+envelope=3 rate=0.1 error_in_SE=0.0968817
+envelope=3 rate=1 error_in_SE=0.773446
+envelope=3 rate=5 error_in_SE=0.317578
+envelope=4 rate=0.1 error_in_SE=1.51652
+envelope=4 rate=1 error_in_SE=1.46865
+envelope=4 rate=5 error_in_SE=1.39429
+envelope=4 rate=0.1 error_in_SE=0.171328
+envelope=4 rate=1 error_in_SE=0.574314
+envelope=4 rate=5 error_in_SE=0.603035
+PASS

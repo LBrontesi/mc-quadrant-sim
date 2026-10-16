@@ -62,11 +62,9 @@ class TaxPolicy(Protocol):
         rebalance_frequency: int | None,
         leverage_multiple: float,
         target_weights: np.ndarray,
-    ) -> None: ...
-
-    def simulate(self, context: TaxSimulationContext) -> pd.DataFrame: ...
-
-    def metadata(self, context: TaxSimulationContext | None = None) -> dict[str, Any]: ...
+    ) -> None: ...  # Validate this tax-policy contract and its portfolio constraints.
+    def simulate(self, context: TaxSimulationContext) -> pd.DataFrame: ...  # Simulate the portfolio tax accounting for this policy.
+    def metadata(self, context: TaxSimulationContext | None = None) -> dict[str, Any]: ...  # Return descriptive metadata for this tax policy.
 
 
 @dataclass(frozen=True)
@@ -76,7 +74,7 @@ class TaxSelection:
     policy: TaxPolicy | None
 
     @property
-    def enabled(self) -> bool:
+    def enabled(self) -> bool:  # Report whether a concrete tax policy is selected.
         return self.policy is not None
 
 
@@ -93,7 +91,7 @@ class ItalyAdministeredTaxPolicy:
         rebalance_frequency: int | None,
         leverage_multiple: float,
         target_weights: np.ndarray,
-    ) -> None:
+    ) -> None:  # Validate this tax-policy contract and its portfolio constraints.
         if rebalance_frequency is None:
             raise ValueError(
                 "Italian tax accounting requires holdings-based accounting, not legacy weighted returns."
@@ -103,7 +101,7 @@ class ItalyAdministeredTaxPolicy:
         if (np.asarray(target_weights, dtype=float) < 0).any():
             raise ValueError("Italian tax accounting requires non-negative portfolio weights.")
 
-    def simulate(self, context: TaxSimulationContext) -> pd.DataFrame:
+    def simulate(self, context: TaxSimulationContext) -> pd.DataFrame:  # Simulate the portfolio tax accounting for this policy.
         return simulate_italian_portfolio_tax(
             context.asset_growth,
             assets=context.assets,
@@ -131,7 +129,7 @@ class ItalyAdministeredTaxPolicy:
             native_threads=context.native_threads,
         )
 
-    def metadata(self, context: TaxSimulationContext | None = None) -> dict[str, Any]:
+    def metadata(self, context: TaxSimulationContext | None = None) -> dict[str, Any]:  # Return descriptive metadata for this tax policy.
         return {
             "country": self.country_code,
             "country_label": self.country_label,

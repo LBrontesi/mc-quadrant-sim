@@ -11,6 +11,7 @@ from mc_quadrants.decumulation import (
     SpendingController,
     inflation_index,
     normalize_decumulation,
+    normalize_withdrawal_start_period,
 )
 from mc_quadrants.native import (
     NATIVE_YEAR_STAT_NAMES,
@@ -143,7 +144,7 @@ def _tax_profile(
     assets: list[str],
     categories: Mapping[str, str] | None,
     metadata: Mapping[str, Mapping[str, object]] | None = None,
-) -> _TaxProfile:
+) -> _TaxProfile:  # Build vectorized tax rules for each asset.
     normalized = normalize_italy_tax_metadata(assets, categories, metadata)
     # Article 68 TUIR expresses government-security gains and losses at the
     # fraction that makes the standard 26% rate equivalent to 12.5%.
@@ -200,7 +201,7 @@ def _taxable_components(
     basis: np.ndarray,
     profile: _TaxProfile,
     transaction_cost_rate: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray]:  # Calculate taxable gains, losses, and income from sales.
     safe_holdings = np.maximum(holdings, 1e-300)
     basis_sold = np.where(holdings > 0, basis * sales / safe_holdings, 0.0)
     cost_rate = np.asarray(transaction_cost_rate, dtype=float)
@@ -272,7 +273,7 @@ def _apply_sales(
     profile: _TaxProfile,
     loss_buckets: np.ndarray,
     transaction_cost_rate: float = 0.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:  # Apply sales, basis changes, and taxes to portfolio holdings.
     tax, gains, losses = _settle_sales(
         sales,
         holdings,
@@ -457,7 +458,7 @@ def _deduct_charge(
     holdings: np.ndarray,
     basis: np.ndarray,
     charge: np.ndarray,
-) -> None:
+) -> None:  # Deduct a cash charge from holdings and basis.
     values = holdings.sum(axis=1)
     scale = np.divide(
         np.maximum(values - np.maximum(charge, 0.0), 0.0),
@@ -469,14 +470,14 @@ def _deduct_charge(
     basis *= scale[:, None]
 
 
-def _simulation_tax_years(periods: int, start_date: str | pd.Timestamp | None) -> np.ndarray:
+def _simulation_tax_years(periods: int, start_date: str | pd.Timestamp | None) -> np.ndarray:  # Assign each simulation month to a tax year.
     if start_date is None:
         return 2000 + np.arange(periods, dtype=int) // 12
     first = pd.Timestamp(start_date).to_period("M")
     return np.array([(first + period).year for period in range(periods)], dtype=int)
 
 
-def _wealth_tax_masks(profile: _TaxProfile, mode: str) -> tuple[np.ndarray, np.ndarray]:
+def _wealth_tax_masks(profile: _TaxProfile, mode: str) -> tuple[np.ndarray, np.ndarray]:  # Resolve which assets and accounts incur wealth tax.
     eligible = profile.wealth_tax_eligible
     domestic = eligible & ~profile.foreign_account
     foreign = eligible & profile.foreign_account
@@ -491,7 +492,7 @@ def _wealth_tax_masks(profile: _TaxProfile, mode: str) -> tuple[np.ndarray, np.n
     raise ValueError(f"Unknown Italian wealth tax mode '{mode}'.")
 
 
-def _wrapper_taxable_fraction(holdings: np.ndarray, profile: _TaxProfile) -> np.ndarray:
+def _wrapper_taxable_fraction(holdings: np.ndarray, profile: _TaxProfile) -> np.ndarray:  # Calculate taxable fractions for wrapper benchmarking.
     values = holdings.sum(axis=1)
     return np.divide(
         holdings @ profile.taxable_fraction,
@@ -873,19 +874,9 @@ def simulate_italian_portfolio_tax(
 
     profile = _tax_profile(assets, asset_tax_categories, asset_tax_metadata)
     periods, paths, asset_count = growth.shape
-    try:
-        withdrawal_start_value = float(withdrawal_start_period)
-        withdrawal_start_period = int(withdrawal_start_value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("withdrawal_start_period must be an integer.") from exc
-    if not np.isfinite(withdrawal_start_value) or not np.isclose(
-        withdrawal_start_value, withdrawal_start_period
-    ):
-        raise ValueError("withdrawal_start_period must be an integer.")
-    if not 1 <= withdrawal_start_period <= periods:
-        raise ValueError(
-            "withdrawal_start_period must be between 1 and the simulation periods."
-        )
+    withdrawal_start_period = normalize_withdrawal_start_period(
+        withdrawal_start_period, periods
+    )
     decumulation_plan = normalize_decumulation(
         decumulation,
         periods=periods,
@@ -1088,11 +1079,11 @@ def simulate_italian_portfolio_tax(
     funded_spending = np.zeros((periods, paths), dtype=float)
     guardrail_events = np.zeros((periods, paths), dtype=np.int8)
 
-    def record(year: int, name: str, amount: np.ndarray) -> None:
+    def record(year: int, name: str, amount: np.ndarray) -> None:  # Accumulate one named tax metric for a calendar year.
         bucket = tax_by_year.setdefault(str(int(year)), {})
         bucket[name] = bucket.get(name, 0.0) + float(np.asarray(amount, dtype=float).sum())
 
-    def settle_managed_year(year: int) -> None:
+    def settle_managed_year(year: int) -> None:  # Settle deferred managed-regime taxes for one calendar year.
         nonlocal year_start_value, year_contributions, year_withdrawals
         values = holdings.sum(axis=1)
         result = values + year_withdrawals - year_contributions - year_start_value

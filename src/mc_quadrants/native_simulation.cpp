@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 
+#include "native_random.hpp"
+
 namespace {
 
 // Opt-in stage timing. Disabled runs never read the clock; the checks sit
@@ -30,65 +32,6 @@ struct NativeStageProfile {
         seconds[stage] += std::chrono::duration<double>(now - previous).count();
         previous = now;
     }
-};
-
-class RandomStream {
-  public:
-    RandomStream(std::uint64_t seed, std::uint64_t stream) {
-        std::uint64_t value = seed ^ (0x9e3779b97f4a7c15ULL * (stream + 1));
-        for (auto &word : state_) word = splitmix64(value);
-    }
-
-    double uniform() {
-        return static_cast<double>(next() >> 11) * 0x1.0p-53;
-    }
-
-    double normal() {
-        if (has_spare_) {
-            has_spare_ = false;
-            return spare_;
-        }
-        const double first = std::max(uniform(), std::numeric_limits<double>::min());
-        const double second = uniform();
-        const double radius = std::sqrt(-2.0 * std::log(first));
-        const double angle = 6.283185307179586476925286766559 * second;
-        spare_ = radius * std::sin(angle);
-        has_spare_ = true;
-        return radius * std::cos(angle);
-    }
-
-    double exponential() {
-        return -std::log(std::max(uniform(), std::numeric_limits<double>::min()));
-    }
-
-  private:
-    std::uint64_t state_[4]{};
-    bool has_spare_ = false;
-    double spare_ = 0.0;
-
-    static std::uint64_t splitmix64(std::uint64_t &value) {
-        std::uint64_t result = (value += 0x9e3779b97f4a7c15ULL);
-        result = (result ^ (result >> 30)) * 0xbf58476d1ce4e5b9ULL;
-        result = (result ^ (result >> 27)) * 0x94d049bb133111ebULL;
-        return result ^ (result >> 31);
-    }
-
-    static std::uint64_t rotate_left(std::uint64_t value, int shift) {
-        return (value << shift) | (value >> (64 - shift));
-    }
-
-    std::uint64_t next() {
-        const std::uint64_t result = rotate_left(state_[1] * 5, 7) * 9;
-        const std::uint64_t temporary = state_[1] << 17;
-        state_[2] ^= state_[0];
-        state_[3] ^= state_[1];
-        state_[1] ^= state_[2];
-        state_[0] ^= state_[3];
-        state_[2] ^= temporary;
-        state_[3] = rotate_left(state_[3], 45);
-        return result;
-    }
-
 };
 
 struct GammaShapeParameters {
@@ -2071,6 +2014,9 @@ struct MCMacroProcessConfig {
     int logistic_membership;
     double membership_growth_threshold, membership_inflation_threshold;
     double membership_growth_scale, membership_inflation_scale;
+    const double *cpi_monthly_log_history;
+    const double *cpi_state_centers;
+    double cpi_persistence, cpi_latest_monthly_log;
 };
 
 namespace {
@@ -2600,6 +2546,12 @@ int generate_joint_regime_macro_path(
         ? sample_sojourn(random, regime, current, current_age)
         : 0;
     const double transition_weight = std::clamp(macro.transition_weight, 0.0, 1.0);
+    double monthly_history[12]{};
+    double last_monthly = macro.cpi_latest_monthly_log;
+    if (macro.cpi_state_centers) {
+        if (!macro.cpi_monthly_log_history || macro.inflation_index < 0) return 3;
+        std::copy(macro.cpi_monthly_log_history, macro.cpi_monthly_log_history + 12, monthly_history);
+    }
 
     for (int period = 0; period < periods; ++period) {
         regimes[period] = static_cast<std::uint8_t>(current);
@@ -2624,6 +2576,18 @@ int generate_joint_regime_macro_path(
                     * coefficient[input_dimension * dimensions + output_dimension];
             }
             next_macro[output_dimension] = forecast;
+        }
+        if (macro.cpi_state_centers) {
+            const int index = macro.inflation_index;
+            const double mean = macro.cpi_state_centers[current];
+            const double change = (mean + macro.cpi_persistence * (100.0 * last_monthly - mean)
+                + macro_shocks[static_cast<std::size_t>(period) * dimensions + index]) / 100.0;
+            const int slot = period % 12;
+            monthly_history[slot] = change;
+            double annual_log = 0.0;
+            for (double monthly : monthly_history) annual_log += monthly;
+            next_macro[index] = std::expm1(annual_log) / macro.inflation_scale;
+            last_monthly = change;
         }
         if (macro.rate_index >= 0) {
             next_macro[macro.rate_index] = std::clamp(
@@ -3281,12 +3245,37 @@ extern "C" int mc_simulate_parametric_italian_portfolios_compact(
             double discount = 1.0;
             double previous_real = tax->initial_value;
             double moments[9]{};
+            double cpi_ring[12]{};
+            double trailing_cpi = 0.0;
+            if (macro && macro->cpi_monthly_log_history) {
+                for (int month = 0; month < 12; ++month) {
+                    cpi_ring[month] = macro->cpi_monthly_log_history[month];
+                    trailing_cpi += cpi_ring[month];
+                }
+            }
             for (int period = 0; period < periods; ++period) {
                 const double previous_discount = discount;
-                const double inflation = macro && macro->inflation_index >= 0
-                    ? std::clamp(path_macro_values[period * macro->dimensions + macro->inflation_index]
-                        * macro->inflation_scale, -0.10, 0.50)
+                double inflation = macro && macro->inflation_index >= 0
+                    ? path_macro_values[period * macro->dimensions + macro->inflation_index] * macro->inflation_scale
                     : regime->annual_reporting_inflation;
+                if (macro && macro->cpi_monthly_log_history && macro->inflation_index >= 0) {
+                    if (!std::isfinite(inflation) || inflation <= -1.0) {
+                        failure.store(61, std::memory_order_relaxed);
+                        break;
+                    }
+                    const double target = std::log1p(inflation);
+                    const int slot = period % 12;
+                    const double change = target - trailing_cpi + cpi_ring[slot];
+                    cpi_ring[slot] = change;
+                    trailing_cpi = target;
+                    inflation = std::expm1(12.0 * change);
+                    if (!std::isfinite(inflation) || inflation <= -1.0) {
+                        failure.store(62, std::memory_order_relaxed);
+                        break;
+                    }
+                } else if (macro && macro->inflation_index >= 0) {
+                    inflation = std::clamp(inflation, -0.10, 0.50);
+                }
                 discount = macro && macro->inflation_index >= 0
                     ? discount / std::pow(1.0 + inflation, 1.0 / 12.0)
                     : reporting_discount[period];
@@ -3387,4 +3376,4 @@ extern "C" int mc_simulate_parametric_italian_portfolios_compact(
 #include "native_process.hpp"
 #include "native_metrics.hpp"
 
-extern "C" int mc_native_version() { return 10; }
+extern "C" int mc_native_version() { return 11; }

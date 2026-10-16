@@ -13,14 +13,14 @@ DEFAULT_TAIL_INDEX = 1.50
 DEFAULT_TEMPERING = 0.50
 
 
-def _sinc(value: float) -> float:
+def _sinc(value: float) -> float:  # Evaluate the numerically stable normalized sinc function.
     if abs(value) < 1e-6:
         square = value * value
         return 1.0 - square / 6.0 + square * square / 120.0
     return float(np.sin(value) / value)
 
 
-def _zolotarev_b_ratio(value: float, alpha: float) -> float:
+def _zolotarev_b_ratio(value: float, alpha: float) -> float:  # Compute the Zolotarev stable-law parameter ratio.
     complement = 1.0 - alpha
     log_ratio = (
         np.log(max(_sinc(value), 1e-300))
@@ -30,7 +30,7 @@ def _zolotarev_b_ratio(value: float, alpha: float) -> float:
     return float(np.exp(log_ratio))
 
 
-def _zolotarev_a(value: float, alpha: float, b_ratio: float) -> float:
+def _zolotarev_a(value: float, alpha: float, b_ratio: float) -> float:  # Compute the Zolotarev stable-law scale parameter.
     complement = 1.0 - alpha
     log_b_zero = -alpha * np.log(alpha) - complement * np.log(complement)
     return float(np.exp(-(log_b_zero + np.log(max(b_ratio, 1e-300))) / complement))
@@ -157,7 +157,7 @@ def sample_mnts_subordinators(
     )
 
 
-def _standardized_shape(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def _standardized_shape(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:  # Return standardized sample shape statistics.
     values = np.asarray(values, dtype=float)
     if values.ndim != 2 or len(values) < 4:
         dimension = values.shape[1] if values.ndim == 2 else 0
@@ -177,7 +177,7 @@ def _standardized_shape(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def _fit_common_tail_parameters(
     target_skewness: np.ndarray,
     target_excess_kurtosis: np.ndarray,
-) -> tuple[float, float, np.ndarray]:
+) -> tuple[float, float, np.ndarray]:  # Fit shared MNTS tail parameters to asset moments.
     best: tuple[float, float, float, np.ndarray] | None = None
     alphas = np.linspace(0.55, 0.95, 17)
     thetas = np.exp(np.linspace(np.log(0.04), np.log(20.0), 65))
@@ -194,7 +194,7 @@ def _fit_common_tail_parameters(
         lower = -np.broadcast_to(bound, (len(thetas), len(target_skewness))).copy()
         upper = np.broadcast_to(bound, lower.shape).copy()
 
-        def skew(values: np.ndarray) -> np.ndarray:
+        def skew(values: np.ndarray) -> np.ndarray:  # Compute the sample skewness of a numeric vector.
             gamma_squared = np.maximum(0.0, 1.0 - values * values * variance)
             return values**3 * third + 3.0 * values * gamma_squared * variance
 
@@ -244,7 +244,7 @@ def _refine_characteristic_fit(local, pooled, reliability, correlation, tail, th
                        for i in range(dimensions-1)]
     frequencies = np.vstack([np.asarray(directions)*t for t in (.25, .5, 1.0, 1.5, 2.0)])
 
-    def empirical(values):
+    def empirical(values):  # Estimate empirical skewness and kurtosis from sample values.
         centered = values - values.mean(axis=0)
         standardized = centered / np.maximum(values.std(axis=0), 1e-12)
         return np.exp(1j*(standardized @ frequencies.T)).mean(axis=0)
@@ -260,7 +260,7 @@ def _refine_characteristic_fit(local, pooled, reliability, correlation, tail, th
         beta *= .9
     initial = np.r_[tail/2, np.log(theta), beta]
 
-    def objective(parameters):
+    def objective(parameters):  # Score candidate MNTS tail parameters against target moments.
         alpha, log_theta = parameters[:2]
         beta = parameters[2:]
         if not .2 <= alpha <= .975 or not np.log(.02) <= log_theta <= np.log(50) or np.any(np.abs(beta) >= .985):
@@ -354,7 +354,7 @@ def fit_mnts_parameters(
 def attach_mnts_parameters(
     moments: Mapping[str, RegimeMoments],
     historical_returns: Mapping[str, pd.DataFrame],
-) -> dict[str, RegimeMoments]:
+) -> dict[str, RegimeMoments]:  # Attach fitted MNTS parameters to regime moments.
     available = [frame for frame in historical_returns.values() if frame is not None and not frame.empty]
     if not available:
         return dict(moments)
@@ -367,7 +367,7 @@ def attach_mnts_parameters(
     return calibrated
 
 
-def resolved_mnts_parameters(moments: RegimeMoments) -> MNTSParameters:
+def resolved_mnts_parameters(moments: RegimeMoments) -> MNTSParameters:  # Return explicit MNTS parameters, deriving defaults when absent.
     if moments.mnts is not None:
         return moments.mnts
     assets = list(moments.mean.index)
