@@ -334,53 +334,6 @@ def _raise_cash_with_tax(
     return tax_total, gain_total, loss_total
 
 
-def _rebalance_after_tax(
-    holdings: np.ndarray,
-    basis: np.ndarray,
-    target_weights: np.ndarray,
-    cost_rate: float,
-    profile: _TaxProfile,
-    loss_buckets: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Rebalance to weights after solving for tax and transaction-cost drag."""
-
-    values = holdings.sum(axis=1)
-    post_cost_value = values.copy()
-    for _ in range(8):
-        target = post_cost_value[:, None] * target_weights
-        sales = np.maximum(holdings - target, 0.0)
-        purchases = np.maximum(target - holdings, 0.0)
-        preview_tax = _preview_sales_tax(
-            sales,
-            holdings,
-            basis,
-            profile,
-            loss_buckets,
-            cost_rate,
-        )
-        costs = (sales + purchases).sum(axis=1) * cost_rate
-        updated = np.maximum(values - preview_tax - costs, 0.0)
-        if np.allclose(updated, post_cost_value, rtol=1e-11, atol=1e-10):
-            post_cost_value = updated
-            break
-        post_cost_value = updated
-
-    target = post_cost_value[:, None] * target_weights
-    sales = np.maximum(holdings - target, 0.0)
-    tax, gains, losses = _apply_sales(
-        sales,
-        holdings,
-        basis,
-        profile,
-        loss_buckets,
-        cost_rate,
-    )
-    purchases = np.maximum(target - holdings, 0.0)
-    basis += purchases * (1.0 + cost_rate)
-    holdings += purchases
-    return tax, gains, losses
-
-
 def _raise_cash_deferred(
     requested: float | np.ndarray,
     holdings: np.ndarray,
