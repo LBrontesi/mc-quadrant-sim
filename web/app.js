@@ -361,42 +361,42 @@ function setupExperience() { // Initialize setup experience.
 const SVG_NS = "http://www.w3.org/2000/svg";
 const MARGIN = { top: 12, right: 12, bottom: 26, left: 46 };
 
+function svgElement(parent, tag, attributes = {}) {
+  const element = document.createElementNS(SVG_NS, tag);
+  Object.entries(attributes).forEach(([name, value]) => element.setAttribute(name, value));
+  parent?.appendChild(element);
+  return element;
+}
+
 function createSvg(width, height) { // Create an SVG chart surface.
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  svg.setAttribute("width", "100%");
-  svg.setAttribute("height", String(height));
-  svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
-  return svg;
+  return svgElement(null, "svg", {
+    viewBox: `0 0 ${width} ${height}`,
+    width: "100%",
+    height,
+    preserveAspectRatio: "xMidYMid meet",
+  });
 }
 
 function svgText(parent, x, y, text, cls = "", anchor = "middle") { // Append a labeled SVG text element.
-  const el = document.createElementNS(SVG_NS, "text");
-  el.setAttribute("x", x);
-  el.setAttribute("y", y);
-  el.setAttribute("text-anchor", anchor);
-  el.setAttribute("class", cls);
+  const el = svgElement(parent, "text", { x, y, "text-anchor": anchor, class: cls });
   el.textContent = text;
-  parent.appendChild(el);
   return el;
 }
 
 function drawAxes(svg, width, height, xTicks, yTicks, xLabel, yLabel) { // Draw chart axes, gridlines, and labels.
-  const grid = document.createElementNS(SVG_NS, "g");
+  const grid = svgElement(svg, "g");
   xTicks.forEach(([x, label]) => {
-    const line = document.createElementNS(SVG_NS, "line");
-    line.setAttribute("x1", x); line.setAttribute("y1", MARGIN.top);
-    line.setAttribute("x2", x); line.setAttribute("y2", MARGIN.top + height);
-    line.setAttribute("stroke", "var(--grid)"); line.setAttribute("stroke-width", "1");
-    grid.appendChild(line);
+    svgElement(grid, "line", {
+      x1: x, y1: MARGIN.top, x2: x, y2: MARGIN.top + height,
+      stroke: "var(--grid)", "stroke-width": 1,
+    });
     svgText(grid, x, MARGIN.top + height + 14, label, "chart-title");
   });
   yTicks.forEach(([y, label]) => {
-    const line = document.createElementNS(SVG_NS, "line");
-    line.setAttribute("x1", MARGIN.left); line.setAttribute("y1", y);
-    line.setAttribute("x2", MARGIN.left + width); line.setAttribute("y2", y);
-    line.setAttribute("stroke", "var(--grid)"); line.setAttribute("stroke-width", "1");
-    grid.appendChild(line);
+    svgElement(grid, "line", {
+      x1: MARGIN.left, y1: y, x2: MARGIN.left + width, y2: y,
+      stroke: "var(--grid)", "stroke-width": 1,
+    });
     svgText(grid, MARGIN.left - 6, y + 4, label, "chart-title", "end");
   });
   if (xLabel) svgText(grid, MARGIN.left + width / 2, MARGIN.top + height + 22, xLabel, "chart-title");
@@ -406,7 +406,6 @@ function drawAxes(svg, width, height, xTicks, yTicks, xLabel, yLabel) { // Draw 
     const el = svgText(grid, labelX, labelY, yLabel, "chart-title");
     el.setAttribute("transform", `rotate(-90 ${labelX} ${labelY})`);
   }
-  svg.appendChild(grid);
 }
 
 function niceTicks(min, max, count = 5) { // Choose readable numeric chart ticks.
@@ -443,16 +442,13 @@ function chartFrame(labels, min, max, options, {
   const yTicks = niceTicks(min, max, 5).map((value) => [yScale(value), yFormatter(value)]);
   const svg = createSvg(width, height);
   drawAxes(svg, plotW, plotH, xTicks, yTicks, options.xLabel || "Period", yLabel);
-  const crosshair = document.createElementNS(SVG_NS, "line");
-  crosshair.setAttribute("y1", 0);
-  crosshair.setAttribute("y2", plotH);
-  crosshair.setAttribute("stroke", "var(--crosshair)");
-  crosshair.setAttribute("stroke-dasharray", "4 4");
-  crosshair.setAttribute("opacity", String(crosshairOpacity));
-  svg.appendChild(crosshair);
+  const crosshair = svgElement(svg, "line", {
+    y1: 0, y2: plotH, stroke: "var(--crosshair)", "stroke-dasharray": "4 4",
+    opacity: crosshairOpacity,
+  });
 
   return {
-    width, height, plotW, plotH, xScale, yScale, xFormatter, svg, crosshair,
+    xScale, yScale, xFormatter, svg, crosshair,
     pointer(event) {
       const rect = svg.getBoundingClientRect();
       return {
@@ -472,6 +468,23 @@ function chartFrame(labels, min, max, options, {
   };
 }
 
+function bindChartTooltip(container, labels, options, frame, content) {
+  const { svg, crosshair } = frame;
+  const tooltip = attachTooltip(container);
+  svg.addEventListener("mousemove", (event) => {
+    const { x, px, py } = frame.pointer(event);
+    const index = frame.indexAt(x);
+    crosshair.setAttribute("x1", frame.xScale(index));
+    crosshair.setAttribute("x2", frame.xScale(index));
+    crosshair.setAttribute("opacity", "1");
+    const title = options.tooltipTitle
+      ? options.tooltipTitle(labels[index])
+      : `${options.xLabel || "Period"} ${frame.xFormatter(labels[index])}`;
+    tooltip.show(px, py, content(escapeHtml(title), index));
+  });
+  svg.addEventListener("mouseleave", () => { crosshair.setAttribute("opacity", "0"); tooltip.hide(); });
+}
+
 function lineChart(container, labels, series, options = {}) { // Draw a line chart with hover details.
   container.innerHTML = "";
   if (!labels.length || !series.length) {
@@ -486,17 +499,13 @@ function lineChart(container, labels, series, options = {}) { // Draw a line cha
   const frame = chartFrame(labels, min, max, options, {
     yLabel: options.yLabel || "Wealth", yFormatter, crosshairOpacity: 0.5,
   });
-  const { xScale, yScale, svg, crosshair } = frame;
+  const { xScale, yScale, svg } = frame;
   series.forEach((s) => {
     const points = s.values.map((v, i) => `${xScale(i)},${yScale(v)}`).join(" ");
-    const path = document.createElementNS(SVG_NS, "polyline");
-    path.setAttribute("points", points);
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", s.color);
-    path.setAttribute("stroke-width", String(s.width || 2.2));
-    path.setAttribute("stroke-linejoin", "round");
-    if (s.dash) path.setAttribute("stroke-dasharray", s.dash);
-    svg.appendChild(path);
+    svgElement(svg, "polyline", {
+      points, fill: "none", stroke: s.color, "stroke-width": s.width || 2.2,
+      "stroke-linejoin": "round", ...(s.dash && { "stroke-dasharray": s.dash }),
+    });
   });
   container.appendChild(svg);
   const legend = document.createElement("div");
@@ -507,22 +516,12 @@ function lineChart(container, labels, series, options = {}) { // Draw a line cha
     legend.appendChild(item);
   });
   container.appendChild(legend);
-  const tooltip = attachTooltip(container);
-  svg.addEventListener("mousemove", (e) => {
-    const { x, px, py } = frame.pointer(e);
-    const index = frame.indexAt(x);
-    crosshair.setAttribute("x1", xScale(index));
-    crosshair.setAttribute("x2", xScale(index));
-    crosshair.setAttribute("opacity", "1");
-    const title = options.tooltipTitle
-      ? options.tooltipTitle(labels[index])
-      : `${options.xLabel || "Period"} ${frame.xFormatter(labels[index])}`;
-    const valueFormatter = options.valueFormatter || ((value) => fmt(value));
-    const lines = [`<b>${escapeHtml(title)}</b>`];
+  const valueFormatter = options.valueFormatter || ((value) => fmt(value));
+  bindChartTooltip(container, labels, options, frame, (title, index) => {
+    const lines = [`<b>${title}</b>`];
     series.forEach((s) => lines.push(`<span style="color:${s.color}">${s.name}:</span> ${escapeHtml(valueFormatter(s.values[index]))}`));
-    tooltip.show(px, py, lines.join("<br>"));
+    return lines.join("<br>");
   });
-  svg.addEventListener("mouseleave", () => { crosshair.setAttribute("opacity", "0"); tooltip.hide(); });
 }
 
 function bandChart(container, labels, band, options = {}) { // Draw a percentile-band chart with hover details.
@@ -544,28 +543,23 @@ function bandChart(container, labels, band, options = {}) { // Draw a percentile
   const frame = chartFrame(labels, min, max, options, {
     yLabel: options.yLabel || "Value", yFormatter, uniqueCategoryTicks: true,
   });
-  const { xScale, yScale, svg, crosshair } = frame;
+  const { xScale, yScale, svg } = frame;
 
-  const area = document.createElementNS(SVG_NS, "polygon");
   const upper = band.high.map((value, index) => `${xScale(index)},${yScale(value)}`);
   const lower = band.low.map((value, index) => `${xScale(index)},${yScale(value)}`).reverse();
-  area.setAttribute("points", [...upper, ...lower].join(" "));
-  area.setAttribute("fill", band.color || "#b8d0d6");
-  area.setAttribute("opacity", "0.16");
-  svg.appendChild(area);
+  svgElement(svg, "polygon", {
+    points: [...upper, ...lower].join(" "), fill: band.color || "#b8d0d6", opacity: 0.16,
+  });
   [
     { values: band.low, opacity: "0.48", width: "1.2" },
     { values: band.high, opacity: "0.48", width: "1.2" },
     { values: band.median, opacity: "1", width: "2.4" },
   ].forEach((series) => {
-    const path = document.createElementNS(SVG_NS, "polyline");
-    path.setAttribute("points", series.values.map((value, index) => `${xScale(index)},${yScale(value)}`).join(" "));
-    path.setAttribute("fill", "none");
-    path.setAttribute("stroke", band.color || "#b8d0d6");
-    path.setAttribute("stroke-width", series.width);
-    path.setAttribute("opacity", series.opacity);
-    path.setAttribute("stroke-linejoin", "round");
-    svg.appendChild(path);
+    svgElement(svg, "polyline", {
+      points: series.values.map((value, index) => `${xScale(index)},${yScale(value)}`).join(" "),
+      fill: "none", stroke: band.color || "#b8d0d6", "stroke-width": series.width,
+      opacity: series.opacity, "stroke-linejoin": "round",
+    });
   });
   container.appendChild(svg);
 
@@ -575,24 +569,10 @@ function bandChart(container, labels, band, options = {}) { // Draw a percentile
   legend.innerHTML = `<span class="legend-item"><span class="legend-band" style="background:${band.color || "#b8d0d6"}"></span>${escapeHtml(labelsForBand[0])}–${escapeHtml(labelsForBand[2])}</span><span class="legend-item"><span class="legend-line" style="background:${band.color || "#b8d0d6"}"></span>${escapeHtml(labelsForBand[1])}</span>`;
   container.appendChild(legend);
 
-  const tooltip = attachTooltip(container);
   const valueFormatter = options.valueFormatter || yFormatter;
-  svg.addEventListener("mousemove", (event) => {
-    const { x, px, py } = frame.pointer(event);
-    const index = frame.indexAt(x);
-    crosshair.setAttribute("x1", xScale(index));
-    crosshair.setAttribute("x2", xScale(index));
-    crosshair.setAttribute("opacity", "1");
-    const title = options.tooltipTitle
-      ? options.tooltipTitle(labels[index])
-      : `${options.xLabel || "Period"} ${frame.xFormatter(labels[index])}`;
-    tooltip.show(
-      px,
-      py,
-      `<b>${escapeHtml(title)}</b><br>${escapeHtml(labelsForBand[0])}: ${escapeHtml(valueFormatter(band.low[index]))}<br>${escapeHtml(labelsForBand[1])}: ${escapeHtml(valueFormatter(band.median[index]))}<br>${escapeHtml(labelsForBand[2])}: ${escapeHtml(valueFormatter(band.high[index]))}`,
-    );
-  });
-  svg.addEventListener("mouseleave", () => { crosshair.setAttribute("opacity", "0"); tooltip.hide(); });
+  bindChartTooltip(container, labels, options, frame, (title, index) => (
+    `<b>${title}</b><br>${escapeHtml(labelsForBand[0])}: ${escapeHtml(valueFormatter(band.low[index]))}<br>${escapeHtml(labelsForBand[1])}: ${escapeHtml(valueFormatter(band.median[index]))}<br>${escapeHtml(labelsForBand[2])}: ${escapeHtml(valueFormatter(band.high[index]))}`
+  ));
 }
 
 function barChart(container, items, options = {}) { // Draw a bar chart with hover details.
@@ -611,18 +591,16 @@ function barChart(container, items, options = {}) { // Draw a bar chart with hov
     const barW = slot * 0.62;
     const x = MARGIN.left + index * slot + (slot - barW) / 2;
     const y = MARGIN.top + (1 - item.value / max) * plotH;
-    const rect = document.createElementNS(SVG_NS, "rect");
-    rect.setAttribute("x", x); rect.setAttribute("y", y);
-    rect.setAttribute("width", barW); rect.setAttribute("height", Math.max(plotH - (y - MARGIN.top), 0));
-    rect.setAttribute("fill", item.color || "#3b82f6");
-    rect.setAttribute("rx", "3");
+    const rect = svgElement(svg, "rect", {
+      x, y, width: barW, height: Math.max(plotH - (y - MARGIN.top), 0),
+      fill: item.color || "#3b82f6", rx: 3,
+    });
     rect.style.transition = "opacity 0.15s";
     rect.addEventListener("mouseenter", () => {
       rect.setAttribute("opacity", "0.8");
       tooltip.show(x + barW / 2, y, `<b>${escapeHtml(item.label)}</b><br>${item.value.toFixed(options.digits ?? 2)}`);
     });
     rect.addEventListener("mouseleave", () => { rect.setAttribute("opacity", "1"); tooltip.hide(); });
-    svg.appendChild(rect);
     svgText(svg, x + barW / 2, Math.max(y - 4, 10), item.value.toFixed(options.digits ?? 2), "chart-title");
     const label = item.label;
     const labelEl = svgText(svg, x + barW / 2, height - 8, label.length > 16 ? label.slice(0, 15) + "..." : label, "chart-title");
@@ -658,13 +636,10 @@ function heatmap(container, labels, values, domain, title) { // Draw a correlati
     svgText(svg, x0 - 8, y0 + row * size + size / 2 + 4, rowLabel.length > 16 ? rowLabel.slice(0, 15) + "..." : rowLabel, "chart-title", "end");
     labels.forEach((colLabel, col) => {
       const value = values[row][col];
-      const rect = document.createElementNS(SVG_NS, "rect");
-      rect.setAttribute("x", x0 + col * size);
-      rect.setAttribute("y", y0 + row * size);
-      rect.setAttribute("width", size - 2);
-      rect.setAttribute("height", size - 2);
-      rect.setAttribute("rx", "2");
-      rect.setAttribute("fill", colorFor(value));
+      const rect = svgElement(svg, "rect", {
+        x: x0 + col * size, y: y0 + row * size,
+        width: size - 2, height: size - 2, rx: 2, fill: colorFor(value),
+      });
       rect.style.cursor = "default";
       rect.addEventListener("mouseenter", () => {
         rect.setAttribute("stroke", "#fff");
@@ -672,7 +647,6 @@ function heatmap(container, labels, values, domain, title) { // Draw a correlati
         tooltip.show(x0 + col * size + size / 2, y0 + row * size + 8, `<b>${escapeHtml(rowLabel)} → ${escapeHtml(colLabel)}</b><br>${value.toFixed(3)}`);
       });
       rect.addEventListener("mouseleave", () => { rect.removeAttribute("stroke"); tooltip.hide(); });
-      svg.appendChild(rect);
       svgText(svg, x0 + col * size + (size - 2) / 2, y0 + row * size + (size - 2) / 2 + 4, value.toFixed(2), "chart-title");
     });
     svgText(svg, x0 + row * size + (size - 2) / 2, height - 4, labels[row].length > 16 ? labels[row].slice(0, 15) + "..." : labels[row], "chart-title");
@@ -707,12 +681,9 @@ function scatterChart(container, points, xLabel, yLabel, legend = null, options 
   drawAxes(svg, plotW, plotH, xTicks, yTicks, xLabel, yLabel);
   const tooltip = attachTooltip(container);
   points.forEach((p) => {
-    const circle = document.createElementNS(SVG_NS, "circle");
-    circle.setAttribute("cx", xScale(p.x));
-    circle.setAttribute("cy", yScale(p.y));
-    circle.setAttribute("r", 3.4);
-    circle.setAttribute("fill", p.color);
-    circle.setAttribute("opacity", "0.75");
+    const circle = svgElement(svg, "circle", {
+      cx: xScale(p.x), cy: yScale(p.y), r: 3.4, fill: p.color, opacity: 0.75,
+    });
     circle.addEventListener("mouseenter", () => {
       circle.setAttribute("r", "5");
       circle.setAttribute("stroke", "#fff");
@@ -728,7 +699,6 @@ function scatterChart(container, points, xLabel, yLabel, legend = null, options 
       circle.removeAttribute("stroke");
       tooltip.hide();
     });
-    svg.appendChild(circle);
   });
   container.appendChild(svg);
   if (legend) {
@@ -775,11 +745,9 @@ function histChart(container, values, bins = 45, label = "Terminal wealth", colo
     const barW = slot * 0.9;
     const x = MARGIN.left + index * slot + (slot - barW) / 2;
     const y = MARGIN.top + (1 - count / peak) * plotH;
-    const rect = document.createElementNS(SVG_NS, "rect");
-    rect.setAttribute("x", x); rect.setAttribute("y", y);
-    rect.setAttribute("width", barW); rect.setAttribute("height", plotH - (y - MARGIN.top));
-    rect.setAttribute("fill", color);
-    rect.setAttribute("opacity", "0.82");
+    const rect = svgElement(svg, "rect", {
+      x, y, width: barW, height: plotH - (y - MARGIN.top), fill: color, opacity: 0.82,
+    });
     const low = min + (index / bins) * span;
     const high = min + ((index + 1) / bins) * span;
     rect.addEventListener("mouseenter", () => {
@@ -787,7 +755,6 @@ function histChart(container, values, bins = 45, label = "Terminal wealth", colo
       tooltip.show(x + barW / 2, y, `<b>${fmt(low)} – ${fmt(high)}</b><br>${count} paths`);
     });
     rect.addEventListener("mouseleave", () => { rect.setAttribute("opacity", "0.82"); tooltip.hide(); });
-    svg.appendChild(rect);
   });
   container.appendChild(svg);
 }
@@ -805,35 +772,25 @@ function timelineChart(container, timelines) { // Draw regime timelines across s
   const allStates = [...new Set(timelines.flatMap((t) => t.states))];
   timelines.forEach((timeline, rowIndex) => {
     const rowTop = 4 + rowIndex * rowHeight;
-    const chip = document.createElementNS(SVG_NS, "rect");
-    chip.setAttribute("x", 2);
-    chip.setAttribute("y", rowTop + (rowHeight - 4 - chipSize) / 2);
-    chip.setAttribute("width", chipSize);
-    chip.setAttribute("height", chipSize);
-    chip.setAttribute("rx", 2);
-    chip.setAttribute("fill", timeline.color);
-    svg.appendChild(chip);
-    const label = document.createElementNS(SVG_NS, "text");
-    label.setAttribute("x", 14);
-    label.setAttribute("y", rowTop + 17);
-    label.setAttribute("font-size", "11");
-    label.setAttribute("font-weight", "700");
-    label.setAttribute("fill", "#e6ecf7");
+    svgElement(svg, "rect", {
+      x: 2, y: rowTop + (rowHeight - 4 - chipSize) / 2,
+      width: chipSize, height: chipSize, rx: 2, fill: timeline.color,
+    });
+    const label = svgElement(svg, "text", {
+      x: 14, y: rowTop + 17, "font-size": 11, "font-weight": 700, fill: "#e6ecf7",
+    });
     label.textContent = timeline.label;
-    svg.appendChild(label);
     timeline.states.forEach((state, index) => {
-      const rect = document.createElementNS(SVG_NS, "rect");
-      rect.setAttribute("x", labelWidth + index * slot);
-      rect.setAttribute("y", rowTop);
-      rect.setAttribute("width", Math.max(slot - 1, 1));
-      rect.setAttribute("height", rowHeight - 4);
-      rect.setAttribute("fill", colorForState(state, allStates.indexOf(state)));
+      const rect = svgElement(svg, "rect", {
+        x: labelWidth + index * slot, y: rowTop,
+        width: Math.max(slot - 1, 1), height: rowHeight - 4,
+        fill: colorForState(state, allStates.indexOf(state)),
+      });
       rect.addEventListener("mouseenter", () => {
         rect.setAttribute("opacity", "0.85");
         tooltip.show(labelWidth + index * slot + slot / 2, rowTop, `Period ${index + 1}<br>${escapeHtml(labelForState(state))}`);
       });
       rect.addEventListener("mouseleave", () => { rect.setAttribute("opacity", "1"); tooltip.hide(); });
-      svg.appendChild(rect);
     });
   });
   container.appendChild(svg);
