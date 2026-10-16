@@ -1352,5 +1352,8 @@ so the default remains off. See [model and simulation evidence](docs/macro-stres
 ## Possible improvements
 
 - Validate the volatility-model comparison with point-in-time macro vintages
-  and additional unseen data, then investigate daily calibration and joint
-  MNTS tail/volatility fitting.
+  and additional unseen data.
+- Extend daily QARCH calibration and joint MNTS tail/volatility fitting
+  ([QARCH study](https://arxiv.org/html/1206.2153v2)).
+- Compare additional Ziggurat generators against the current native sampler
+  ([original paper](https://www.jstatsoft.org/article/view/v005i08)).
