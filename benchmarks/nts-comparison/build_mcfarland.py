@@ -1,5 +1,6 @@
-from pathlib import Path
 import math
+from pathlib import Path
+
 p=Path('benchmarks/nts-comparison')
 f=lambda x:math.exp(-x*x/2)
 area=math.sqrt(math.pi/2)/256

@@ -23,7 +23,7 @@ dev = [
   "ruff>=0.6",
 ]
 research = [
-  "scipy>=1.16",
+  "scipy>=1.15",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -41,3 +41,5 @@ exclude = [".venv", ".pytest_cache"]
 [tool.ruff.lint]
 select = ["E", "F", "I"]
 ignore = ["E501"]
+# Keep compact benchmark code compatible with the repository's row-count goal.
+per-file-ignores = { "benchmarks/nts-comparison/build_mcfarland.py" = ["E701", "E702", "E731"] }
