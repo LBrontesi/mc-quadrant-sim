@@ -148,7 +148,8 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert '"Buy and hold", "buy_hold"' in javascript
     assert "Math.min(...values)" not in javascript
     assert 'setAttribute("height", "auto")' not in javascript
-    assert 'setAttribute("height", String(height))' in javascript
+    assert "function createSvg(width, height)" in javascript
+    assert 'height,\n    preserveAspectRatio: "xMidYMid meet"' in javascript
 
 
 def test_web_backend_serves_health_and_load_endpoints():
