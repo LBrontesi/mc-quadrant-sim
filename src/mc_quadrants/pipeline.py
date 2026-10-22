@@ -422,30 +422,50 @@ def _compact_compatible(
     )
 
 
-def _run_chunk(
-    args: tuple[int, int, int],
-) -> tuple[
-    int,
-    np.ndarray,
-    np.ndarray | None,
-    np.ndarray,
-    np.ndarray | None,
-    dict[str, float],
-    dict[str, float],
-    dict[str, dict[str, float]],
-    np.ndarray | None,
-    np.ndarray | None,
-    dict[str, np.ndarray],
-]:
-    """Simulate one path chunk in a worker process.
+def _native_gross_frame(wealth: pd.DataFrame, values: np.ndarray) -> pd.DataFrame:
+    """Recover the gross ledger and consume its native accounting attributes."""
+    gross = pd.DataFrame(values, columns=wealth.columns)
+    gross.attrs.update(
+        margin_calls=0,
+        tax_country="none",
+        tax_regime="none",
+        transaction_cost_total=float(wealth.attrs.pop("native_gross_transaction_cost_total", 0.0)),
+        native_backend=True,
+    )
+    return gross
 
-    Returns the start offset, active and gross wealth values, regime codes,
-    macro paths, and additive accounting attributes. The same market paths
-    feed both ledgers, so any difference is solely caused by the selected tax
-    policy. Each chunk draws its own RNG from ``random_seed + chunk_index``.
-    """
-    start, count, seed = args
-    state = _CHUNK_WORKER_STATE
+
+def _simulate_wealth_pair(
+    result: SimulationResult, portfolio_kwargs: dict[str, Any], tax_kwargs: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Apply gross/tax ledgers and the optional paired withdrawal policy."""
+    no_tax = {"tax_country": "none", "tax_regime": "none"}
+    wealth = simulate_portfolio_paths(result, **portfolio_kwargs, **(tax_kwargs or no_tax))
+    gross = wealth
+    if tax_kwargs:
+        native_gross = wealth.attrs.pop("native_gross_wealth", None)
+        gross = (
+            _native_gross_frame(wealth, native_gross)
+            if native_gross is not None
+            else simulate_portfolio_paths(result, **portfolio_kwargs, **no_tax)
+        )
+    alternative = _alternative_decumulation(portfolio_kwargs["decumulation"])
+    if alternative is not None:
+        paired = simulate_portfolio_paths(
+            result,
+            **{**portfolio_kwargs, "decumulation": alternative},
+            **({**tax_kwargs, "tax_wrapper_benchmark": False} if tax_kwargs else no_tax),
+        )
+        wealth.attrs.update(paired_policy=alternative.policy, paired_wealth=paired.to_numpy(dtype=float))
+        for key in ("withdrawal_requested", "withdrawal_funded", "guardrail_events"):
+            wealth.attrs[f"paired_{key}"] = paired.attrs[key]
+    return wealth, gross
+
+
+def _simulate_batch(
+    state: dict[str, Any], count: int, seed: int,
+) -> tuple[SimulationResult, pd.DataFrame, pd.DataFrame]:
+    """Run one batch identically in the caller or a worker process."""
     chunk_result = simulate_returns(
         state["model"],
         periods=state["periods"],
@@ -469,7 +489,43 @@ def _run_chunk(
         dcc_asymmetry=state["dcc_asymmetry"],
         return_regime_codes=True,
         native_threads=state.get("native_threads", 1),
+        native_portfolio_config=state.get("native_portfolio_config"),
     )
+    if chunk_result.native_portfolio is not None:
+        chunk_wealth = italian_native_result_frame(
+            chunk_result.native_portfolio,
+            chunk_result.native_portfolio["frame_metadata"],
+            fused=True,
+        )
+        chunk_wealth.attrs.update(
+            {
+                "tax_country": state["tax_country"],
+                "tax_regime": state["tax_regime"],
+            }
+        )
+        native_gross = chunk_wealth.attrs.pop("native_gross_wealth")
+        if not state["tax_enabled"]:
+            chunk_wealth.attrs.pop("native_gross_transaction_cost_total", None)
+            return chunk_result, chunk_wealth, chunk_wealth
+        gross_wealth = _native_gross_frame(chunk_wealth, native_gross)
+        gross_wealth.attrs.update(
+            {
+                "native_fused_backend": True,
+                "compact_reporting": bool(
+                    chunk_wealth.attrs.get("compact_reporting", False)
+                ),
+                "total_simulated_paths": int(
+                    chunk_wealth.attrs.get(
+                        "total_simulated_paths",
+                        count,
+                    )
+                ),
+                "terminal_values": chunk_wealth.attrs.get(
+                    "gross_terminal_values"
+                ),
+            }
+        )
+        return chunk_result, chunk_wealth, gross_wealth
     financing_rate_paths = _annual_macro_paths(
         state["model"],
         chunk_result,
@@ -507,85 +563,43 @@ def _run_chunk(
         "safe_withdrawal_rate": state["safe_withdrawal_rate"],
         "native_threads": state.get("native_threads", 1),
     }
-    if state["tax_enabled"]:
-        chunk_wealth = simulate_portfolio_paths(
-            chunk_result,
-            **portfolio_kwargs,
-            tax_country=state["tax_country"],
-            tax_regime=state["tax_regime"],
-            asset_tax_categories=state["asset_tax_categories"],
-            asset_tax_metadata=state["asset_tax_metadata"],
-            italy_annual_wealth_tax=state["italy_annual_wealth_tax"],
-            italy_wealth_tax_mode=state["italy_wealth_tax_mode"],
-            tax_terminal_liquidation=state["tax_terminal_liquidation"],
-            tax_start_date=state["tax_start_date"],
-            tax_wrapper_benchmark=state["tax_wrapper_benchmark"],
+    tax_kwargs = {
+        key: state[key] for key in (
+            "tax_country", "tax_regime", "asset_tax_categories", "asset_tax_metadata",
+            "italy_annual_wealth_tax", "italy_wealth_tax_mode", "tax_terminal_liquidation",
+            "tax_start_date", "tax_wrapper_benchmark",
         )
-        native_gross = chunk_wealth.attrs.pop("native_gross_wealth", None)
-        if native_gross is not None:
-            gross_wealth = pd.DataFrame(native_gross, columns=chunk_wealth.columns)
-            gross_wealth.attrs.update(
-                {
-                    "margin_calls": 0,
-                    "tax_country": "none",
-                    "tax_regime": "none",
-                    "transaction_cost_total": float(
-                        chunk_wealth.attrs.pop("native_gross_transaction_cost_total", 0.0)
-                    ),
-                    "native_backend": True,
-                }
-            )
-        else:
-            gross_wealth = simulate_portfolio_paths(
-                chunk_result,
-                **portfolio_kwargs,
-                tax_country="none",
-                tax_regime="none",
-            )
-        gross_values: np.ndarray | None = gross_wealth.to_numpy(dtype=float)
-    else:
-        gross_wealth = simulate_portfolio_paths(
-            chunk_result,
-            **portfolio_kwargs,
-            tax_country="none",
-            tax_regime="none",
-        )
-        chunk_wealth = gross_wealth
-        gross_values = None
-    alternative_plan = _alternative_decumulation(state["decumulation"])
-    if alternative_plan is not None:
-        paired_kwargs = dict(portfolio_kwargs)
-        paired_kwargs["decumulation"] = alternative_plan
-        if state["tax_enabled"]:
-            paired = simulate_portfolio_paths(
-                chunk_result,
-                **paired_kwargs,
-                tax_country=state["tax_country"],
-                tax_regime=state["tax_regime"],
-                asset_tax_categories=state["asset_tax_categories"],
-                asset_tax_metadata=state["asset_tax_metadata"],
-                italy_annual_wealth_tax=state["italy_annual_wealth_tax"],
-                italy_wealth_tax_mode=state["italy_wealth_tax_mode"],
-                tax_terminal_liquidation=state["tax_terminal_liquidation"],
-                tax_start_date=state["tax_start_date"],
-                tax_wrapper_benchmark=False,
-            )
-        else:
-            paired = simulate_portfolio_paths(
-                chunk_result,
-                **paired_kwargs,
-                tax_country="none",
-                tax_regime="none",
-            )
-        chunk_wealth.attrs["paired_policy"] = alternative_plan.policy
-        chunk_wealth.attrs["paired_wealth"] = paired.to_numpy(dtype=float)
-        chunk_wealth.attrs["paired_withdrawal_requested"] = paired.attrs[
-            "withdrawal_requested"
-        ]
-        chunk_wealth.attrs["paired_withdrawal_funded"] = paired.attrs[
-            "withdrawal_funded"
-        ]
-        chunk_wealth.attrs["paired_guardrail_events"] = paired.attrs["guardrail_events"]
+    } if state["tax_enabled"] else {}
+    chunk_wealth, gross_wealth = _simulate_wealth_pair(chunk_result, portfolio_kwargs, tax_kwargs)
+    return chunk_result, chunk_wealth, gross_wealth
+
+
+def _run_chunk(
+    args: tuple[int, int, int],
+) -> tuple[
+    int,
+    np.ndarray,
+    np.ndarray | None,
+    np.ndarray,
+    np.ndarray | None,
+    dict[str, float],
+    dict[str, float],
+    dict[str, dict[str, float]],
+    np.ndarray | None,
+    np.ndarray | None,
+    dict[str, np.ndarray],
+]:
+    """Simulate one path chunk in a worker process.
+
+    Returns the start offset, active and gross wealth values, regime codes,
+    macro paths, and additive accounting attributes. The same market paths
+    feed both ledgers, so any difference is solely caused by the selected tax
+    policy. Each chunk draws its own RNG from ``random_seed + chunk_index``.
+    """
+    start, count, seed = args
+    state = _CHUNK_WORKER_STATE
+    chunk_result, chunk_wealth, gross_wealth = _simulate_batch(state, count, seed)
+    gross_values = gross_wealth.to_numpy(dtype=float) if state["tax_enabled"] else None
     wealth_values = chunk_wealth.to_numpy(dtype=float)
     return (
         start,
@@ -735,200 +749,62 @@ def _simulate_chunked(
             }
         )
 
-    def _single(
-        paths_now: int,
-        seed: int,
-    ) -> tuple[SimulationResult, pd.DataFrame, pd.DataFrame]:  # Run one unchunked simulation batch inside the pipeline.
-        chunk_result = simulate_returns(
-            model,
-            periods=periods,
-            paths=paths_now,
-            start_state=start_state,
-            random_seed=seed,
-            distribution=distribution,
-            transition_concentration=transition_concentration,
-            duration_model=duration_model,
-            min_regime_duration=min_regime_duration,
-            garch=garch,
-            volatility_model=volatility_model,
-            garch_alpha=garch_alpha,
-            garch_beta=garch_beta,
-            joint_macro=joint_macro,
-            macro_transition_weight=macro_transition_weight,
-            macro_parameter_uncertainty=macro_parameter_uncertainty,
-            dynamic_correlation=dynamic_correlation,
-            dcc_alpha=dcc_alpha,
-            dcc_beta=dcc_beta,
-            dcc_asymmetry=dcc_asymmetry,
-            return_regime_codes=True,
-            native_threads=native_threads,
-            native_portfolio_config=native_portfolio_config,
-        )
-        if chunk_result.native_portfolio is not None:
-            chunk_wealth = italian_native_result_frame(
-                chunk_result.native_portfolio,
-                chunk_result.native_portfolio["frame_metadata"],
-                fused=True,
-            )
-            chunk_wealth.attrs.update(
-                {
-                    "tax_country": tax_selection.country,
-                    "tax_regime": tax_selection.regime,
-                }
-            )
-            native_gross = chunk_wealth.attrs.pop("native_gross_wealth")
-            if not tax_selection.enabled:
-                chunk_wealth.attrs.pop("native_gross_transaction_cost_total", None)
-                return chunk_result, chunk_wealth, chunk_wealth
-            gross_wealth = pd.DataFrame(native_gross, columns=chunk_wealth.columns)
-            gross_wealth.attrs.update(
-                {
-                    "margin_calls": 0,
-                    "tax_country": "none",
-                    "tax_regime": "none",
-                    "transaction_cost_total": float(
-                        chunk_wealth.attrs.pop("native_gross_transaction_cost_total", 0.0)
-                    ),
-                    "native_backend": True,
-                    "native_fused_backend": True,
-                    "compact_reporting": bool(
-                        chunk_wealth.attrs.get("compact_reporting", False)
-                    ),
-                    "total_simulated_paths": int(
-                        chunk_wealth.attrs.get(
-                            "total_simulated_paths",
-                            paths_now,
-                        )
-                    ),
-                    "terminal_values": chunk_wealth.attrs.get(
-                        "gross_terminal_values"
-                    ),
-                }
-            )
-            return chunk_result, chunk_wealth, gross_wealth
-        financing_rate_paths = _annual_macro_paths(
-            model,
-            chunk_result,
-            rate_col,
-            "rate_is_percent",
-        )
-        financing_inflation_paths = _annual_macro_paths(
-            model,
-            chunk_result,
-            inflation_col,
-            "inflation_is_percent",
-        )
-        portfolio_kwargs = {
-            "weights": weight_series.to_dict(),
-            "initial_value": initial_value,
-            "return_kind": return_kind,
-            "rebalance_frequency": rebalance_frequency,
-            "transaction_cost_bps": transaction_cost_bps,
-            "state_transaction_cost_multipliers": state_transaction_cost_multipliers,
-            "asset_expense_ratios": expense_ratios.to_dict(),
-            "leverage_multiple": leverage_multiple,
-            "financing_rate": financing_rate,
-            "financing_inflation_sensitivity": financing_inflation_sensitivity,
-            "state_inflation": state_inflation,
-            "financing_rate_paths": financing_rate_paths,
-            "financing_inflation_paths": financing_inflation_paths,
-            "maintenance_margin": maintenance_margin,
-            "contribution": contribution,
-            "contribution_allocation": contribution_allocation,
-            "withdrawal": withdrawal,
-            "withdrawal_start_period": withdrawal_start_period,
-            "decumulation": decumulation,
-            "withdrawal_inflation_paths": accounting_inflation_paths(model, chunk_result),
-            "annual_inflation": annual_inflation,
-            "safe_withdrawal_rate": safe_withdrawal_rate,
-            "native_threads": native_threads,
-        }
-        if tax_selection.enabled:
-            chunk_wealth = simulate_portfolio_paths(
-                chunk_result,
-                **portfolio_kwargs,
-                tax_country=tax_selection.country,
-                tax_regime=tax_selection.regime,
-                asset_tax_categories=asset_tax_categories,
-                asset_tax_metadata=asset_tax_metadata,
-                italy_annual_wealth_tax=italy_annual_wealth_tax,
-                italy_wealth_tax_mode=italy_wealth_tax_mode,
-                tax_terminal_liquidation=tax_terminal_liquidation,
-                tax_start_date=tax_start_date,
-                tax_wrapper_benchmark=tax_wrapper_benchmark,
-            )
-            native_gross = chunk_wealth.attrs.pop("native_gross_wealth", None)
-            if native_gross is not None:
-                gross_wealth = pd.DataFrame(native_gross, columns=chunk_wealth.columns)
-                gross_wealth.attrs.update(
-                    {
-                        "margin_calls": 0,
-                        "tax_country": "none",
-                        "tax_regime": "none",
-                        "transaction_cost_total": float(
-                            chunk_wealth.attrs.pop(
-                                "native_gross_transaction_cost_total",
-                                0.0,
-                            )
-                        ),
-                        "native_backend": True,
-                    }
-                )
-            else:
-                gross_wealth = simulate_portfolio_paths(
-                    chunk_result,
-                    **portfolio_kwargs,
-                    tax_country="none",
-                    tax_regime="none",
-                )
-        else:
-            gross_wealth = simulate_portfolio_paths(
-                chunk_result,
-                **portfolio_kwargs,
-                tax_country="none",
-                tax_regime="none",
-            )
-            chunk_wealth = gross_wealth
-        alternative_plan = _alternative_decumulation(decumulation)
-        if alternative_plan is not None:
-            paired_kwargs = dict(portfolio_kwargs)
-            paired_kwargs["decumulation"] = alternative_plan
-            if tax_selection.enabled:
-                paired = simulate_portfolio_paths(
-                    chunk_result,
-                    **paired_kwargs,
-                    tax_country=tax_selection.country,
-                    tax_regime=tax_selection.regime,
-                    asset_tax_categories=asset_tax_categories,
-                    asset_tax_metadata=asset_tax_metadata,
-                    italy_annual_wealth_tax=italy_annual_wealth_tax,
-                    italy_wealth_tax_mode=italy_wealth_tax_mode,
-                    tax_terminal_liquidation=tax_terminal_liquidation,
-                    tax_start_date=tax_start_date,
-                    tax_wrapper_benchmark=False,
-                )
-            else:
-                paired = simulate_portfolio_paths(
-                    chunk_result,
-                    **paired_kwargs,
-                    tax_country="none",
-                    tax_regime="none",
-                )
-            chunk_wealth.attrs["paired_policy"] = alternative_plan.policy
-            chunk_wealth.attrs["paired_wealth"] = paired.to_numpy(dtype=float)
-            chunk_wealth.attrs["paired_withdrawal_requested"] = paired.attrs[
-                "withdrawal_requested"
-            ]
-            chunk_wealth.attrs["paired_withdrawal_funded"] = paired.attrs[
-                "withdrawal_funded"
-            ]
-            chunk_wealth.attrs["paired_guardrail_events"] = paired.attrs[
-                "guardrail_events"
-            ]
-        return chunk_result, chunk_wealth, gross_wealth
+    batch_state = {
+        "model": model,
+        "periods": periods,
+        "start_state": start_state,
+        "distribution": distribution,
+        "transition_concentration": transition_concentration,
+        "duration_model": duration_model,
+        "min_regime_duration": int(min_regime_duration),
+        "garch": bool(garch),
+        "volatility_model": volatility_model,
+        "garch_alpha": float(garch_alpha),
+        "garch_beta": float(garch_beta),
+        "joint_macro": bool(joint_macro),
+        "macro_transition_weight": float(macro_transition_weight),
+        "macro_parameter_uncertainty": bool(macro_parameter_uncertainty),
+        "dynamic_correlation": bool(dynamic_correlation),
+        "dcc_alpha": float(dcc_alpha),
+        "dcc_beta": float(dcc_beta),
+        "dcc_asymmetry": float(dcc_asymmetry),
+        "weights": weight_series.to_dict(),
+        "initial_value": float(initial_value),
+        "return_kind": return_kind,
+        "rebalance_frequency": rebalance_frequency,
+        "transaction_cost_bps": float(transaction_cost_bps),
+        "state_transaction_cost_multipliers": dict(state_transaction_cost_multipliers or {}),
+        "expense_ratios": expense_ratios.to_dict(),
+        "leverage_multiple": float(leverage_multiple),
+        "financing_rate": float(financing_rate),
+        "financing_inflation_sensitivity": float(financing_inflation_sensitivity),
+        "state_inflation": dict(state_inflation) if state_inflation else None,
+        "rate_col": rate_col,
+        "inflation_col": inflation_col,
+        "maintenance_margin": float(maintenance_margin),
+        "contribution": float(contribution),
+        "contribution_allocation": contribution_allocation,
+        "withdrawal": float(withdrawal),
+        "withdrawal_start_period": int(withdrawal_start_period),
+        "decumulation": decumulation,
+        "annual_inflation": float(annual_inflation),
+        "safe_withdrawal_rate": float(safe_withdrawal_rate),
+        "tax_enabled": tax_selection.enabled,
+        "tax_country": tax_selection.country,
+        "tax_regime": tax_selection.regime,
+        "asset_tax_categories": dict(asset_tax_categories or {}),
+        "asset_tax_metadata": {asset: dict(values) for asset, values in (asset_tax_metadata or {}).items()},
+        "italy_annual_wealth_tax": float(italy_annual_wealth_tax),
+        "italy_wealth_tax_mode": italy_wealth_tax_mode,
+        "tax_terminal_liquidation": bool(tax_terminal_liquidation),
+        "tax_start_date": tax_start_date,
+        "tax_wrapper_benchmark": bool(tax_wrapper_benchmark),
+        "native_threads": native_threads,
+        "native_portfolio_config": native_portfolio_config,
+    }
 
     if chunk_size is None or paths <= chunk_size:
-        return _single(int(paths), int(random_seed))
+        return _simulate_batch(batch_state, int(paths), int(random_seed))
 
     total = int(paths)
     chunk_size = max(1, int(chunk_size))
@@ -988,65 +864,38 @@ def _simulate_chunked(
             )
     specs = _chunk_specs(total, chunk_size, random_seed)
 
+    def _serial_chunks() -> None:
+        for start, count, seed in specs:
+            chunk_result, chunk_wealth, chunk_gross_wealth = _simulate_batch(batch_state, count, seed)
+            wealth_values[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
+            if tax_selection.enabled:
+                gross_wealth_values[:, start:start + count] = (
+                    chunk_gross_wealth.to_numpy(dtype=float)
+                )
+            regime_codes[:, start:start + count] = chunk_result.regimes
+            for key in _ADDITIVE_WEALTH_ATTRS:
+                aggregate_attrs[key] += float(chunk_wealth.attrs.get(key, 0.0))
+                aggregate_gross_attrs[key] += float(
+                    chunk_gross_wealth.attrs.get(key, 0.0)
+                )
+            if macro_paths is not None and chunk_result.macro_paths is not None:
+                macro_paths[:, start:start + count, :] = chunk_result.macro_paths
+            _merge_tax_by_year(aggregate_tax_by_year, chunk_wealth.attrs.get("tax_by_year"))
+            if wrapper_terminal_values is not None:
+                wrapper_terminal_values[start:start + count] = chunk_wealth.attrs["wrapper_terminal_values"]
+                wrapper_annualized_returns[start:start + count] = chunk_wealth.attrs["wrapper_annualized_returns"]
+            for key in path_attrs:
+                if key in chunk_wealth.attrs:
+                    path_attrs[key][:, start:start + count] = chunk_wealth.attrs[key]
+
+
     if workers is not None and workers > 1 and not native_tax_execution:
-        worker_state = {
-            "model": model,
-            "periods": periods,
-            "start_state": start_state,
-            "distribution": distribution,
-            "transition_concentration": transition_concentration,
-            "duration_model": duration_model,
-            "min_regime_duration": int(min_regime_duration),
-            "garch": bool(garch),
-            "volatility_model": volatility_model,
-            "garch_alpha": float(garch_alpha),
-            "garch_beta": float(garch_beta),
-            "joint_macro": bool(joint_macro),
-            "macro_transition_weight": float(macro_transition_weight),
-            "macro_parameter_uncertainty": bool(macro_parameter_uncertainty),
-            "dynamic_correlation": bool(dynamic_correlation),
-            "dcc_alpha": float(dcc_alpha),
-            "dcc_beta": float(dcc_beta),
-            "dcc_asymmetry": float(dcc_asymmetry),
-            "weights": weight_series.to_dict(),
-            "initial_value": float(initial_value),
-            "return_kind": return_kind,
-            "rebalance_frequency": rebalance_frequency,
-            "transaction_cost_bps": float(transaction_cost_bps),
-            "state_transaction_cost_multipliers": dict(state_transaction_cost_multipliers or {}),
-            "expense_ratios": expense_ratios.to_dict(),
-            "leverage_multiple": float(leverage_multiple),
-            "financing_rate": float(financing_rate),
-            "financing_inflation_sensitivity": float(financing_inflation_sensitivity),
-            "state_inflation": dict(state_inflation) if state_inflation else None,
-            "rate_col": rate_col,
-            "inflation_col": inflation_col,
-            "maintenance_margin": float(maintenance_margin),
-            "contribution": float(contribution),
-            "contribution_allocation": contribution_allocation,
-            "withdrawal": float(withdrawal),
-            "withdrawal_start_period": int(withdrawal_start_period),
-            "decumulation": decumulation,
-            "annual_inflation": float(annual_inflation),
-            "safe_withdrawal_rate": float(safe_withdrawal_rate),
-            "tax_enabled": tax_selection.enabled,
-            "tax_country": tax_selection.country,
-            "tax_regime": tax_selection.regime,
-            "asset_tax_categories": dict(asset_tax_categories or {}),
-            "asset_tax_metadata": {asset: dict(values) for asset, values in (asset_tax_metadata or {}).items()},
-            "italy_annual_wealth_tax": float(italy_annual_wealth_tax),
-            "italy_wealth_tax_mode": italy_wealth_tax_mode,
-            "tax_terminal_liquidation": bool(tax_terminal_liquidation),
-            "tax_start_date": tax_start_date,
-            "tax_wrapper_benchmark": bool(tax_wrapper_benchmark),
-            "native_threads": 1,
-        }
         try:
             with ProcessPoolExecutor(
                 max_workers=int(workers),
                 mp_context=get_context("spawn"),
                 initializer=_init_chunk_worker,
-                initargs=(worker_state,),
+                initargs=(batch_state,),
             ) as executor:
                 for (
                     start,
@@ -1084,51 +933,9 @@ def _simulate_chunked(
                         if key in path_attrs:
                             path_attrs[key][:, start:start + count] = values
         except (NotImplementedError, PermissionError):
-            for start, count, seed in specs:
-                chunk_result, chunk_wealth, chunk_gross_wealth = _single(count, seed)
-                wealth_values[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
-                if tax_selection.enabled:
-                    gross_wealth_values[:, start:start + count] = (
-                        chunk_gross_wealth.to_numpy(dtype=float)
-                    )
-                regime_codes[:, start:start + count] = chunk_result.regimes
-                for key in _ADDITIVE_WEALTH_ATTRS:
-                    aggregate_attrs[key] += float(chunk_wealth.attrs.get(key, 0.0))
-                    aggregate_gross_attrs[key] += float(
-                        chunk_gross_wealth.attrs.get(key, 0.0)
-                    )
-                if macro_paths is not None and chunk_result.macro_paths is not None:
-                    macro_paths[:, start:start + count, :] = chunk_result.macro_paths
-                _merge_tax_by_year(aggregate_tax_by_year, chunk_wealth.attrs.get("tax_by_year"))
-                if wrapper_terminal_values is not None:
-                    wrapper_terminal_values[start:start + count] = chunk_wealth.attrs["wrapper_terminal_values"]
-                    wrapper_annualized_returns[start:start + count] = chunk_wealth.attrs["wrapper_annualized_returns"]
-                for key in path_attrs:
-                    if key in chunk_wealth.attrs:
-                        path_attrs[key][:, start:start + count] = chunk_wealth.attrs[key]
+            _serial_chunks()
     else:
-        for start, count, seed in specs:
-            chunk_result, chunk_wealth, chunk_gross_wealth = _single(count, seed)
-            wealth_values[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
-            if tax_selection.enabled:
-                gross_wealth_values[:, start:start + count] = (
-                    chunk_gross_wealth.to_numpy(dtype=float)
-                )
-            regime_codes[:, start:start + count] = chunk_result.regimes
-            for key in _ADDITIVE_WEALTH_ATTRS:
-                aggregate_attrs[key] += float(chunk_wealth.attrs.get(key, 0.0))
-                aggregate_gross_attrs[key] += float(
-                    chunk_gross_wealth.attrs.get(key, 0.0)
-                )
-            if macro_paths is not None and chunk_result.macro_paths is not None:
-                macro_paths[:, start:start + count, :] = chunk_result.macro_paths
-            _merge_tax_by_year(aggregate_tax_by_year, chunk_wealth.attrs.get("tax_by_year"))
-            if wrapper_terminal_values is not None:
-                wrapper_terminal_values[start:start + count] = chunk_wealth.attrs["wrapper_terminal_values"]
-                wrapper_annualized_returns[start:start + count] = chunk_wealth.attrs["wrapper_annualized_returns"]
-            for key in path_attrs:
-                if key in chunk_wealth.attrs:
-                    path_attrs[key][:, start:start + count] = chunk_wealth.attrs[key]
+        _serial_chunks()
 
     wealth = pd.DataFrame(
         wealth_values,
@@ -1416,6 +1223,22 @@ def run_scenario(
         fx_quote=fx_quote,
     )
 
+    regime_options = dict(
+        growth_col=growth_col,
+        inflation_col=inflation_col,
+        growth_threshold=growth_threshold,
+        inflation_threshold=inflation_threshold,
+        macro_lag_periods=macro_lag_periods,
+        threshold_window=threshold_window,
+        min_regime_duration=min_regime_duration,
+        probabilistic_regimes=probabilistic_regimes,
+        regime_temperature=regime_temperature,
+        regime_smoothing_window=regime_smoothing_window,
+        regime_hysteresis=regime_hysteresis,
+        regime_confirmation_periods=regime_confirmation_periods,
+        duration_prior_strength=duration_prior_strength,
+        mean_prior_strength=mean_prior_strength,
+    )
     validation_options = dict(
         calibration_options=dict(
             rate_col=rate_col, correlation_overrides=correlation_overrides, override_weight=override_weight,
@@ -1447,6 +1270,12 @@ def run_scenario(
         ),
         parameter_draws=parameter_draws, parameter_block_size=parameter_block_size, parameter_seed=parameter_seed,
     )
+    validation_kwargs = dict(
+        **regime_options, weights=normalized_weights,
+        use_fitted_dependence=calibrate_dependence,
+        garch=garch, dynamic_correlation=dynamic_correlation, volatility_model=volatility_model,
+        **validation_options,
+    )
     selection_report = None
     selection_warning = None
     if select_hyperparameters:
@@ -1455,19 +1284,7 @@ def run_scenario(
         try:
             selection_report = select_calibration_hyperparameters(
                 scenario_returns, macro, validation_runner=_cached_walk_forward_validation,
-                validation_kwargs=dict(
-                    growth_col=growth_col, inflation_col=inflation_col,
-                    growth_threshold=growth_threshold, inflation_threshold=inflation_threshold,
-                    macro_lag_periods=macro_lag_periods, threshold_window=threshold_window,
-                    probabilistic_regimes=probabilistic_regimes, regime_temperature=regime_temperature,
-                    regime_smoothing_window=regime_smoothing_window, regime_hysteresis=regime_hysteresis,
-                    regime_confirmation_periods=regime_confirmation_periods,
-                    duration_prior_strength=duration_prior_strength, min_regime_duration=min_regime_duration,
-                    mean_prior_strength=mean_prior_strength, weights=normalized_weights,
-                    use_fitted_dependence=calibrate_dependence,
-                    garch=garch, dynamic_correlation=dynamic_correlation, volatility_model=volatility_model,
-                    **validation_options,
-                ),
+                validation_kwargs=validation_kwargs,
             )
             mean_prior_strength = selection_report["selected_parameters"]["mean_prior_strength"]
             duration_prior_strength = selection_report["selected_parameters"].get("duration_prior_strength", duration_prior_strength)
@@ -1482,42 +1299,20 @@ def run_scenario(
             min_regime_duration=int(min_regime_duration),
         )
         regimes = fit.regimes
-        model.metadata["base_currency"] = str(base_currency).strip().upper()
-        model.metadata["fx_quote"] = fx_quote
-        model.metadata["initial_value"] = float(initial_value)
-        if asset_currencies:
-            model.metadata["asset_currencies"] = dict(asset_currencies)
         diagnostics = build_hmm_diagnostics(model, fit.regimes)
     else:
-        model = calibrate_quadrant_model(
-            returns=scenario_returns,
-            macro=macro,
-            growth_col=growth_col,
-            inflation_col=inflation_col,
-            rate_col=rate_col,
-            growth_threshold=growth_threshold,
-            inflation_threshold=inflation_threshold,
-            correlation_overrides=correlation_overrides,
-            override_weight=override_weight,
-            macro_lag_periods=macro_lag_periods,
-            threshold_window=threshold_window,
-            min_regime_duration=int(min_regime_duration),
-            probabilistic_regimes=probabilistic_regimes,
-            regime_temperature=regime_temperature,
-            regime_smoothing_window=int(regime_smoothing_window),
-            regime_hysteresis=float(regime_hysteresis),
-            regime_confirmation_periods=int(regime_confirmation_periods),
-            duration_prior_strength=float(duration_prior_strength),
-            mean_prior_strength=mean_prior_strength,
-            joint_macro=joint_macro,
-            structural_returns=structural_returns,
-            asset_classes=normalized_asset_classes,
-            asset_durations=normalized_asset_durations,
-            asset_income_yields=normalized_asset_income_yields,
-            macro_model=macro_model,
-            volatility_model=volatility_model if garch else "garch",
-            economic_returns=economic_returns,
-        )
+        fit_options = {
+            **validation_options["calibration_options"],
+            **regime_options,
+            "min_regime_duration": int(min_regime_duration),
+            "regime_smoothing_window": int(regime_smoothing_window),
+            "regime_hysteresis": float(regime_hysteresis),
+            "regime_confirmation_periods": int(regime_confirmation_periods),
+            "duration_prior_strength": float(duration_prior_strength),
+            "mean_prior_strength": mean_prior_strength,
+            "volatility_model": volatility_model if garch else "garch",
+        }
+        model = calibrate_quadrant_model(scenario_returns, macro, **fit_options)
         model.metadata["requested_macro_lag_periods"] = requested_macro_lag_periods
         regimes = classify_persistent_quadrants(
             macro,
@@ -1557,11 +1352,12 @@ def run_scenario(
                 "Macro history is revised rather than point-in-time; select ALFRED initial-release data "
                 "for strict pseudo-live calibration."
             )
-        model.metadata["base_currency"] = str(base_currency).strip().upper()
-        model.metadata["fx_quote"] = fx_quote
-        model.metadata["initial_value"] = float(initial_value)
-        if asset_currencies:
-            model.metadata["asset_currencies"] = dict(asset_currencies)
+
+    model.metadata["base_currency"] = str(base_currency).strip().upper()
+    model.metadata["fx_quote"] = fx_quote
+    model.metadata["initial_value"] = float(initial_value)
+    if asset_currencies:
+        model.metadata["asset_currencies"] = dict(asset_currencies)
 
     if joint_macro and model.metadata.get("cpi_process"):
         if model.metadata["cpi_process"]["history_source"] == "flat_history_assumption":
@@ -1589,31 +1385,8 @@ def run_scenario(
             draws=parameter_draws,
             block_size=int(parameter_block_size),
             random_seed=effective_parameter_seed,
-            growth_col=growth_col,
-            inflation_col=inflation_col,
-            rate_col=rate_col,
-            growth_threshold=growth_threshold,
-            inflation_threshold=inflation_threshold,
-            correlation_overrides=correlation_overrides,
-            override_weight=override_weight,
-            macro_lag_periods=macro_lag_periods,
-            threshold_window=threshold_window,
-            min_regime_duration=int(min_regime_duration),
-            probabilistic_regimes=probabilistic_regimes,
-            regime_temperature=float(regime_temperature),
-            regime_smoothing_window=int(regime_smoothing_window),
-            regime_hysteresis=float(regime_hysteresis),
-            regime_confirmation_periods=int(regime_confirmation_periods),
-            duration_prior_strength=float(duration_prior_strength),
-            mean_prior_strength=float(mean_prior_strength),
-            joint_macro=joint_macro,
-            structural_returns=structural_returns,
-            asset_classes=normalized_asset_classes,
-            asset_durations=normalized_asset_durations,
-            asset_income_yields=normalized_asset_income_yields,
-            macro_model=macro_model,
-            volatility_model=volatility_model if garch else "garch",
-            economic_returns=economic_returns,
+            **{**fit_options, "regime_temperature": float(regime_temperature),
+               "mean_prior_strength": float(mean_prior_strength)},
         )
         parameter_models = anchor_parameter_models(parameter_models, model)
         parameter_summary = summarize_parameter_models(parameter_models, normalized_weights)
@@ -1740,16 +1513,10 @@ def run_scenario(
                 risk_free_rate=float(risk_free_rate),
             )
         if parameter_models and draw_result.returns.shape[1]:
-            draw_result = SimulationResult(
+            draw_result = replace(
+                draw_result,
                 returns=np.empty((int(periods), 0, len(model.assets)), dtype=float),
-                regimes=draw_result.regimes,
-                assets=draw_result.assets,
-                states=draw_result.states,
-                frequency=draw_result.frequency,
-                distribution=draw_result.distribution,
-                transition_concentration=draw_result.transition_concentration,
-                macro_paths=draw_result.macro_paths,
-                macro_columns=draw_result.macro_columns,
+                native_portfolio=None,
             )
         simulation_runs.append((draw_result, draw_wealth, draw_gross_wealth))
 
@@ -1958,20 +1725,6 @@ def run_scenario(
                 if compact_runs else None
             ),
         )
-        if parameter_summary is not None:
-            terminal_metrics: list[dict[str, float]] = []
-            for terminal in terminal_groups:
-                terminal_metrics.append(
-                    {
-                        "terminal_p05": float(np.quantile(terminal, 0.05)),
-                        "terminal_median": float(np.quantile(terminal, 0.50)),
-                        "terminal_p95": float(np.quantile(terminal, 0.95)),
-                    }
-                )
-            parameter_summary = pd.concat(
-                [parameter_summary.reset_index(drop=True), pd.DataFrame(terminal_metrics)],
-                axis=1,
-            )
         if compact_runs:
             simulation_runs.clear()
             macro_parts.clear()
@@ -2001,24 +1754,14 @@ def run_scenario(
             walk_forward_result = _cached_walk_forward_validation(
                 scenario_returns,
                 macro,
-                growth_col=growth_col,
-                inflation_col=inflation_col,
-                growth_threshold=growth_threshold,
-                inflation_threshold=inflation_threshold,
-                macro_lag_periods=macro_lag_periods,
-                threshold_window=threshold_window,
-                probabilistic_regimes=probabilistic_regimes,
-                regime_temperature=float(regime_temperature),
-                regime_smoothing_window=int(regime_smoothing_window),
-                regime_hysteresis=float(regime_hysteresis),
-                regime_confirmation_periods=int(regime_confirmation_periods),
-                duration_prior_strength=float(duration_prior_strength),
-                min_regime_duration=int(min_regime_duration),
-                mean_prior_strength=float(mean_prior_strength),
-                weights=normalized_weights,
-                use_fitted_dependence=calibrate_dependence,
-                garch=garch, dynamic_correlation=dynamic_correlation, volatility_model=volatility_model,
-                **validation_options,
+                **{**validation_kwargs,
+                   "regime_temperature": float(regime_temperature),
+                   "regime_smoothing_window": int(regime_smoothing_window),
+                   "regime_hysteresis": float(regime_hysteresis),
+                   "regime_confirmation_periods": int(regime_confirmation_periods),
+                   "duration_prior_strength": float(duration_prior_strength),
+                   "min_regime_duration": int(min_regime_duration),
+                   "mean_prior_strength": float(mean_prior_strength)},
                 evaluation_start=selection_report["holdout_start"] if selection_report else None,
                 **({"step": 1} if selection_report else {}),
             )
@@ -2202,31 +1945,15 @@ def run_scenario(
         "leverage_multiple": float(leverage_multiple),
         "maintenance_margin": float(maintenance_margin),
         "margin_calls": int(wealth.attrs.get("margin_calls", 0)),
-        "capital_gains_tax": float(wealth.attrs.get("capital_gains_tax_total", 0.0))
-        / max(int(paths), 1),
-        "wealth_tax": float(wealth.attrs.get("wealth_tax_total", 0.0)) / max(int(paths), 1),
-        "terminal_liquidation_tax": float(
-            wealth.attrs.get("terminal_liquidation_tax_total", 0.0)
-        )
-        / max(int(paths), 1),
-        "taxes_paid": float(wealth.attrs.get("taxes_paid_total", 0.0)) / max(int(paths), 1),
-        "realized_gains": float(wealth.attrs.get("realized_gains_total", 0.0))
-        / max(int(paths), 1),
-        "realized_losses": float(wealth.attrs.get("realized_losses_total", 0.0))
-        / max(int(paths), 1),
-        "loss_carryforward": float(wealth.attrs.get("loss_carryforward_total", 0.0))
-        / max(int(paths), 1),
-        "investment_income_tax": float(wealth.attrs.get("investment_income_tax_total", 0.0))
-        / max(int(paths), 1),
-        "foreign_withholding_tax": float(wealth.attrs.get("foreign_withholding_tax_total", 0.0))
-        / max(int(paths), 1),
-        "financial_transaction_tax": float(
-            wealth.attrs.get("financial_transaction_tax_total", 0.0)
-        ) / max(int(paths), 1),
-        "stamp_duty": float(wealth.attrs.get("stamp_duty_total", 0.0)) / max(int(paths), 1),
-        "ivafe": float(wealth.attrs.get("ivafe_total", 0.0)) / max(int(paths), 1),
-        "expired_losses": float(wealth.attrs.get("expired_losses_total", 0.0))
-        / max(int(paths), 1),
+        **{
+            key: float(wealth.attrs.get(f"{key}_total", 0.0)) / max(int(paths), 1)
+            for key in (
+                "capital_gains_tax", "wealth_tax", "terminal_liquidation_tax", "taxes_paid",
+                "realized_gains", "realized_losses", "loss_carryforward", "investment_income_tax",
+                "foreign_withholding_tax", "financial_transaction_tax", "stamp_duty", "ivafe",
+                "expired_losses",
+            )
+        },
         "annual_wealth_tax_rate": (
             float(italy_annual_wealth_tax) if tax_selection.enabled else 0.0
         ),

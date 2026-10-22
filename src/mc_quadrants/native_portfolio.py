@@ -8,23 +8,14 @@ import os
 import numpy as np
 
 from mc_quadrants.decumulation import DecumulationPlan
-from mc_quadrants.native import _load_library, _pointer
+from mc_quadrants.native import _config_fields, _load_library, _pointer
 
 
 class _NeutralPortfolioConfig(ctypes.Structure):
-    _fields_ = (
-        [(name, ctypes.c_int) for name in (
-            "periods paths assets threads mode simple_returns rebalance_frequency "
-            "contribution_mode guardrail_policy skip_inflation_after_loss"
-        ).split()]
-        + [(name, ctypes.c_double) for name in (
-            "initial_value contribution leverage financing_growth maintenance_margin "
-            "cost_rate upper_guardrail lower_guardrail adjustment floor ceiling"
-        ).split()]
-        + [(name, ctypes.c_void_p) for name in (
-            "returns weights fee_logs cost_paths financing_paths cpi phase_ids "
-            "phase_amounts due_factors one_times reviews"
-        ).split()]
+    _fields_ = _config_fields(
+        (ctypes.c_int, "periods paths assets threads mode simple_returns rebalance_frequency contribution_mode guardrail_policy skip_inflation_after_loss"),
+        (ctypes.c_double, "initial_value contribution leverage financing_growth maintenance_margin cost_rate upper_guardrail lower_guardrail adjustment floor ceiling"),
+        (ctypes.c_void_p, "returns weights fee_logs cost_paths financing_paths cpi phase_ids phase_amounts due_factors one_times reviews"),
     )
 
 

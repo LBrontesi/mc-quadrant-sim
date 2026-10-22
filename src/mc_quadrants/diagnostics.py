@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import numpy as np
@@ -25,6 +26,42 @@ def _transition_counts(regimes: pd.Series) -> pd.DataFrame:  # Count observed tr
         if current in counts.index and next_state in counts.columns:
             counts.loc[current, next_state] += 1
     return counts
+
+
+def _regime_diagnostics(
+    model: ScenarioModel,
+    observations: Mapping[str, int],
+    total: int,
+    minimum: int,
+    short_sample_message: str,
+    *,
+    shrinkage: float = np.nan,
+    durations: Mapping[str, float] | None = None,
+) -> tuple[list[dict[str, object]], list[str]]:
+    """Report the moment and coverage checks shared by quadrant and HMM models."""
+    rows, warnings = [], []
+    for state, count in observations.items():
+        moments = model.moments[state]
+        covariance = moments.covariance.to_numpy(dtype=float)
+        condition = float(np.linalg.cond(covariance)) if covariance.size else np.nan
+        mnts = moments.mnts
+        rows.append({
+            "regime": state,
+            "observations": count,
+            "share": count / total,
+            "covariance_condition_number": condition,
+            "shrinkage": shrinkage,
+            **({"expected_duration_months": float(durations.get(state, np.nan))} if durations is not None else {}),
+            "mnts_tail_index": float(mnts.tail_index) if mnts is not None else np.nan,
+            "mnts_tempering": float(mnts.tempering) if mnts is not None else np.nan,
+            "mnts_skewness_min": float(mnts.skewness.min()) if mnts is not None else np.nan,
+            "mnts_skewness_max": float(mnts.skewness.max()) if mnts is not None else np.nan,
+        })
+        if count < minimum:
+            warnings.append(short_sample_message.format(state=state, observations=count, minimum=minimum))
+        if not np.isfinite(condition) or condition > 1e8:
+            warnings.append(f"{state} covariance is poorly conditioned.")
+    return rows, warnings
 
 
 def build_calibration_diagnostics(
@@ -61,47 +98,16 @@ def build_calibration_diagnostics(
     valid = aligned.notna()
     aligned = aligned.loc[valid].astype(str)
 
-    total = max(len(aligned), 1)
-    rows: list[dict[str, object]] = []
-    warnings: list[str] = []
-    minimum_observations = int(model.metadata.get("min_observations", 12))
-    for state in REGIME_ORDER:
-        moments = model.moments[state]
-        observations = int((aligned == state).sum())
-        covariance = moments.covariance.to_numpy(dtype=float)
-        condition_number = float(np.linalg.cond(covariance)) if covariance.size else np.nan
-        mnts = moments.mnts
-        rows.append(
-            {
-                "regime": state,
-                "observations": observations,
-                "share": observations / total,
-                "covariance_condition_number": condition_number,
-                "shrinkage": (
-                    float(model.metadata["shrinkage"])
-                    if model.metadata.get("shrinkage") is not None
-                    else np.nan
-                ),
-                "expected_duration_months": float(
-                    model.metadata.get("expected_duration_months", {}).get(state, np.nan)
-                ),
-                "mnts_tail_index": float(mnts.tail_index) if mnts is not None else np.nan,
-                "mnts_tempering": float(mnts.tempering) if mnts is not None else np.nan,
-                "mnts_skewness_min": (
-                    float(mnts.skewness.min()) if mnts is not None else np.nan
-                ),
-                "mnts_skewness_max": (
-                    float(mnts.skewness.max()) if mnts is not None else np.nan
-                ),
-            }
-        )
-        if observations < minimum_observations:
-            warnings.append(
-                f"{state} has {observations} aligned observations; "
-                f"the configured minimum is {minimum_observations}."
-            )
-        if not np.isfinite(condition_number) or condition_number > 1e8:
-            warnings.append(f"{state} covariance is poorly conditioned.")
+    shrinkage = model.metadata.get("shrinkage")
+    rows, warnings = _regime_diagnostics(
+        model,
+        {state: int((aligned == state).sum()) for state in REGIME_ORDER},
+        max(len(aligned), 1),
+        int(model.metadata.get("min_observations", 12)),
+        "{state} has {observations} aligned observations; the configured minimum is {minimum}.",
+        shrinkage=float(shrinkage) if shrinkage is not None else np.nan,
+        durations=model.metadata.get("expected_duration_months", {}),
+    )
 
     if macro_lag_periods > 0:
         warnings.append(
@@ -133,40 +139,13 @@ def build_hmm_diagnostics(
 ) -> CalibrationDiagnostics:
     """Regime coverage and conditioning checks for a fitted HMM model."""
 
-    rows: list[dict[str, object]] = []
-    warnings: list[str] = []
-    total = max(int(len(regimes)), 1)
-    minimum_observations = max(int(model.metadata.get("n_states", 4)) * 4, 12)
-    for state in model.states:
-        moments = model.moments[state]
-        observations = int(moments.observations)
-        covariance = moments.covariance.to_numpy(dtype=float)
-        condition_number = float(np.linalg.cond(covariance)) if covariance.size else np.nan
-        mnts = moments.mnts
-        rows.append(
-            {
-                "regime": state,
-                "observations": observations,
-                "share": observations / total,
-                "covariance_condition_number": condition_number,
-                "shrinkage": np.nan,
-                "mnts_tail_index": float(mnts.tail_index) if mnts is not None else np.nan,
-                "mnts_tempering": float(mnts.tempering) if mnts is not None else np.nan,
-                "mnts_skewness_min": (
-                    float(mnts.skewness.min()) if mnts is not None else np.nan
-                ),
-                "mnts_skewness_max": (
-                    float(mnts.skewness.max()) if mnts is not None else np.nan
-                ),
-            }
-        )
-        if observations < minimum_observations:
-            warnings.append(
-                f"{state} has {observations} fitted observations; "
-                f"the minimum is {minimum_observations} for stable moments."
-            )
-        if not np.isfinite(condition_number) or condition_number > 1e8:
-            warnings.append(f"{state} covariance is poorly conditioned.")
+    rows, warnings = _regime_diagnostics(
+        model,
+        {state: int(model.moments[state].observations) for state in model.states},
+        max(int(len(regimes)), 1),
+        max(int(model.metadata.get("n_states", 4)) * 4, 12),
+        "{state} has {observations} fitted observations; the minimum is {minimum} for stable moments.",
+    )
     log_likelihood = model.metadata.get("log_likelihood")
     if log_likelihood is not None:
         warnings.append(

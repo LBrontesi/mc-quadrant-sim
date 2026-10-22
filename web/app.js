@@ -2730,43 +2730,32 @@ async function onSafeRate() { // Handle safe rate.
   }
 }
 
-function onDownloadSummary() { // Handle download summary.
-  if (!state.results) {
+function exportReady(result) {
+  if (!result) {
     notify("Run a simulation first.", "error");
-    return;
+    return false;
   }
   if (state.lastSimPayload && JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) {
     notify("Run the current inputs before exporting results.", "error");
-    return;
+    return false;
   }
-  const summary = state.results.summary;
-  const rows = Object.entries(summary).map(([key, value]) => [key, value]);
-  downloadCSV("risk_summary.csv", toCSV(["metric", "value"], rows));
+  return true;
+}
+
+function onDownloadSummary() { // Handle download summary.
+  if (!exportReady(state.results)) return;
+  downloadCSV("risk_summary.csv", toCSV(["metric", "value"], Object.entries(state.results.summary)));
   notify("Risk summary downloaded", "success");
 }
 
 function onDownloadDiagnostics() { // Handle download diagnostics.
-  if (!state.diagnostics) {
-    notify("Run a simulation first.", "error");
-    return;
-  }
-  if (state.lastSimPayload && JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) {
-    notify("Run the current inputs before exporting results.", "error");
-    return;
-  }
+  if (!exportReady(state.diagnostics)) return;
   downloadCSV("calibration_diagnostics.csv", toCSV(state.diagnostics.columns, state.diagnostics.rows));
   notify("Diagnostics downloaded", "success");
 }
 
 async function onDownloadWealth() { // Handle download wealth.
-  if (!state.lastSimPayload) {
-    notify("Run a simulation first.", "error");
-    return;
-  }
-  if (JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) {
-    notify("Run the current inputs before exporting results.", "error");
-    return;
-  }
+  if (!exportReady(state.lastSimPayload)) return;
   showOverlay("Exporting sampled paths...", "Replaying the original seeded path chunk and retaining up to 1,000 paths");
   try {
     const data = await postJSON("/api/wealth", { ...state.lastSimPayload, export_paths: 1000 });
@@ -2806,6 +2795,25 @@ const CONTROL_IDS = [
   "dcc-alpha", "dcc-beta", "dcc-asymmetry",
 ];
 
+const CHECKBOX_CONTROLS = Object.entries({
+  csvMonthly: "csv-monthly",
+  useCorr: "use-corr-override",
+  garch: "garch",
+  walkForward: "walk-forward",
+  probabilisticRegimes: "probabilistic-regimes",
+  jointMacro: "joint-macro",
+  dynamicCorrelation: "dynamic-correlation",
+  taxTerminalLiquidation: "tax-terminal-liquidation",
+  taxWrapperBenchmark: "tax-wrapper-benchmark",
+  macroParameterUncertainty: "macro-parameter-uncertainty",
+  structuralReturns: "structural-returns",
+  economicReturns: "economic-returns",
+  economicAnchors: "economic-anchors",
+  economicRateStress: "economic-rate-stress",
+  stateDependentLiquidity: "state-dependent-liquidity",
+  decumulationEnabled: "decumulation-enabled",
+});
+
 function saveControls() { // Handle save controls.
   syncDecumulationFromRows();
   const data = { schemaVersion: 14 };
@@ -2815,22 +2823,7 @@ function saveControls() { // Handle save controls.
   });
   data.synthetic = Array.from(document.querySelectorAll('#synthetic-options input[type="checkbox"]:checked')).map((el) => el.value);
   data.csvEnabled = $("csv-enabled").checked;
-  data.csvMonthly = $("csv-monthly").checked;
-  data.useCorr = $("use-corr-override").checked;
-  data.garch = $("garch").checked;
-  data.walkForward = $("walk-forward").checked;
-  data.probabilisticRegimes = $("probabilistic-regimes").checked;
-  data.jointMacro = $("joint-macro").checked;
-  data.dynamicCorrelation = $("dynamic-correlation").checked;
-  data.taxTerminalLiquidation = $("tax-terminal-liquidation").checked;
-  data.taxWrapperBenchmark = $("tax-wrapper-benchmark").checked;
-  data.macroParameterUncertainty = $("macro-parameter-uncertainty").checked;
-  data.structuralReturns = $("structural-returns").checked;
-  data.economicReturns = $("economic-returns").checked;
-  data.economicAnchors = $("economic-anchors").checked;
-  data.economicRateStress = $("economic-rate-stress").checked;
-  data.stateDependentLiquidity = $("state-dependent-liquidity").checked;
-  data.decumulationEnabled = $("decumulation-enabled").checked;
+  CHECKBOX_CONTROLS.forEach(([key, id]) => { data[key] = $(id).checked; });
   data.decumulation = JSON.parse(JSON.stringify(state.decumulation));
   data.guardrailSkipInflation = $("guardrail-skip-inflation").checked;
   data.taxMetadata = state.taxMetadata;
@@ -2847,22 +2840,9 @@ function applyControlSnapshot(data) { // Handle apply control snapshot.
   document.querySelectorAll("#synthetic-options input[type='checkbox']").forEach((checkbox) => {
     checkbox.checked = (data.synthetic || []).includes(checkbox.value);
   });
-  if (data.csvMonthly !== undefined) $("csv-monthly").checked = data.csvMonthly;
-  if (data.useCorr !== undefined) $("use-corr-override").checked = data.useCorr;
-  if (data.garch !== undefined) $("garch").checked = data.garch;
-  if (data.walkForward !== undefined) $("walk-forward").checked = data.walkForward;
-  if (data.probabilisticRegimes !== undefined) $("probabilistic-regimes").checked = data.probabilisticRegimes;
-  if (data.jointMacro !== undefined) $("joint-macro").checked = data.jointMacro;
-  if (data.dynamicCorrelation !== undefined) $("dynamic-correlation").checked = data.dynamicCorrelation;
-  if (data.taxTerminalLiquidation !== undefined) $("tax-terminal-liquidation").checked = data.taxTerminalLiquidation;
-  if (data.taxWrapperBenchmark !== undefined) $("tax-wrapper-benchmark").checked = data.taxWrapperBenchmark;
-  if (data.macroParameterUncertainty !== undefined) $("macro-parameter-uncertainty").checked = data.macroParameterUncertainty;
-  if (data.structuralReturns !== undefined) $("structural-returns").checked = data.structuralReturns;
-  if (data.economicReturns !== undefined) $("economic-returns").checked = data.economicReturns;
-  if (data.economicAnchors !== undefined) $("economic-anchors").checked = data.economicAnchors;
-  if (data.economicRateStress !== undefined) $("economic-rate-stress").checked = data.economicRateStress;
-  if (data.stateDependentLiquidity !== undefined) $("state-dependent-liquidity").checked = data.stateDependentLiquidity;
-  if (data.decumulationEnabled !== undefined) $("decumulation-enabled").checked = data.decumulationEnabled;
+  CHECKBOX_CONTROLS.forEach(([key, id]) => {
+    if (data[key] !== undefined) $(id).checked = data[key];
+  });
   if (data.decumulation) state.decumulation = data.decumulation;
   if (data.guardrailSkipInflation !== undefined) $("guardrail-skip-inflation").checked = data.guardrailSkipInflation;
   if (data.taxMetadata) state.taxMetadata = data.taxMetadata;
@@ -2964,14 +2944,7 @@ function resetControls() { // Handle reset controls.
 }
 
 function onDownloadJson() { // Handle download json.
-  if (!state.results) {
-    notify("Run a simulation first.", "error");
-    return;
-  }
-  if (state.lastSimPayload && JSON.stringify(gatherSimPayload()) !== JSON.stringify(state.lastSimPayload)) {
-    notify("Run the current inputs before exporting results.", "error");
-    return;
-  }
+  if (!exportReady(state.results)) return;
   downloadFile("results.json", JSON.stringify(state.results, null, 2), "application/json;charset=utf-8");
   notify("Results downloaded", "success");
 }

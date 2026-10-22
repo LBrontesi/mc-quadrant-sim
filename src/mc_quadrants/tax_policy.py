@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Protocol
 
 import numpy as np
@@ -102,32 +102,11 @@ class ItalyAdministeredTaxPolicy:
             raise ValueError("Italian tax accounting requires non-negative portfolio weights.")
 
     def simulate(self, context: TaxSimulationContext) -> pd.DataFrame:  # Simulate the portfolio tax accounting for this policy.
-        return simulate_italian_portfolio_tax(
-            context.asset_growth,
-            assets=context.assets,
-            target_weights=context.target_weights,
-            initial_value=context.initial_value,
-            rebalance_frequency=context.rebalance_frequency,
-            transaction_cost_bps=context.transaction_cost_bps,
-            transaction_cost_rate_paths=context.transaction_cost_rate_paths,
-            contribution=context.contribution,
-            contribution_allocation=context.contribution_allocation,
-            withdrawal=context.withdrawal,
-            withdrawal_start_period=context.withdrawal_start_period,
-            decumulation=context.decumulation,
-            withdrawal_inflation_paths=context.withdrawal_inflation_paths,
-            annual_inflation=context.annual_inflation,
-            safe_withdrawal_rate=context.safe_withdrawal_rate,
-            asset_tax_categories=context.asset_categories,
-            asset_tax_metadata=context.asset_metadata,
-            annual_wealth_tax=context.annual_wealth_tax,
-            terminal_liquidation=context.terminal_liquidation,
-            tax_regime=self.regime,
-            wealth_tax_mode=context.wealth_tax_mode,
-            start_date=context.start_date,
-            wrapper_benchmark=context.wrapper_benchmark,
-            native_threads=context.native_threads,
-        )
+        # Forward the context without copying its large path arrays.
+        options = {field.name: getattr(context, field.name) for field in fields(TaxSimulationContext)}
+        options["asset_tax_categories"] = options.pop("asset_categories")
+        options["asset_tax_metadata"] = options.pop("asset_metadata")
+        return simulate_italian_portfolio_tax(**options, tax_regime=self.regime)
 
     def metadata(self, context: TaxSimulationContext | None = None) -> dict[str, Any]:  # Return descriptive metadata for this tax policy.
         return {

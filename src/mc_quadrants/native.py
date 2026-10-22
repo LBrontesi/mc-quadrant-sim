@@ -47,114 +47,75 @@ NATIVE_YEAR_STAT_NAMES = (
 )
 
 
+def _config_fields(*groups: tuple[type, str]) -> list[tuple[str, type]]:
+    """Expand ordered C field groups without changing their ABI layout."""
+    return [(name, ctype) for ctype, names in groups for name in names.split()]
+
+
 class _ParametricPortfolioConfig(ctypes.Structure):
-    _fields_ = [
-        ("periods", ctypes.c_int),
-        ("paths", ctypes.c_int),
-        ("assets", ctypes.c_int),
-        ("states", ctypes.c_int),
-        ("macro_dimensions", ctypes.c_int),
-        ("requested_threads", ctypes.c_int),
-        ("regimes", ctypes.c_void_p),
-        ("means", ctypes.c_void_p),
-        ("gaussian_correlation_cholesky", ctypes.c_void_p),
-        ("gaussian_correlations", ctypes.c_void_p),
-        ("volatilities", ctypes.c_void_p),
-        ("tail_indexes", ctypes.c_void_p),
-        ("temperings", ctypes.c_void_p),
-        ("skewness", ctypes.c_void_p),
-        ("gaussian_scales", ctypes.c_void_p),
-        ("macro_shocks", ctypes.c_void_p),
-        ("macro_betas", ctypes.c_void_p),
-        ("seed", ctypes.c_uint64),
-        ("garch", ctypes.c_int),
-        ("garch_alpha", ctypes.c_double),
-        ("garch_beta", ctypes.c_double),
-        ("dynamic_correlation", ctypes.c_int),
-        ("dcc_alpha", ctypes.c_double),
-        ("dcc_beta", ctypes.c_double),
-        ("dcc_asymmetry", ctypes.c_double),
-        ("monthly_fee_log", ctypes.c_void_p),
-        ("simple_returns", ctypes.c_int),
-    ]
+    _fields_ = _config_fields(
+        (ctypes.c_int, "periods paths assets states macro_dimensions requested_threads"),
+        (ctypes.c_void_p, "regimes means gaussian_correlation_cholesky gaussian_correlations volatilities tail_indexes temperings skewness gaussian_scales macro_shocks macro_betas"),
+        (ctypes.c_uint64, "seed"),
+        (ctypes.c_int, "garch"),
+        (ctypes.c_double, "garch_alpha garch_beta"),
+        (ctypes.c_int, "dynamic_correlation"),
+        (ctypes.c_double, "dcc_alpha dcc_beta dcc_asymmetry"),
+        (ctypes.c_void_p, "monthly_fee_log"),
+        (ctypes.c_int, "simple_returns"),
+    )
 
 
 class _ItalianPortfolioConfig(ctypes.Structure):
-    _fields_ = [
-        ("weights", ctypes.c_void_p),
-        ("initial_value", ctypes.c_double),
-        ("rebalance_frequency", ctypes.c_int),
-        ("transaction_cost_rate_paths", ctypes.c_void_p),
-        ("default_transaction_cost_rate", ctypes.c_double),
-        ("contribution", ctypes.c_double),
-        ("contribution_mode", ctypes.c_int),
-        ("withdrawal", ctypes.c_double),
-        ("withdrawal_start_period", ctypes.c_int),
-        ("tax_regime", ctypes.c_int),
-        ("taxable_fraction", ctypes.c_void_p),
-        ("offsettable", ctypes.c_void_p),
-        ("ftt_rates", ctypes.c_void_p),
-        ("stamp_mask", ctypes.c_void_p),
-        ("ivafe_mask", ctypes.c_void_p),
-        ("annual_wealth_tax", ctypes.c_double),
-        ("terminal_liquidation", ctypes.c_int),
-        ("wrapper_benchmark", ctypes.c_int),
-        ("year_slots", ctypes.c_void_p),
-        ("year_count", ctypes.c_int),
-        ("annual_income_yield", ctypes.c_void_p),
-        ("foreign_withholding_rate", ctypes.c_void_p),
-        ("foreign_tax_credit_rate", ctypes.c_void_p),
-    ]
+    _fields_ = _config_fields(
+        (ctypes.c_void_p, "weights"),
+        (ctypes.c_double, "initial_value"),
+        (ctypes.c_int, "rebalance_frequency"),
+        (ctypes.c_void_p, "transaction_cost_rate_paths"),
+        (ctypes.c_double, "default_transaction_cost_rate contribution"),
+        (ctypes.c_int, "contribution_mode"),
+        (ctypes.c_double, "withdrawal"),
+        (ctypes.c_int, "withdrawal_start_period tax_regime"),
+        (ctypes.c_void_p, "taxable_fraction offsettable ftt_rates stamp_mask ivafe_mask"),
+        (ctypes.c_double, "annual_wealth_tax"),
+        (ctypes.c_int, "terminal_liquidation wrapper_benchmark"),
+        (ctypes.c_void_p, "year_slots"),
+        (ctypes.c_int, "year_count"),
+        (ctypes.c_void_p, "annual_income_yield foreign_withholding_rate foreign_tax_credit_rate"),
+    )
 
 
 class _RegimeProcessConfig(ctypes.Structure):
-    _fields_ = [
-        ("transition_matrix", ctypes.c_void_p),
-        ("start_probabilities", ctypes.c_void_p),
-        ("start_state_age_probabilities", ctypes.c_void_p),
-        ("start_state_age_width", ctypes.c_int),
-        ("start_state", ctypes.c_int),
-        ("seed", ctypes.c_uint64),
-        ("duration_model", ctypes.c_int),
-        ("duration_hazards", ctypes.c_void_p),
-        ("duration_hazard_lengths", ctypes.c_void_p),
-        ("duration_hazard_width", ctypes.c_int),
-        ("min_regime_duration", ctypes.c_int),
-        ("annual_reporting_inflation", ctypes.c_double),
-        ("transaction_cost_multipliers", ctypes.c_void_p),
-        ("sample_indices", ctypes.c_void_p),
-        ("sample_paths", ctypes.c_int),
-        ("annual_risk_free_rate", ctypes.c_double),
-    ]
+    _fields_ = _config_fields(
+        (ctypes.c_void_p, "transition_matrix start_probabilities start_state_age_probabilities"),
+        (ctypes.c_int, "start_state_age_width start_state"),
+        (ctypes.c_uint64, "seed"),
+        (ctypes.c_int, "duration_model"),
+        (ctypes.c_void_p, "duration_hazards duration_hazard_lengths"),
+        (ctypes.c_int, "duration_hazard_width min_regime_duration"),
+        (ctypes.c_double, "annual_reporting_inflation"),
+        (ctypes.c_void_p, "transaction_cost_multipliers sample_indices"),
+        (ctypes.c_int, "sample_paths"),
+        (ctypes.c_double, "annual_risk_free_rate"),
+    )
 
 
 class _MacroProcessConfig(ctypes.Structure):
-    _fields_ = [
-        ("dimensions", ctypes.c_int),
-        ("latest", ctypes.c_void_p),
-        ("var_coefficient", ctypes.c_void_p),
-        ("var_coefficient_std", ctypes.c_void_p),
-        ("parameter_uncertainty", ctypes.c_int),
-        ("state_centers", ctypes.c_void_p),
-        ("state_innovation_cholesky", ctypes.c_void_p),
-        ("emission_coefficients", ctypes.c_void_p),
-        ("transition_weight", ctypes.c_double),
-        ("rate_index", ctypes.c_int),
-        ("rate_min", ctypes.c_double),
-        ("rate_max", ctypes.c_double),
-        ("inflation_index", ctypes.c_int),
-        ("inflation_scale", ctypes.c_double),
-        ("rate_scale", ctypes.c_double),
-        ("logistic_membership", ctypes.c_int),
-        ("membership_growth_threshold", ctypes.c_double),
-        ("membership_inflation_threshold", ctypes.c_double),
-        ("membership_growth_scale", ctypes.c_double),
-        ("membership_inflation_scale", ctypes.c_double),
-        ("cpi_monthly_log_history", ctypes.c_void_p),
-        ("cpi_state_centers", ctypes.c_void_p),
-        ("cpi_persistence", ctypes.c_double),
-        ("cpi_latest_monthly_log", ctypes.c_double),
-    ]
+    _fields_ = _config_fields(
+        (ctypes.c_int, "dimensions"),
+        (ctypes.c_void_p, "latest var_coefficient var_coefficient_std"),
+        (ctypes.c_int, "parameter_uncertainty"),
+        (ctypes.c_void_p, "state_centers state_innovation_cholesky emission_coefficients"),
+        (ctypes.c_double, "transition_weight"),
+        (ctypes.c_int, "rate_index"),
+        (ctypes.c_double, "rate_min rate_max"),
+        (ctypes.c_int, "inflation_index"),
+        (ctypes.c_double, "inflation_scale rate_scale"),
+        (ctypes.c_int, "logistic_membership"),
+        (ctypes.c_double, "membership_growth_threshold membership_inflation_threshold membership_growth_scale membership_inflation_scale"),
+        (ctypes.c_void_p, "cpi_monthly_log_history cpi_state_centers"),
+        (ctypes.c_double, "cpi_persistence cpi_latest_monthly_log"),
+    )
 
 _LIBRARY: ctypes.CDLL | None | bool = None
 
@@ -186,30 +147,13 @@ def _load_library() -> ctypes.CDLL | None:  # Load and configure the optional co
             function = library.mc_simulate_parametric
             function.restype = ctypes.c_int
             function.argtypes = [
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
+                *([ctypes.c_int] * 5),
+                *([ctypes.c_void_p] * 11),
                 ctypes.c_uint64,
                 ctypes.c_int,
-                ctypes.c_double,
-                ctypes.c_double,
+                *([ctypes.c_double] * 2),
                 ctypes.c_int,
-                ctypes.c_double,
-                ctypes.c_double,
-                ctypes.c_double,
+                *([ctypes.c_double] * 3),
                 ctypes.c_int,
                 ctypes.c_void_p,
             ]
@@ -217,8 +161,7 @@ def _load_library() -> ctypes.CDLL | None:  # Load and configure the optional co
             subordinator_function.restype = ctypes.c_int
             subordinator_function.argtypes = [
                 ctypes.c_int,
-                ctypes.c_double,
-                ctypes.c_double,
+                *([ctypes.c_double] * 2),
                 ctypes.c_uint64,
                 ctypes.c_void_p,
             ]
@@ -228,8 +171,7 @@ def _load_library() -> ctypes.CDLL | None:  # Load and configure the optional co
             algorithm_subordinator_function.restype = ctypes.c_int
             algorithm_subordinator_function.argtypes = [
                 ctypes.c_int,
-                ctypes.c_double,
-                ctypes.c_double,
+                *([ctypes.c_double] * 2),
                 ctypes.c_uint64,
                 ctypes.c_int,
                 ctypes.c_void_p,
@@ -237,60 +179,28 @@ def _load_library() -> ctypes.CDLL | None:  # Load and configure the optional co
             tax_function = library.mc_simulate_italian_portfolios
             tax_function.restype = ctypes.c_int
             tax_function.argtypes = [
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
+                *([ctypes.c_int] * 4),
+                *([ctypes.c_void_p] * 2),
                 ctypes.c_double,
                 ctypes.c_int,
                 ctypes.c_void_p,
-                ctypes.c_double,
-                ctypes.c_double,
+                *([ctypes.c_double] * 2),
                 ctypes.c_int,
                 ctypes.c_double,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
+                *([ctypes.c_int] * 3),
+                *([ctypes.c_void_p] * 5),
                 ctypes.c_int,
                 ctypes.c_double,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_int,
-                ctypes.c_int,
+                *([ctypes.c_void_p] * 2),
+                *([ctypes.c_int] * 2),
+                *([ctypes.c_double] * 5),
+                *([ctypes.c_int] * 2),
+                *([ctypes.c_void_p] * 5),
                 ctypes.c_double,
-                ctypes.c_double,
-                ctypes.c_double,
-                ctypes.c_double,
-                ctypes.c_double,
-                ctypes.c_int,
-                ctypes.c_int,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_double,
-                ctypes.c_int,
-                ctypes.c_int,
+                *([ctypes.c_int] * 2),
                 ctypes.c_void_p,
                 ctypes.c_int,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
+                *([ctypes.c_void_p] * 10),
             ]
             tax_function.argtypes += [ctypes.c_void_p] * 3
             fused_function = library.mc_simulate_parametric_italian_portfolios
@@ -298,13 +208,7 @@ def _load_library() -> ctypes.CDLL | None:  # Load and configure the optional co
             fused_function.argtypes = [
                 ctypes.POINTER(_ParametricPortfolioConfig),
                 ctypes.POINTER(_ItalianPortfolioConfig),
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
+                *([ctypes.c_void_p] * 7),
             ]
             compact_function = (
                 library.mc_simulate_parametric_italian_portfolios_compact
@@ -395,6 +299,51 @@ def _income_arrays(assets, annual_income_yield, foreign_withholding_rate, foreig
     return arrays
 
 
+def _validate_mnts_shapes(
+    states, assets, gaussian_correlation_cholesky, gaussian_correlations,
+    volatilities, tail_indexes, temperings, skewness, gaussian_scales,
+):
+    """Validate the shared MNTS array contract before entering native code."""
+    matrix_shape = (states, assets, assets)
+    vector_shape = (states, assets)
+    if np.shape(gaussian_correlation_cholesky) != matrix_shape:
+        raise ValueError("gaussian_correlation_cholesky has an invalid shape.")
+    if np.shape(gaussian_correlations) != matrix_shape:
+        raise ValueError("gaussian_correlations has an invalid shape.")
+    if np.shape(volatilities) != vector_shape:
+        raise ValueError("volatilities has an invalid shape.")
+    if np.shape(skewness) != vector_shape or np.shape(gaussian_scales) != vector_shape:
+        raise ValueError("MNTS skewness and Gaussian scales have an invalid shape.")
+    if np.shape(tail_indexes) != (states,) or np.shape(temperings) != (states,):
+        raise ValueError("MNTS tail parameters have an invalid shape.")
+
+
+def _tax_arrays(
+    periods, assets, taxable_fraction, gains_offsettable,
+    financial_transaction_tax_rate, stamp_mask, ivafe_mask, year_slots,
+):
+    """Keep validated ledger arrays alive for the duration of a native call."""
+    taxable = np.ascontiguousarray(taxable_fraction, dtype=np.float64)
+    offsettable = np.ascontiguousarray(gains_offsettable, dtype=np.uint8)
+    ftt = np.ascontiguousarray(financial_transaction_tax_rate, dtype=np.float64)
+    stamp = np.ascontiguousarray(stamp_mask, dtype=np.uint8)
+    ivafe = np.ascontiguousarray(ivafe_mask, dtype=np.uint8)
+    for name, values in {
+        "taxable_fraction": taxable,
+        "gains_offsettable": offsettable,
+        "financial_transaction_tax_rate": ftt,
+        "stamp_mask": stamp,
+        "ivafe_mask": ivafe,
+    }.items():
+        if values.shape != (assets,):
+            raise ValueError(f"{name} has an invalid shape.")
+    slots = np.ascontiguousarray(year_slots, dtype=np.int32)
+    if slots.shape != (periods,) or (slots < 0).any():
+        raise ValueError("year_slots has an invalid shape or value.")
+    year_count = int(slots.max()) + 1
+    return taxable, offsettable, ftt, stamp, ivafe, slots, year_count
+
+
 def simulate_parametric_native(
     regime_codes: np.ndarray,
     means: np.ndarray,
@@ -436,18 +385,10 @@ def simulate_parametric_native(
         np.min(regime_codes) < 0 or np.max(regime_codes) >= states
     ):
         raise ValueError("regime_codes contains an invalid state index.")
-    expected_matrix_shape = (states, assets, assets)
-    expected_vector_shape = (states, assets)
-    if np.shape(gaussian_correlation_cholesky) != expected_matrix_shape:
-        raise ValueError("gaussian_correlation_cholesky has an invalid shape.")
-    if np.shape(gaussian_correlations) != expected_matrix_shape:
-        raise ValueError("gaussian_correlations has an invalid shape.")
-    if np.shape(volatilities) != expected_vector_shape:
-        raise ValueError("volatilities has an invalid shape.")
-    if np.shape(skewness) != expected_vector_shape or np.shape(gaussian_scales) != expected_vector_shape:
-        raise ValueError("MNTS skewness and Gaussian scales have an invalid shape.")
-    if np.shape(tail_indexes) != (states,) or np.shape(temperings) != (states,):
-        raise ValueError("MNTS tail parameters have an invalid shape.")
+    _validate_mnts_shapes(
+        states, assets, gaussian_correlation_cholesky, gaussian_correlations,
+        volatilities, tail_indexes, temperings, skewness, gaussian_scales,
+    )
     if (macro_shocks is None) != (macro_betas is None):
         raise ValueError("macro_shocks and macro_betas must be supplied together.")
     if macro_shocks is not None:
@@ -562,24 +503,10 @@ def simulate_italian_portfolios_native(
         cost_paths = np.ascontiguousarray(transaction_cost_rate_paths, dtype=np.float64)
         if cost_paths.shape != (periods, paths):
             raise ValueError("transaction_cost_rate_paths has an invalid shape.")
-    taxable = np.ascontiguousarray(taxable_fraction, dtype=np.float64)
-    offsettable = np.ascontiguousarray(gains_offsettable, dtype=np.uint8)
-    ftt = np.ascontiguousarray(financial_transaction_tax_rate, dtype=np.float64)
-    stamp = np.ascontiguousarray(stamp_mask, dtype=np.uint8)
-    ivafe = np.ascontiguousarray(ivafe_mask, dtype=np.uint8)
-    for name, values in {
-        "taxable_fraction": taxable,
-        "gains_offsettable": offsettable,
-        "financial_transaction_tax_rate": ftt,
-        "stamp_mask": stamp,
-        "ivafe_mask": ivafe,
-    }.items():
-        if values.shape != (assets,):
-            raise ValueError(f"{name} has an invalid shape.")
-    slots = np.ascontiguousarray(year_slots, dtype=np.int32)
-    if slots.shape != (periods,) or (slots < 0).any():
-        raise ValueError("year_slots has an invalid shape or value.")
-    year_count = int(slots.max()) + 1
+    taxable, offsettable, ftt, stamp, ivafe, slots, year_count = _tax_arrays(
+        periods, assets, taxable_fraction, gains_offsettable,
+        financial_transaction_tax_rate, stamp_mask, ivafe_mask, year_slots,
+    )
     regime_codes = {
         "italy_administered": 0,
         "italy_declarative": 1,
@@ -780,21 +707,10 @@ def simulate_parametric_italian_portfolios_native(
         raise ValueError("regime_codes contains an invalid state index.")
     if return_kind not in {"log", "simple"}:
         raise ValueError("return_kind must be 'log' or 'simple'.")
-    matrix_shape = (states, assets, assets)
-    vector_shape = (states, assets)
-    matrices = {
-        "gaussian_correlation_cholesky": gaussian_correlation_cholesky,
-        "gaussian_correlations": gaussian_correlations,
-    }
-    for name, values in matrices.items():
-        if np.shape(values) != matrix_shape:
-            raise ValueError(f"{name} has an invalid shape.")
-    if np.shape(volatilities) != vector_shape:
-        raise ValueError("volatilities has an invalid shape.")
-    if np.shape(skewness) != vector_shape or np.shape(gaussian_scales) != vector_shape:
-        raise ValueError("MNTS skewness and Gaussian scales have an invalid shape.")
-    if np.shape(tail_indexes) != (states,) or np.shape(temperings) != (states,):
-        raise ValueError("MNTS tail parameters have an invalid shape.")
+    _validate_mnts_shapes(
+        states, assets, gaussian_correlation_cholesky, gaussian_correlations,
+        volatilities, tail_indexes, temperings, skewness, gaussian_scales,
+    )
     correlation = np.ascontiguousarray(gaussian_correlation_cholesky, dtype=np.float64)
     base = np.ascontiguousarray(gaussian_correlations, dtype=np.float64)
     volatility = np.ascontiguousarray(volatilities, dtype=np.float64)
@@ -824,24 +740,10 @@ def simulate_parametric_italian_portfolios_native(
         cost_paths = np.ascontiguousarray(transaction_cost_rate_paths, dtype=np.float64)
         if cost_paths.shape != (periods, paths):
             raise ValueError("transaction_cost_rate_paths has an invalid shape.")
-    taxable = np.ascontiguousarray(taxable_fraction, dtype=np.float64)
-    offsettable = np.ascontiguousarray(gains_offsettable, dtype=np.uint8)
-    ftt = np.ascontiguousarray(financial_transaction_tax_rate, dtype=np.float64)
-    stamp = np.ascontiguousarray(stamp_mask, dtype=np.uint8)
-    ivafe = np.ascontiguousarray(ivafe_mask, dtype=np.uint8)
-    for name, values in {
-        "taxable_fraction": taxable,
-        "gains_offsettable": offsettable,
-        "financial_transaction_tax_rate": ftt,
-        "stamp_mask": stamp,
-        "ivafe_mask": ivafe,
-    }.items():
-        if values.shape != (assets,):
-            raise ValueError(f"{name} has an invalid shape.")
-    slots = np.ascontiguousarray(year_slots, dtype=np.int32)
-    if slots.shape != (periods,) or (slots < 0).any():
-        raise ValueError("year_slots has an invalid shape or value.")
-    year_count = int(slots.max()) + 1
+    taxable, offsettable, ftt, stamp, ivafe, slots, year_count = _tax_arrays(
+        periods, assets, taxable_fraction, gains_offsettable,
+        financial_transaction_tax_rate, stamp_mask, ivafe_mask, year_slots,
+    )
     regime_code = {
         "italy_administered": 0,
         "italy_declarative": 1,
@@ -1075,20 +977,10 @@ def simulate_parametric_italian_portfolios_compact_native(
     elif start_state_age_probabilities is not None:
         raise ValueError("start_state_age_probabilities require the semi_markov duration model.")
 
-    matrix_shape = (states, assets, assets)
-    vector_shape = (states, assets)
-    for name, values in {
-        "gaussian_correlation_cholesky": gaussian_correlation_cholesky,
-        "gaussian_correlations": gaussian_correlations,
-    }.items():
-        if np.shape(values) != matrix_shape:
-            raise ValueError(f"{name} has an invalid shape.")
-    if np.shape(volatilities) != vector_shape:
-        raise ValueError("volatilities has an invalid shape.")
-    if np.shape(skewness) != vector_shape or np.shape(gaussian_scales) != vector_shape:
-        raise ValueError("MNTS skewness and Gaussian scales have an invalid shape.")
-    if np.shape(tail_indexes) != (states,) or np.shape(temperings) != (states,):
-        raise ValueError("MNTS tail parameters have an invalid shape.")
+    _validate_mnts_shapes(
+        states, assets, gaussian_correlation_cholesky, gaussian_correlations,
+        volatilities, tail_indexes, temperings, skewness, gaussian_scales,
+    )
     correlation = np.ascontiguousarray(gaussian_correlation_cholesky, dtype=np.float64)
     base = np.ascontiguousarray(gaussian_correlations, dtype=np.float64)
     volatility = np.ascontiguousarray(volatilities, dtype=np.float64)
@@ -1232,24 +1124,10 @@ def simulate_parametric_italian_portfolios_compact_native(
         if (multipliers < 0.0).any():
             raise ValueError("state transaction cost multipliers must be non-negative.")
 
-    taxable = np.ascontiguousarray(taxable_fraction, dtype=np.float64)
-    offsettable = np.ascontiguousarray(gains_offsettable, dtype=np.uint8)
-    ftt = np.ascontiguousarray(financial_transaction_tax_rate, dtype=np.float64)
-    stamp = np.ascontiguousarray(stamp_mask, dtype=np.uint8)
-    ivafe = np.ascontiguousarray(ivafe_mask, dtype=np.uint8)
-    for name, values in {
-        "taxable_fraction": taxable,
-        "gains_offsettable": offsettable,
-        "financial_transaction_tax_rate": ftt,
-        "stamp_mask": stamp,
-        "ivafe_mask": ivafe,
-    }.items():
-        if values.shape != (assets,):
-            raise ValueError(f"{name} has an invalid shape.")
-    slots = np.ascontiguousarray(year_slots, dtype=np.int32)
-    if slots.shape != (periods,) or (slots < 0).any():
-        raise ValueError("year_slots has an invalid shape or value.")
-    year_count = int(slots.max()) + 1
+    taxable, offsettable, ftt, stamp, ivafe, slots, year_count = _tax_arrays(
+        periods, assets, taxable_fraction, gains_offsettable,
+        financial_transaction_tax_rate, stamp_mask, ivafe_mask, year_slots,
+    )
     if not np.isfinite(annual_reporting_inflation) or annual_reporting_inflation <= -1.0:
         raise ValueError("annual_reporting_inflation must be finite and above -100%.")
     if not np.isfinite(annual_risk_free_rate) or annual_risk_free_rate <= -1.0:
