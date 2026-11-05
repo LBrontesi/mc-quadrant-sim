@@ -70,8 +70,8 @@ def economic_assumptions(options: Mapping | None) -> dict | None:
                 result[key][asset] = value
             elif not isinstance(value, str) or not value or value.startswith("__"):
                 raise ValueError(f"Invalid macro column for {asset}.")
-    if result["yield_model"] not in {"adaptive", "random_walk", "legacy"}:
-        raise ValueError("yield_model must be adaptive, random_walk, or legacy.")
+    if result["yield_model"] not in {"adaptive", "random_walk", "legacy", "nelson_siegel"}:
+        raise ValueError("yield_model must be adaptive, random_walk, legacy, or nelson_siegel.")
     if result["equity_rate_mode"] not in {"surprise", "inflation_gate"}:
         raise ValueError("equity_rate_mode must be surprise or inflation_gate.")
     if not isinstance(result["macro_stress"], str) or result["macro_stress"] not in {"none", "persistent", "volatility", "combined"}:
@@ -176,6 +176,10 @@ def economic_columns(profiles, options):
         columns.add(channel["yield_column"])
         if channel["spread_column"]:
             columns.add(channel["spread_column"])
+    if options["yield_model"] == "nelson_siegel" and options["rate_stress"]:
+        from mc_quadrants.yield_curve import CURVE_TENORS
+
+        columns.update(CURVE_TENORS)
     return sorted(columns)
 
 

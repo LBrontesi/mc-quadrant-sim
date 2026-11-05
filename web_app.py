@@ -19,11 +19,13 @@ if SRC_DIR.is_dir() and str(SRC_DIR) not in sys.path:
 
 from mc_quadrants.api import (  # noqa: E402
     build_load_response,
+    build_rebalance_response,
     build_safe_rate_response,
     build_simulate_response,
     build_wealth_csv,
     load_data_source,
 )
+from mc_quadrants.jobs import JobsBusy, JobStore  # noqa: E402
 
 WEB_DIR = str((PROJECT_DIR / "web").resolve())
 PORT = int(os.getenv("PORT", "7860"))
@@ -35,6 +37,22 @@ HEAVY_ENDPOINTS = {
     "/api/safe-rate",
 }
 JOB_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
+JOB_STORE = None
+JOB_STORE_LOCK = threading.Lock()
+
+
+def job_store():
+    global JOB_STORE
+    with JOB_STORE_LOCK:
+        if JOB_STORE is None:
+            JOB_STORE = JobStore(
+                os.getenv("JOB_DIRECTORY", str(PROJECT_DIR / "output" / "jobs")),
+                {"simulate": build_simulate_response, "safe-rate": build_safe_rate_response, "wealth": build_wealth_csv, "rebalance": build_rebalance_response},
+                JOB_SEMAPHORE,
+                retention_seconds=max(60, int(os.getenv("JOB_RETENTION_SECONDS", "86400"))),
+                max_jobs=max(1, int(os.getenv("MAX_STORED_JOBS", "32"))),
+            )
+        return JOB_STORE
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -97,6 +115,20 @@ class WebHandler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self._send_json(200, {"ok": True, "app": "mc-quadrant-sim web UI"})
             return
+        if path.startswith("/api/jobs/"):
+            parts = path.strip("/").split("/")
+            try:
+                if len(parts) == 3:
+                    self._send_json(200, {"ok": True, "job": job_store().get(parts[2])})
+                elif len(parts) == 4 and parts[3] == "result":
+                    self._send_json(200, {"ok": True, **job_store().result(parts[2])})
+                else:
+                    self._send_json(404, {"ok": False, "error": "Unknown job endpoint."})
+            except KeyError:
+                self._send_json(404, {"ok": False, "error": "Job not found or expired."})
+            except ValueError as exc:
+                self._send_json(409, {"ok": False, "error": str(exc)})
+            return
         self._send_file(path)
 
     def do_POST(self) -> None:  # Validate a request and dispatch it to the matching API endpoint.
@@ -125,6 +157,25 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if not isinstance(payload, dict):
             self._send_json(400, {"ok": False, "error": "JSON body must be an object."})
+            return
+
+        if path == "/api/jobs" or path.startswith("/api/jobs/"):
+            try:
+                parts = path.strip("/").split("/")
+                if path == "/api/jobs":
+                    job = job_store().submit(payload.get("operation"), payload.get("payload"), job_id=payload.get("id"))
+                elif len(parts) == 4 and parts[3] in {"cancel", "retry"}:
+                    job = job_store().cancel(parts[2]) if parts[3] == "cancel" else job_store().retry(parts[2], retry_id=payload.get("id"))
+                else:
+                    self._send_json(404, {"ok": False, "error": "Unknown job endpoint."})
+                    return
+                self._send_json(202, {"ok": True, "job": job})
+            except JobsBusy as exc:
+                self._send_json(429, {"ok": False, "error": str(exc)})
+            except KeyError:
+                self._send_json(404, {"ok": False, "error": "Job not found or expired."})
+            except (ValueError, TypeError) as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
             return
 
         acquired = path not in HEAVY_ENDPOINTS or JOB_SEMAPHORE.acquire(blocking=False)
@@ -160,7 +211,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
 
 def main() -> None:  # Run the command-line entry point for this script.
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), WebHandler)
+    server = ThreadingHTTPServer((os.getenv("HOST", "0.0.0.0"), PORT), WebHandler)
     server.daemon_threads = True
     LOGGER.info(
         "MC Quadrant Simulator listening on port %s (max jobs=%s, max request=%s bytes)",

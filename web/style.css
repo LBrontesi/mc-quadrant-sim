@@ -673,9 +673,13 @@ tr:hover td { background: rgba(59, 130, 246, 0.08); }
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-#overlay-text { color: var(--text); font-size: 15px; font-weight: 700; }
-.overlay-stage { color: var(--muted); font-size: 12px; text-align: center; max-width: min(90vw, 560px); }
+#overlay-text { color: #f8fafc; font-size: 15px; font-weight: 700; }
+.overlay-stage { color: #e2e8f0; font-size: 12px; text-align: center; max-width: min(90vw, 560px); }
 .overlay-elapsed { color: #93c5fd; font-size: 11px; font-variant-numeric: tabular-nums; }
+.job-actions, .job-recovery { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
+.job-recovery { margin-top: 10px; font-size: 12px; }
+#job-progress { width: min(80vw, 360px); height: 12px; accent-color: var(--accent); }
+.job-actions .btn { background: var(--surface, #fff); color: var(--text); }
 
 button:focus-visible, summary:focus-visible, .pill:focus-within, .check-list label:focus-within {
   outline: 2px solid var(--accent);

@@ -613,6 +613,8 @@ def _load_market_data_cached(
             "interest_rate": "FEDFUNDS",
             "bond_yield": "DGS7",
             "bond_yield_2y": "DGS2",
+            "bond_yield_5y": "DGS5",
+            "bond_yield_10y": "DGS10",
             "bond_yield_20y": "DGS20",
             "real_bond_yield": "DFII10",
         },
@@ -693,7 +695,7 @@ def _load_market_data_cached(
         available = tuple(returns.columns)
     # Market yields retain their observation calendar, independently of macro
     # publication lags. Keep this optional factor out of synthetic backfill.
-    for column in ("bond_yield", "bond_yield_2y", "bond_yield_20y", "real_bond_yield"):
+    for column in ("bond_yield", "bond_yield_2y", "bond_yield_5y", "bond_yield_10y", "bond_yield_20y", "real_bond_yield"):
         if column in macro_levels:
             macro[column] = pd.to_numeric(macro_levels[column], errors="coerce").reindex(macro.index)
     macro["tips_inflation_log"] = np.log(macro_levels["inflation"]).diff().shift(3).reindex(macro.index)

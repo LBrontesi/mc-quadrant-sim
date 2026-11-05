@@ -965,9 +965,11 @@ python web_app.py
 The backend loads live Yahoo Finance / FRED history by default; asset and macro
 CSV uploads are supported as an optional override from the UI.
 
-Open `http://127.0.0.1:7860`. Set `PORT` to use a different port. The browser
-client calls the shared `/api/load`, `/api/simulate`, and `/api/wealth`
-contracts exposed by the backend.
+Open `http://127.0.0.1:7860`. Set `PORT` to use a different port, or
+`HOST=127.0.0.1` to bind only to the local machine. The browser loads data through
+`/api/load` and submits long calculations through `/api/jobs`. The synchronous
+`/api/simulate`, `/api/safe-rate`, and `/api/wealth` contracts remain available
+for existing API callers.
 
 The server uses adaptive path chunking, limits concurrent heavy jobs, caps request bodies, and sends a
 deterministic reporting sample of at most 5,000 paths to the browser instead of serializing every path.
@@ -975,8 +977,25 @@ All requested paths still contribute to summary statistics, percentiles, and ris
 Production limits can be adjusted with
 `MAX_CONCURRENT_JOBS` and `MAX_REQUEST_BYTES`.
 
-During longer jobs the web interface shows the active stage and elapsed time;
-after completion it collapses the
+During longer jobs the web interface shows server-reported stages, completed
+model/path counts when available, and elapsed time. **Cancel analysis** stops at
+the next calculation checkpoint; an in-progress native call or worker chunk
+must finish first. **Leave running** closes progress monitoring while the server
+continues. **Reconnect** retrieves the same job, including after a page refresh
+or connection loss. **Restore results** retrieves the last completed analysis.
+Interrupted or failed jobs offer **Retry analysis**, which reruns their saved
+inputs. A server restart cannot resume partially computed paths.
+
+The server retains up to 32 jobs for 24 hours by default, including submitted
+CSV data and completed results, under `output/jobs`. Set `JOB_DIRECTORY`,
+`MAX_STORED_JOBS`, and `JOB_RETENTION_SECONDS` to change these limits. Expiration
+and capacity pruning happen when jobs are accessed or submitted. Recovery across
+container replacement requires a persistent volume at `JOB_DIRECTORY`; an
+ephemeral filesystem loses its saved jobs. This job store supports one server
+process per directory. Random job IDs grant access to individual jobs; there is
+no public job-list endpoint. See [background job behavior and API](docs/background-jobs.md).
+
+After completion the interface collapses the
 settings, moves focus to the results, and provides an **Edit scenario** shortcut.
 The allocation/status areas, metric cards, result tabs, and charts adapt to
 mobile widths without causing page-level horizontal overflow.

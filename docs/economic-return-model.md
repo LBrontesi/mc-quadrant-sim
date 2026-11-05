@@ -140,3 +140,65 @@ The stock/bond ordering and diversification are present in simulated outcomes, n
 The full Python run completed with **540 passes and one existing backfill byte-hash snapshot failure**. Three subsequently added edge-case tests also pass; the complete new reality-fix test file has 18 passing tests. The snapshot mismatch was reproduced against its recorded original source commit in an isolated tree during the preceding implementation; its fixture has not been rewritten. JavaScript tests pass (7), `node --check web/app.js` passes, and Ruff checks pass on the changed engine/research/test files. No browser visual check was performed for the settings controls.
 
 Tests cover CPI price identities and base effects, native and Python monthly CPI generation, compact-versus-standard real reporting, missing CPI observations, yield persistence and bootstrap joins, maturity routing, valuation origin restoration, credit spread positivity/loss carry, TIPS rate sensitivity, and anchor-only real/credit adjustments. TIPS/credit/valuation tests are behavioral checks, not historical calibration evidence.
+
+## Optional dynamic Nelson–Siegel curve
+
+Select **Dynamic Nelson–Siegel curve (experimental)** under **Yield forecasts**,
+with the economic return model and joint macro paths enabled. API configuration:
+
+```python
+economic_returns = {"yield_model": "nelson_siegel"}
+```
+
+The market loader includes DGS5 and DGS10 alongside DGS2, DGS7 and DGS20.
+CSV inputs must supply `bond_yield_2y`, `bond_yield_5y`, `bond_yield` (7 years),
+`bond_yield_10y` and `bond_yield_20y`, in the configured yield units. Missing
+curve inputs cause an explicit error; real yields and credit spreads remain
+separate channels. Custom yield-column overrides outside this panel continue
+using the adaptive forecast, rather than being assigned an inferred maturity.
+
+At each historical date, least squares estimates level, slope and curvature
+with fixed decay 0.7308 per year. A standardized ridge regression predicts
+factor changes from lagged factors, growth, inflation and the optional policy
+rate; regime-conditioned drift is shrunk using 24 observations. The factor
+transition block has a spectral-radius cap of 0.995. Bootstrap block joins
+are excluded from fitting. Forecasts use only the supplied training history;
+refitting on new observations updates the estimated dynamics. The coefficients
+stay fixed within a simulated path, while all three factors evolve every month.
+Bootstrap parameter banks supply uncertainty in fitted coefficients.
+
+The existing joint macro innovation covariance supplies correlated curve and
+macro shocks, conditional on each path's regime. Treasury shocks and persistent
+stress corrections are projected into the three-factor curve space. Every
+simulated month/path therefore has one curve, including when paths share a
+regime. Cash and financing retain the separately simulated policy rate; the
+policy rate is a predictor and has correlated shocks, not an enforced
+short-end boundary condition. Other macro variables respond through the
+existing joint VAR. Native asset-return sampling remains available, while
+curve/macro paths use the Python generator.
+
+Bond carry and duration repricing consume the resulting tenor yields through
+the existing economic return channel. Initial carry still uses observed yields;
+any initial curve fitting discrepancy can contribute to first-step repricing.
+Historical return residuals also retain curve-fitting noise. This version fits
+Treasury **par-yield proxies**, not zero-coupon discount factors, and does not
+add cash-flow pricing, roll-down, convexity, a time-varying decay parameter, or
+no-arbitrage constraints. The factor-block stability cap is not a guarantee of
+stability of the entire coupled macro system. Synthetic integration tests verify
+curve geometry, regime/macro conditioning, reproducibility, units and bootstrap
+handling. An initial [chronological comparison](../research/nelson_siegel_2026-10-27/REPORT.md)
+now covers 30 origins and two seeds. The current Nelson–Siegel version worsens
+one-year seven-year yield CRPS by about 22% and IEF return CRPS by about 18%
+versus adaptive; its 2022 stress forecast also deteriorates. It remains optional
+and experimental. This is diagnostic evidence using revised data and overlapping
+windows, not an untouched holdout.
+
+A [follow-up investigation](../research/nelson_siegel_2026-10-27/diagnostics/REPORT.md)
+compares ten research candidates. The main penalty comes from the fitted macro
+forecast, especially a negative inflation contribution that extrapolates poorly
+at December 2021. Removing inflation and refitting recovers about 91% of excess
+one-year yield CRPS; random-walk curve factors score 0.583 versus adaptive's
+0.580. The same-panel adaptive baseline stays near the original baseline, and
+curve-fitting error is small. These research ablations do not change the
+production specification; broad forecast improvement and stress-tail calibration
+remain unproven.

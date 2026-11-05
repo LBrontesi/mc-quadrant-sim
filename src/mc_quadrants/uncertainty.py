@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from mc_quadrants.calibration import CorrelationOverrides, calibrate_quadrant_model
+from mc_quadrants.progress import report_progress
 from mc_quadrants.regimes import ThresholdSpec
 from mc_quadrants.types import ScenarioModel
 
@@ -138,6 +139,7 @@ def bootstrap_quadrant_models(
     models: list[ScenarioModel] = []
     anchor_rng = np.random.default_rng(None if random_seed is None else np.random.SeedSequence([random_seed, 98731]))
     for draw in range(int(draws)):
+        report_progress("Calibrating parameter models", draw, int(draws))
         indexes = stationary_bootstrap_indices(len(panel), int(block_size), rng)
         sampled = panel.iloc[indexes].copy()
         sampled.index = artificial_index
@@ -202,6 +204,7 @@ def bootstrap_quadrant_models(
         model.metadata["bootstrap_draw"] = draw
         model.metadata["source_macro_lag_periods"] = int(macro_lag_periods)
         models.append(model)
+        report_progress("Calibrating parameter models", draw + 1, int(draws))
     return models
 
 

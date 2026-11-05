@@ -3,8 +3,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import threading
+from collections import deque
 from collections.abc import Mapping
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, wait
 from dataclasses import dataclass, replace
 from multiprocessing import get_context
 from typing import Any
@@ -25,6 +26,7 @@ from mc_quadrants.ensemble_convergence import assess_parameter_convergence
 from mc_quadrants.hmm import fit_hmm_model
 from mc_quadrants.model_selection import select_calibration_hyperparameters
 from mc_quadrants.native import NATIVE_RISK_STAT_NAMES, native_fused_available
+from mc_quadrants.progress import check_cancelled, report_progress
 from mc_quadrants.regimes import classify_persistent_quadrants
 from mc_quadrants.simulation import (
     DEFAULT_LIQUIDITY_COST_MULTIPLIERS,
@@ -627,6 +629,33 @@ def _chunk_specs(total: int, chunk_size: int, random_seed: int) -> list[tuple[in
     ]
 
 
+def _parallel_chunks(batch_state, specs, workers):
+    """Keep only one chunk per worker in flight so cancellation drains bounded work."""
+    executor = ProcessPoolExecutor(max_workers=int(workers), mp_context=get_context("spawn"),
+                                   initializer=_init_chunk_worker, initargs=(batch_state,))
+    pending = deque()
+    remaining = iter(specs)
+    try:
+        for spec in list(specs)[:int(workers)]:
+            next(remaining)
+            pending.append(executor.submit(_run_chunk, spec))
+        while pending:
+            check_cancelled()
+            done, _ = wait([pending[0]], timeout=0.2)
+            if not done:
+                continue
+            check_cancelled()
+            # Preserve the original reduction order and seeded output exactly.
+            yield pending.popleft().result()
+            spec = next(remaining, None)
+            if spec is not None:
+                pending.append(executor.submit(_run_chunk, spec))
+    finally:
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 def _simulate_chunked(
     model: ScenarioModel,
     periods: int,
@@ -804,7 +833,10 @@ def _simulate_chunked(
     }
 
     if chunk_size is None or paths <= chunk_size:
-        return _simulate_batch(batch_state, int(paths), int(random_seed))
+        report_progress("Simulating paths for the current model", 0, int(paths))
+        batch = _simulate_batch(batch_state, int(paths), int(random_seed))
+        report_progress("Simulating paths for the current model", int(paths), int(paths))
+        return batch
 
     total = int(paths)
     chunk_size = max(1, int(chunk_size))
@@ -866,6 +898,7 @@ def _simulate_chunked(
 
     def _serial_chunks() -> None:
         for start, count, seed in specs:
+            report_progress("Simulating paths for the current model", start, total)
             chunk_result, chunk_wealth, chunk_gross_wealth = _simulate_batch(batch_state, count, seed)
             wealth_values[:, start:start + count] = chunk_wealth.to_numpy(dtype=float)
             if tax_selection.enabled:
@@ -887,16 +920,14 @@ def _simulate_chunked(
             for key in path_attrs:
                 if key in chunk_wealth.attrs:
                     path_attrs[key][:, start:start + count] = chunk_wealth.attrs[key]
+            report_progress("Simulating paths for the current model", start + count, total)
 
 
     if workers is not None and workers > 1 and not native_tax_execution:
         try:
-            with ProcessPoolExecutor(
-                max_workers=int(workers),
-                mp_context=get_context("spawn"),
-                initializer=_init_chunk_worker,
-                initargs=(batch_state,),
-            ) as executor:
+            from contextlib import closing
+            completed_paths = 0
+            with closing(_parallel_chunks(batch_state, specs, workers)) as chunks:
                 for (
                     start,
                     chunk_wealth_values,
@@ -909,9 +940,7 @@ def _simulate_chunked(
                     chunk_wrapper_terminal,
                     chunk_wrapper_annualized,
                     chunk_path_attrs,
-                ) in executor.map(
-                    _run_chunk, specs
-                ):
+                ) in chunks:
                     count = chunk_wealth_values.shape[1]
                     wealth_values[:, start:start + count] = chunk_wealth_values
                     if chunk_gross_values is not None:
@@ -932,6 +961,8 @@ def _simulate_chunked(
                     for key, values in chunk_path_attrs.items():
                         if key in path_attrs:
                             path_attrs[key][:, start:start + count] = values
+                    completed_paths += count
+                    report_progress("Simulating paths for the current model", completed_paths, total)
         except (NotImplementedError, PermissionError):
             _serial_chunks()
     else:
@@ -1291,6 +1322,7 @@ def run_scenario(
         except ValueError as exc:
             selection_warning = f"Hyperparameter selection unavailable; using requested settings: {exc}"
 
+    report_progress("Calibrating the reference model")
     if model_kind == "hmm":
         model, fit = fit_hmm_model(
             scenario_returns,
@@ -1379,6 +1411,7 @@ def run_scenario(
     parameter_models: list[ScenarioModel] = []
     parameter_summary: pd.DataFrame | None = None
     if parameter_draws:
+        report_progress("Preparing parameter models", 0, int(parameter_draws))
         parameter_models = _cached_bootstrap_quadrant_models(
             scenario_returns,
             macro,
@@ -1438,6 +1471,7 @@ def run_scenario(
     for draw, (simulation_model, draw_paths, draw_reporting_paths) in enumerate(
         zip(simulation_models, model_path_counts, reporting_counts)
     ):
+        report_progress(f"Simulating model {draw + 1} of {len(simulation_models)}", draw, len(simulation_models))
         fitted_dependence = simulation_model.metadata.get("dependence_fit", {}) if calibrate_dependence else {}
         effective_dependence = {
             key: float(fitted_dependence.get(key, fallback)) for key, fallback in {
@@ -1520,6 +1554,7 @@ def run_scenario(
             )
         simulation_runs.append((draw_result, draw_wealth, draw_gross_wealth))
 
+    report_progress("Calculating portfolio risk and parameter precision")
     terminal_groups: list[np.ndarray] = []
     for _, run_wealth, _ in simulation_runs:
         terminal_values = run_wealth.attrs.get("terminal_values")
@@ -1748,6 +1783,7 @@ def run_scenario(
     }
     model.metadata["uncertainty_decomposition"] = uncertainty_decomposition
 
+    check_cancelled()
     walk_forward_result = None
     if walk_forward and model_kind == "quadrant":
         try:

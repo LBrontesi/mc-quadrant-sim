@@ -145,7 +145,7 @@ def test_web_ui_exposes_shared_methodology_controls():
     assert 'String(data.paths) === "10000"' in javascript
     assert "Estimated memory" not in javascript
     assert "MEMORY_LIMIT_MB" not in javascript
-    assert '"Buy and hold", "buy_hold"' in javascript
+    assert 'postJSON("/api/rebalance"' in javascript
     assert "Math.min(...values)" not in javascript
     assert 'setAttribute("height", "auto")' not in javascript
     assert "function createSvg(width, height)" in javascript

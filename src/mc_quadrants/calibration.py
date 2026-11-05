@@ -501,9 +501,24 @@ def _fit_joint_macro_dynamics(
                             innovation_basis="monthly_log_cpi_percent", index=inflation_index,
                             yoy_scale=0.01 if macro_clean[inflation_col].abs().quantile(0.9) >= 0.5 else 1.0)
     yield_dynamics = {}
+    curve_dynamics = None
     if additional_columns and yield_model != "legacy":
         from mc_quadrants.yield_forecasts import fit_yield_forecasts
-        yield_dynamics, yield_predictions = fit_yield_forecasts(macro_values, columns, additional_columns, valid_transitions, yield_model)
+        forecast_columns = additional_columns
+        if yield_model == "nelson_siegel":
+            from mc_quadrants.yield_curve import CURVE_TENORS, fit_curve, project_curve
+
+            curve_dynamics, curve_predictions = fit_curve(
+                macro_values, columns, valid_transitions, membership, REGIME_ORDER,
+                [growth_col, inflation_col] + ([active_rate_col] if active_rate_col else []),
+            )
+            forecasts[:, curve_dynamics["indices"]] = curve_predictions
+            project_curve(observed_targets, curve_dynamics)
+            forecast_columns = tuple(c for c in additional_columns if c not in CURVE_TENORS)
+        yield_dynamics, yield_predictions = fit_yield_forecasts(
+            macro_values, columns, forecast_columns, valid_transitions,
+            "adaptive" if yield_model == "nelson_siegel" else yield_model,
+        )
         for column, prediction in yield_predictions.items():
             forecasts[:, columns.index(column)] = prediction
     residuals = observed_targets-forecasts
@@ -586,6 +601,7 @@ def _fit_joint_macro_dynamics(
     return {
         "columns": columns,
         "yield_dynamics": yield_dynamics,
+        "curve_dynamics": curve_dynamics,
         "log_columns": list(log_columns),
         "cpi_dynamics": cpi_dynamics,
         "stress_dynamics": stress_specification,

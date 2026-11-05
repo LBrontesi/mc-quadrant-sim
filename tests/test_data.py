@@ -120,6 +120,8 @@ def test_market_data_drops_an_incomplete_final_month(monkeypatch):
             "growth": np.linspace(100.0, 130.0, len(macro_dates)),
             "inflation": np.linspace(100.0, 125.0, len(macro_dates)),
             "interest_rate": np.linspace(1.0, 3.0, len(macro_dates)),
+            "bond_yield_5y": np.linspace(2.0, 4.0, len(macro_dates)),
+            "bond_yield_10y": np.linspace(3.0, 5.0, len(macro_dates)),
         },
         index=macro_dates,
     )
@@ -130,6 +132,10 @@ def test_market_data_drops_an_incomplete_final_month(monkeypatch):
 
     macro, returns, _, _ = data_module.load_market_data(["SPY"], "2018-01-01", "2020-03-15")
 
+    for column in ("bond_yield_5y", "bond_yield_10y"):
+        assert macro.loc[pd.Timestamp("2020-02-29"), column] == pytest.approx(
+            macro_levels.loc[pd.Timestamp("2020-02-01"), column]
+        )
     assert returns.index.max() == pd.Timestamp("2020-02-29")
     assert macro.attrs["rate_col"] == "interest_rate"
     assert macro.loc[pd.Timestamp("2020-02-29"), "interest_rate"] == pytest.approx(

@@ -547,7 +547,7 @@ def simulate_joint_regime_macro_paths(
         _prepare_macro_emissions(states, model.metadata.get("hsmm_emission_means"), model.metadata.get("hsmm_emission_covariances"))
         if model.metadata.get("macro_membership_model", "joint_emission") == "joint_emission" else None
     )
-    native_paths = None if dynamics.get("yield_dynamics") or dynamics.get("log_columns") or dynamics.get("stress_dynamics") else simulate_regime_macro_native(
+    native_paths = None if dynamics.get("curve_dynamics") or dynamics.get("yield_dynamics") or dynamics.get("log_columns") or dynamics.get("stress_dynamics") else simulate_regime_macro_native(
         model, transition, starts, posterior, periods=periods, paths=paths, start_state=start_state,
         random_seed=random_seed, duration_model=duration_model, min_regime_duration=min_regime_duration,
         macro_dynamics=dynamics, emission_coefficients=emissions,
@@ -641,6 +641,9 @@ def simulate_joint_regime_macro_paths(
     cpi_history = model.metadata.get("cpi_process", {}).get("monthly_log_history")
     cpi_ring = np.broadcast_to(np.asarray(cpi_history)[:, None], (12, paths)).copy() if cpi_dynamics else None
     last_cpi = np.full(paths, cpi_dynamics["latest_monthly_log"]) if cpi_dynamics else None
+    curve = dynamics.get("curve_dynamics")
+    if curve:
+        from mc_quadrants.yield_curve import curve_forecast, project_curve
     yield_specifications = dynamics.get("yield_dynamics", {})
     yield_drifts = {column: np.full(paths, specification["latest_drift"]) for column, specification in yield_specifications.items()}
     stress = dynamics.get("stress_dynamics")
@@ -661,6 +664,8 @@ def simulate_joint_regime_macro_paths(
                 covariances[state],
                 size=int(mask.sum()),
             )
+            if curve:
+                project_curve(shocks, curve)
             if stress:
                 shocks *= np.sqrt(stress_variance[mask, None])
             center = centers[state]
@@ -678,7 +683,16 @@ def simulate_joint_regime_macro_paths(
                 conditional = step_yields(current_macro[mask], next_macro[mask] - shocks,
                     {column: drift[mask] for column, drift in yield_drifts.items()}, yield_specifications)
                 next_macro[mask] = conditional + shocks
+            if curve:
+                weights = np.zeros((int(mask.sum()), len(curve["states"])))
+                weights[:, curve["states"].index(state)] = 1
+                forecast = curve_forecast(current_macro[mask], curve, weights)
+                next_macro[np.ix_(mask, curve["indices"])] = forecast + shocks[:, curve["indices"]]
             next_macro[mask] += correction[mask]
+            if curve:
+                projected = next_macro[mask].copy()
+                project_curve(projected, curve)
+                next_macro[mask] = projected
             if cpi_dynamics:
                 index = cpi_dynamics["index"]
                 mean = cpi_dynamics["state_centers"][state]

@@ -1,6 +1,6 @@
 "use strict";
 
-import { postJSON } from "./api-client.js";
+import { postJSON, savedJob, resumeJob, retryJob, cancelJob, detachJob, forgetJob } from "./api-client.js";
 import { setupDynamicExperience, refreshScenarioPreview, refreshAllocationPreview } from "./experience.js";
 
 /* ---------- Constants ---------- */
@@ -173,8 +173,12 @@ function setStatus(el, message, isError = false) { // Update status text and err
 
 let overlayStartedAt = 0;
 let overlayTimer = null;
+let overlayReturnFocus = null;
 
 function showOverlay(message, stage = "Preparing data and model inputs") { // Show the simulation progress overlay.
+  if ($("overlay").classList.contains("hidden")) overlayReturnFocus = document.activeElement;
+  $("job-actions").classList.add("hidden");
+  $("job-progress").classList.add("hidden");
   $("overlay-text").textContent = message || "Working...";
   $("overlay-stage").textContent = stage;
   overlayStartedAt = performance.now();
@@ -186,12 +190,114 @@ function showOverlay(message, stage = "Preparing data and model inputs") { // Sh
   clearInterval(overlayTimer);
   overlayTimer = setInterval(updateElapsed, 1000);
   $("overlay").classList.remove("hidden");
+  $("overlay").focus();
 }
 
 function hideOverlay() { // Hide the simulation progress overlay.
   clearInterval(overlayTimer);
   overlayTimer = null;
   $("overlay").classList.add("hidden");
+  overlayReturnFocus?.focus?.();
+  refreshJobRecovery();
+}
+
+function jobContext(kind) {
+  saveControls();
+  return { kind, snapshot: { ...JSON.parse(localStorage.getItem("mcq-controls") || "{}"), selected: selectedTickers(), weights: gatherWeights() } };
+}
+
+function refreshJobRecovery() {
+  const job = savedJob();
+  $("job-recovery").classList.toggle("hidden", !job);
+  if (!job) return;
+  const stopped = ["failed", "interrupted", "cancelled"].includes(job.status);
+  $("job-recovery-message").textContent = stopped ? "The saved analysis stopped. You can retry its original inputs."
+    : job.delivered ? "Your last completed analysis is saved." : "An analysis is saved on the server. Reconnect to check its progress.";
+  $("job-reconnect").textContent = job.delivered ? "Restore results" : "Reconnect";
+  $("job-retry").classList.toggle("hidden", !stopped);
+  $("job-dismiss").classList.toggle("hidden", !stopped && !job.delivered);
+}
+
+function handleJobProgress({ detail }) {
+  if (detail.storageUnavailable) {
+    notify("Browser storage is unavailable. Keep this tab open to retrieve the result.", "error");
+  } else if (detail.disconnected) {
+    $("overlay-stage").textContent = detail.message;
+    $("job-progress").removeAttribute("value");
+  } else if (detail.job) {
+    const job = detail.job;
+    const progress = job.progress || {};
+    const stopping = job.status === "cancelling";
+    $("job-actions").classList.remove("hidden");
+    $("job-detach").disabled = job.status === "submitting";
+    $("job-cancel").disabled = stopping || ["completed", "failed", "cancelled", "interrupted", "submitting"].includes(job.status);
+    $("job-cancel").textContent = stopping ? "Stopping…" : "Cancel analysis";
+    $("overlay-stage").textContent = stopping ? "Cancellation requested. Waiting for the current calculation step to finish."
+      : `${progress.stage || job.status}${progress.total ? ` · ${Number(progress.completed || 0).toLocaleString()} / ${Number(progress.total).toLocaleString()}` : ""}`;
+    $("job-progress").classList.remove("hidden");
+    if (progress.total && !stopping) {
+      $("job-progress").max = progress.total;
+      $("job-progress").value = progress.completed || 0;
+    } else $("job-progress").removeAttribute("value");
+    if (job.created_at) overlayStartedAt = performance.now() - Math.max(0, Date.now() - job.created_at * 1000);
+  }
+  refreshJobRecovery();
+}
+
+async function recoverAnalysis(retry = false) {
+  const saved = savedJob();
+  if (!saved) return;
+  showOverlay(retry ? "Retrying analysis..." : "Recovering analysis...");
+  try {
+    const envelope = await (retry ? retryJob() : resumeJob(saved));
+    const { payload, result: data, job } = envelope;
+    if (job.operation === "wealth") {
+      downloadCSV("wealth_paths_sample.csv", data.csv);
+    } else if (job.operation === "rebalance") {
+      renderRebalancingSensitivity(data.rows, data.currency);
+      switchTab("tab-lab");
+    } else {
+      if (saved.context?.snapshot) applyControlSnapshot(saved.context.snapshot);
+      if (payload.source === "csv") {
+        for (const [control, key] of [["csv-prices", "csv_prices"], ["csv-macro", "csv_macro"]]) {
+          const transfer = new DataTransfer();
+          transfer.items.add(new File([payload[key]], `${key}.csv`, { type: "text/csv" }));
+          $(control).files = transfer.files;
+        }
+        $("csv-enabled").checked = true;
+      }
+      renderDecumulationEditor();
+      syncDataSourceUI();
+      toggleSourceGroups();
+      const tickers = payload.selected_tickers || Object.keys(payload.weights || {});
+      state.loadResult = { tickers, presets: [] };
+      renderTickerChecklist(tickers, tickers);
+      state.weights = { ...payload.weights };
+      state.pendingPortfolio = null;
+      renderWeightEditor();
+      state.loadPayload = gatherLoadPayload();
+      await fillCsvPayload(state.loadPayload);
+      state.lastSimPayload = payload;
+      if (job.operation === "safe-rate") {
+        state.safeRateResults = data;
+        renderRetirement(data.retirement, payload.base_currency);
+        switchTab("tab-retirement");
+      } else {
+        state.results = data;
+        renderResults(data);
+        switchTab("tab-growth");
+      }
+      updateGuide();
+    }
+    setStatus($("run-message"), "Saved analysis recovered.");
+    notify("Saved analysis recovered", "success");
+  } catch (error) {
+    if (error.status === 404) forgetJob();
+    setStatus($("run-message"), error.message, true);
+  } finally {
+    hideOverlay();
+    updateRunAvailability();
+  }
 }
 
 function notify(message, type = "info") { // Display a transient toast notification.
@@ -2672,7 +2778,7 @@ async function onRun() { // Handle run.
       );
     }
     const payload = gatherSimPayload();
-    const data = await postJSON("/api/simulate", payload);
+    const data = await postJSON("/api/simulate", payload, jobContext("simulation"));
     state.lastSimPayload = payload;
     state.results = data;
     updateGuide();
@@ -2712,7 +2818,7 @@ async function onSafeRate() { // Handle safe rate.
       showOverlay("Calculating safe rate...", "Reusing one calibrated set of market paths for both policies");
     }
     const payload = gatherSimPayload();
-    const data = await postJSON("/api/safe-rate", payload);
+    const data = await postJSON("/api/safe-rate", payload, jobContext("safe-rate"));
     state.lastSimPayload = payload;
     state.safeRateResults = data;
     if (state.results) state.results.retirement = data.retirement;
@@ -3119,7 +3225,7 @@ async function onPortfolioCompare() { // Handle portfolio compare.
   showOverlay("Running paired portfolio...", "Reusing the same seed and market-path assumptions");
   try {
     const payload = { ...state.lastSimPayload, weights: { ...state.labWeights }, walk_forward: false };
-    const data = await postJSON("/api/simulate", payload);
+    const data = await postJSON("/api/simulate", payload, jobContext("comparison"));
     renderPairedComparison(data);
     setStatus(status, "Paired comparison complete. Both portfolios used identical seeded market paths.");
     notify("Paired comparison complete", "success");
@@ -3132,32 +3238,20 @@ async function onPortfolioCompare() { // Handle portfolio compare.
   }
 }
 
+function renderRebalancingSensitivity(results, currency) {
+  $("rebalance-sensitivity-table").innerHTML = "<table><thead><tr><th>Schedule</th><th>Median wealth</th><th>Return</th><th>Volatility</th><th>Mean drawdown</th><th>Sharpe</th></tr></thead><tbody>" +
+    results.map((row) => `<tr><td><strong>${escapeHtml(row[0])}</strong></td><td>${formatMetricValue("p50", row[1], currency)}</td><td>${pct(row[2])}</td><td>${pct(row[3])}</td><td>${pct(row[4])}</td><td>${fmt(row[5], 2)}</td></tr>`).join("") + "</tbody></table>";
+}
+
 async function onRebalancingSensitivity() { // Handle rebalancing sensitivity.
   if (!state.lastSimPayload) return;
   const button = $("rebalance-sensitivity-btn");
   const status = $("rebalance-status");
   button.disabled = true;
-  const schedules = [["Monthly", "monthly"], ["Quarterly", "quarterly"], ["Annual", "annual"], ["Buy and hold", "buy_hold"]];
-  const results = [];
-  showOverlay("Analyzing rebalancing...", "Running paired schedule 1 of 4");
+  showOverlay("Analyzing rebalancing...", "Preparing four paired schedules");
   try {
-    for (let index = 0; index < schedules.length; index += 1) {
-      const [label, rebalance] = schedules[index];
-      $("overlay-stage").textContent = `Running ${label.toLowerCase()} schedule · ${index + 1} of ${schedules.length}`;
-      const payload = {
-        ...state.lastSimPayload,
-        rebalance,
-        cost_bps: rebalance === "buy_hold" ? 0 : state.lastSimPayload.cost_bps,
-        paths: Math.min(Number(state.lastSimPayload.paths), 1_000),
-        parameter_draws: 0,
-        walk_forward: false,
-        workers: 1,
-      };
-      const data = await postJSON("/api/simulate", payload);
-      results.push([label, data.summary.p50, data.summary.annualized_return, data.summary.annualized_volatility, data.summary.max_drawdown_mean, data.summary.sharpe_ratio]);
-    }
-    $("rebalance-sensitivity-table").innerHTML = "<table><thead><tr><th>Schedule</th><th>Median wealth</th><th>Return</th><th>Volatility</th><th>Mean drawdown</th><th>Sharpe</th></tr></thead><tbody>" +
-      results.map((row) => `<tr><td><strong>${row[0]}</strong></td><td>${formatMetricValue("p50", row[1], state.results.currency)}</td><td>${pct(row[2])}</td><td>${pct(row[3])}</td><td>${pct(row[4])}</td><td>${fmt(row[5], 2)}</td></tr>`).join("") + "</tbody></table>";
+    const data = await postJSON("/api/rebalance", state.lastSimPayload, jobContext("rebalance"));
+    renderRebalancingSensitivity(data.rows, data.currency);
     setStatus(status, "Sensitivity sweep complete using identical seeds and up to 1,000 paths per schedule.");
   } catch (error) {
     setStatus(status, error.message, true);
@@ -3399,7 +3493,26 @@ function init() { // Initialize init.
     }
   });
 
+  window.addEventListener("analysis-job", handleJobProgress);
+  $("job-cancel").addEventListener("click", async () => {
+    $("job-cancel").disabled = true;
+    try { await cancelJob(); }
+    catch (error) { $("job-cancel").disabled = false; notify(error.message, "error"); }
+  });
+  $("job-detach").addEventListener("click", detachJob);
+  $("job-reconnect").addEventListener("click", () => recoverAnalysis());
+  $("job-retry").addEventListener("click", () => recoverAnalysis(true));
+  $("job-dismiss").addEventListener("click", () => { forgetJob(); refreshJobRecovery(); });
+  $("overlay").addEventListener("keydown", (event) => {
+    if (event.key !== "Tab") return;
+    const buttons = [...$("overlay").querySelectorAll("button:not(:disabled)")].filter((b) => b.offsetParent !== null);
+    if (!buttons.length) { event.preventDefault(); return; }
+    const index = buttons.indexOf(document.activeElement);
+    event.preventDefault();
+    buttons[(index + (event.shiftKey ? buttons.length - 1 : 1)) % buttons.length].focus();
+  });
   restoreControls();
+  refreshJobRecovery();
   renderDecumulationEditor();
   setupMarketDataExperience();
   restoreScenarioFromUrl();
@@ -3418,7 +3531,12 @@ function init() { // Initialize init.
       const badge = $("connection");
       badge.textContent = "connected";
       badge.className = "badge badge-ok";
-      if (new URLSearchParams(window.location.search).has("skipAutoLoad")) {
+      if (savedJob() && !savedJob().delivered) {
+        recoverAnalysis();
+      } else if (savedJob()?.delivered) {
+        setStatus($("load-message"), "Restore your saved results or load data for a new analysis.");
+        updateRunAvailability();
+      } else if (new URLSearchParams(window.location.search).has("skipAutoLoad")) {
         setStatus($("load-message"), "Connected. Choose custom files or run to load market data.");
         updateRunAvailability();
       } else {

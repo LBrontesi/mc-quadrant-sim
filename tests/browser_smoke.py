@@ -26,7 +26,7 @@ def main() -> None:
         macro_path.write_text("\n".join(macro), encoding="utf-8")
 
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
+            browser = playwright.chromium.launch(executable_path=os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE"))
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
             page.emulate_media(reduced_motion="reduce")
             browser_errors: list[str] = []
@@ -90,9 +90,21 @@ def main() -> None:
             page.locator("label.decumulation-toggle").click()
             assert decumulation.is_checked()
             page.locator("#target-wealth").fill("150")
+            submissions = []
+            page.on("request", lambda request: submissions.append(request.url)
+                    if request.method == "POST" and request.url.endswith("/api/jobs") else None)
             page.locator("#run-btn").click()
+            page.locator("#job-actions").wait_for(state="visible")
+            first_job = page.evaluate("JSON.parse(localStorage.getItem('mcq-background-job')).id")
+            if os.getenv("BROWSER_SCREENSHOT_DIR"):
+                destination = Path(os.environ["BROWSER_SCREENSHOT_DIR"])
+                destination.mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(destination / "job-progress.png"))
+            page.reload(wait_until="domcontentloaded")
             page.locator("#growth-content").wait_for(state="visible", timeout=120_000)
-            page.locator("#run-message").filter(has_text="Simulation complete").wait_for()
+            page.locator("#run-message").filter(has_text="Saved analysis recovered").wait_for()
+            assert page.evaluate("JSON.parse(localStorage.getItem('mcq-background-job')).id") == first_job
+            assert len(submissions) == 1, "Reload submitted a duplicate analysis"
             assert page.locator("#metric-grid").get_by_text("Annualized return", exact=True).is_visible()
             assert page.locator("#goal-metric-grid").get_by_text("Target success", exact=True).is_visible()
             assert page.locator("#allocation-composition > span").count() == 3
@@ -108,6 +120,25 @@ def main() -> None:
             assert page.locator("#retirement-metrics").get_by_text("Funded-spending ratio", exact=True).is_visible()
             assert page.locator("#chart-retirement-survival svg").is_visible()
             assert page.locator("#retirement-comparison table").is_visible()
+
+            # A fresh bootstrap bank makes cancellation observable before the
+            # run finishes. Retry reuses the saved request, including CSV data.
+            parameter_draws = page.locator("#parameter-draws")
+            parameter_draws.evaluate("el => { for (let p = el.parentElement; p; p = p.parentElement) if (p.tagName === 'DETAILS') p.open = true; }")
+            parameter_draws.fill("32")
+            page.locator("#run-btn").click()
+            page.locator("#job-cancel:not([disabled])").wait_for(state="visible")
+            cancelled_job = page.evaluate("JSON.parse(localStorage.getItem('mcq-background-job')).id")
+            page.locator("#job-cancel").click()
+            page.locator("#overlay").wait_for(state="hidden", timeout=120_000)
+            assert "cancelled" in page.locator("#run-message").inner_text().lower()
+            page.locator("#job-retry").click()
+            page.locator("#overlay").wait_for(state="hidden", timeout=120_000)
+            assert "recovered" in page.locator("#run-message").inner_text().lower()
+            assert page.evaluate("JSON.parse(localStorage.getItem('mcq-background-job')).id") != cancelled_job
+            assert page.locator("#chart-wealth svg").is_visible()
+            if os.getenv("BROWSER_SCREENSHOT_DIR"):
+                page.screenshot(path=str(destination / "job-recovered.png"))
             assert not browser_errors, f"Browser console errors: {browser_errors}"
 
             page.set_viewport_size({"width": 390, "height": 844})

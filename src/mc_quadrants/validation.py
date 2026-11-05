@@ -15,6 +15,7 @@ from mc_quadrants.mnts import (
 )
 from mc_quadrants.native import native_available, sample_mnts_subordinators_native
 from mc_quadrants.path_validation import score_horizon, summarize_horizons
+from mc_quadrants.progress import report_progress
 from mc_quadrants.regimes import classify_persistent_quadrants
 from mc_quadrants.simulation import simulate_returns
 from mc_quadrants.types import RegimeMoments, SimulationResult
@@ -356,6 +357,7 @@ def walk_forward_validation(
     path_rows: list[dict[str, object]] = []
     skipped_windows = 0
     for split in range(min_train_periods, n, step):
+        report_progress("Validating historical forecasts", (split - min_train_periods) // step, len(range(min_train_periods, n, step)))
         if evaluation_start is not None and aligned_returns.index[split] < pd.Timestamp(evaluation_start):
             continue
         train_cutoff = aligned_returns.index[split - 1]

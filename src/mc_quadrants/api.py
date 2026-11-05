@@ -37,6 +37,7 @@ from mc_quadrants.decumulation import (
 from mc_quadrants.native import native_fused_available
 from mc_quadrants.native_metrics import money_weighted_returns_native
 from mc_quadrants.pipeline import _annual_macro_paths, run_scenario
+from mc_quadrants.progress import progress_scope, report_progress
 from mc_quadrants.regimes import REGIME_ORDER
 from mc_quadrants.return_comparison import build_return_comparison
 from mc_quadrants.simulation import simulate_portfolio_paths
@@ -980,7 +981,9 @@ def scenario_kwargs(payload: Mapping[str, Any]) -> dict[str, Any]:  # Translate 
 def run_scenario_payload(payload: Mapping[str, Any]) -> tuple[Any, list[str], pd.DataFrame]:
     """Load, select, and run a single scenario from a client payload."""
 
+    report_progress("Loading market and macro data")
     macro, returns, tickers, growth_col, inflation_col, _ = load_data_source(payload)
+    report_progress("Preparing simulation inputs")
     selected_tickers = parse_tickers(payload.get("selected_tickers", tickers))
     if not selected_tickers:
         raise ValueError("Select at least one ticker.")
@@ -2002,6 +2005,7 @@ def _simulation_start_date(macro: pd.DataFrame) -> str | None:  # Read the first
 
 def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:  # Run the requested scenario and build its frontend response.
     scenario, selected_tickers, macro = run_scenario_payload(payload)
+    report_progress("Preparing charts and results")
     model = scenario.model
     result = scenario.result
     wealth = scenario.reporting_wealth if scenario.reporting_wealth is not None else scenario.wealth
@@ -2379,6 +2383,22 @@ def build_simulate_response(payload: Mapping[str, Any]) -> dict[str, Any]:  # Ru
     }
 
 
+def build_rebalance_response(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Run the existing four-schedule sensitivity as one recoverable job."""
+    schedules = [("Monthly", "monthly"), ("Quarterly", "quarterly"), ("Annual", "annual"), ("Buy and hold", "buy_hold")]
+    rows = []
+    for index, (label, rebalance) in enumerate(schedules):
+        with progress_scope(f"{label} schedule {index + 1} of {len(schedules)}"):
+            options = {**payload, "rebalance": rebalance,
+                       "cost_bps": 0 if rebalance == "buy_hold" else payload.get("cost_bps", 0),
+                       "paths": min(int(payload.get("paths", 1000)), 1000),
+                       "parameter_draws": 0, "walk_forward": False, "workers": 1}
+            result = build_simulate_response(options)
+            summary = result["summary"]
+            rows.append([label, *[summary[key] for key in ("p50", "annualized_return", "annualized_volatility", "max_drawdown_mean", "sharpe_ratio")]])
+    return {"ok": True, "rows": rows, "currency": result["currency"]}
+
+
 def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     """Solve fixed and guardrail safe rates on one shared set of market paths."""
 
@@ -2461,6 +2481,7 @@ def build_safe_rate_response(payload: Mapping[str, Any]) -> dict[str, Any]:
         evaluated: dict[int, dict[str, Any]] = {}
 
         def evaluate(step: int, *, keep_frame: bool = False) -> dict[str, Any]:  # Evaluate one candidate safe-withdrawal rate.
+            report_progress(f"Testing {policy.replace('_', ' ')} spending rates ({len(evaluated)} evaluated)")
             step = max(0, min(max_step, int(step)))
             if step in evaluated and (not keep_frame or step in recommended_frames):
                 return evaluated[step]

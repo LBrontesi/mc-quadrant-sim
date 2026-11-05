@@ -117,6 +117,12 @@
         <div class="action-bar-status">
           <p id="load-message" class="status inline-status"></p>
           <p id="run-message" class="status inline-status"></p>
+          <div id="job-recovery" class="job-recovery hidden" role="status">
+            <span id="job-recovery-message"></span>
+            <button id="job-reconnect" class="btn" type="button">Reconnect</button>
+            <button id="job-retry" class="btn hidden" type="button">Retry analysis</button>
+            <button id="job-dismiss" class="btn hidden" type="button">Dismiss</button>
+          </div>
         </div>
       </div>
 
@@ -396,7 +402,7 @@
                 <label>Prior strength (months)<input type="number" id="economic-anchor-strength" value="120" min="0" max="1200" step="12"></label>
                 <label>Legacy equity rate sensitivity (years)<input type="number" id="equity-rate-duration" value="4" min="0" max="30" step="0.5"></label>
                 <label>Bond yield column<input type="text" id="economic-yield-column" value="bond_yield"></label>
-                <label>Yield forecasts<select id="economic-yield-model"><option value="adaptive">Persistent forecast combination</option><option value="random_walk">No-change benchmark</option><option value="legacy">Legacy macro mean reversion</option></select></label>
+                <label>Yield forecasts<select id="economic-yield-model"><option value="adaptive">Persistent forecast combination</option><option value="nelson_siegel">Dynamic Nelson–Siegel curve (experimental)</option><option value="random_walk">No-change benchmark</option><option value="legacy">Legacy macro mean reversion</option></select></label>
                 <label>Equity rate response<select id="economic-equity-mode"><option value="surprise">Estimated macro-surprise exposures</option><option value="inflation_gate">Legacy inflation threshold</option></select></label>
                 <label>Macro stress dynamics<select id="economic-macro-stress"><option value="none">Current model</option><option value="persistent">Persistent macro news (experimental)</option><option value="volatility">Conditional macro volatility (experimental)</option><option value="combined">Persistent news and volatility (experimental)</option></select></label>
               </div>
@@ -1027,11 +1033,16 @@
     </main>
   </div>
 
-  <div id="overlay" class="overlay hidden">
+  <div id="overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-labelledby="overlay-text" tabindex="-1">
     <div class="spinner"></div>
     <div id="overlay-text">Working...</div>
-    <div id="overlay-stage" class="overlay-stage">Preparing data and model inputs</div>
+    <div id="overlay-stage" class="overlay-stage" role="status" aria-live="polite">Preparing data and model inputs</div>
+    <progress id="job-progress" class="hidden" aria-label="Current calculation stage"></progress>
     <div id="overlay-elapsed" class="overlay-elapsed">0s elapsed</div>
+    <div id="job-actions" class="job-actions hidden">
+      <button id="job-cancel" class="btn" type="button">Cancel analysis</button>
+      <button id="job-detach" class="btn" type="button">Leave running</button>
+    </div>
   </div>
   <div id="toast-container"></div>
 
