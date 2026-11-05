@@ -203,6 +203,43 @@ def test_rebalancing_job_preserves_schedule_settings_and_pairing(monkeypatch):
     assert result["currency"] == "EUR" and len(result["rows"]) == 4
 
 
+def _assert_parameter_summary_close(actual, expected):
+    """Allow only floating-point roundoff, preserving diagnostic schema and labels."""
+    if isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            _assert_parameter_summary_close(actual[key], expected[key])
+    elif isinstance(expected, list):
+        assert len(actual) == len(expected)
+        for left, right in zip(actual, expected):
+            _assert_parameter_summary_close(left, right)
+    elif isinstance(expected, float):
+        assert actual == pytest.approx(expected, rel=1e-12, abs=1e-14)
+    else:
+        assert actual == expected
+
+
+def _assert_job_response_equal(actual, expected):
+    actual, expected = dict(actual), dict(expected)
+    # Cached model copies can change the last bits of BLAS reductions in the
+    # parameter diagnostics on Linux. Paths, risk results and other metadata
+    # still have to match exactly; progress must not alter simulation output.
+    _assert_parameter_summary_close(actual.pop("parameter_uncertainty"), expected.pop("parameter_uncertainty"))
+    assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
+
+
+def test_job_response_comparison_only_tolerates_diagnostic_roundoff():
+    expected = {"parameter_uncertainty": {"rows": [[0, 0.01]], "columns": ["draw", "return"]}, "wealth": [100.0]}
+    rounded = {**expected, "parameter_uncertainty": {**expected["parameter_uncertainty"], "rows": [[0, 0.01 + 1e-17]]}}
+    _assert_job_response_equal(rounded, expected)
+    with pytest.raises(AssertionError):
+        _assert_job_response_equal({**rounded, "wealth": [100.0 + 1e-10]}, expected)
+    with pytest.raises(AssertionError):
+        _assert_job_response_equal({**expected, "parameter_uncertainty": {**expected["parameter_uncertainty"], "rows": [[0, 0.010001]]}}, expected)
+    with pytest.raises(AssertionError):
+        _assert_job_response_equal({**expected, "parameter_uncertainty": {}}, expected)
+
+
 def test_real_api_job_matches_synchronous_seeded_result(tmp_path):
     from test_api import _csv_payload
 
@@ -213,13 +250,13 @@ def test_real_api_job_matches_synchronous_seeded_result(tmp_path):
     stages = []
     with progress_context(stages.append, lambda: False):
         actual = build_simulate_response(payload)
-    assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
+    _assert_job_response_equal(actual, expected)
     assert any("Simulating" in p["stage"] for p in stages)
     assert stages[-1]["stage"] == "Preparing charts and results"
     store = JobStore(tmp_path, {"simulate": build_simulate_response}, threading.BoundedSemaphore(1))
     job = store.submit("simulate", payload)
     assert finished(store, job["id"])["status"] == "completed"
-    assert store.result(job["id"])["result"] == json.loads(json.dumps(expected))
+    _assert_job_response_equal(store.result(job["id"])["result"], json.loads(json.dumps(expected)))
 
 
 def test_http_job_submission_disconnect_poll_result_and_cancel(tmp_path, monkeypatch):
